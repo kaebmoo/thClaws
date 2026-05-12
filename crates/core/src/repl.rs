@@ -6343,9 +6343,10 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             PermissionMode::Auto => "auto",
                             PermissionMode::Ask => "ask",
                             PermissionMode::Plan => "plan",
+                            PermissionMode::LineGated => "linegated",
                         };
                         println!(
-                            "{COLOR_DIM}permissions: {label} (auto = never prompt, ask = prompt on mutating tools, plan = read-only exploration){COLOR_RESET}"
+                            "{COLOR_DIM}permissions: {label} (auto = never prompt, ask = prompt on mutating tools, plan = read-only exploration, linegated = prompt routed to LINE chat){COLOR_RESET}"
                         );
                     } else {
                         match mode.as_str() {

@@ -1417,9 +1417,11 @@ impl Agent {
                         continue;
                     }
 
-                    // Approval gate.
-                    let needs_approval = matches!(permission_mode, PermissionMode::Ask)
-                        && tool.requires_approval(input);
+                    // Approval gate. `asks_for_approval()` covers
+                    // both `Ask` (local prompt) and `LineGated`
+                    // (plan-07 Phase 1.2 — prompt routed to LINE).
+                    let needs_approval =
+                        permission_mode.asks_for_approval() && tool.requires_approval(input);
                     if needs_approval {
                         let req = ApprovalRequest {
                             tool_name: name.clone(),
