@@ -1330,8 +1330,9 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                                 // can route (catalogue stores OpenRouter
                                 // ids without the `openrouter/` prefix).
                                 let canonical = match kind {
-                                    Some(k) if crate::providers::ProviderKind::detect(id)
-                                        != Some(k) =>
+                                    Some(k)
+                                        if crate::providers::ProviderKind::detect(id)
+                                            != Some(k) =>
                                     {
                                         format!("{provider}/{id}")
                                     }

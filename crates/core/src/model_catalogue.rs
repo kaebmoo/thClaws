@@ -462,10 +462,7 @@ impl EffectiveCatalogue {
                             context: e.context.or(baseline.context),
                             max_output: e.max_output.or(baseline.max_output),
                             source: e.source.clone().or(baseline.source),
-                            verified_at: e
-                                .verified_at
-                                .clone()
-                                .or(baseline.verified_at),
+                            verified_at: e.verified_at.clone().or(baseline.verified_at),
                             free: e.free.or(baseline.free),
                             chat: e.chat.or(baseline.chat),
                         },

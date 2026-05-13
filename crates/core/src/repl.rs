@@ -3137,15 +3137,14 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             // var fallback — if the user hasn't run `codex login` yet,
             // we error with a clear hint.
             let profile = "default";
-            let auth = crate::codex_auth_store::resolve_for_profile(profile)?
-                .ok_or_else(|| {
-                    Error::Config(
-                        "no ChatGPT/Codex auth found — run `codex login` (Codex CLI) \
+            let auth = crate::codex_auth_store::resolve_for_profile(profile)?.ok_or_else(|| {
+                Error::Config(
+                    "no ChatGPT/Codex auth found — run `codex login` (Codex CLI) \
                          to create ~/.codex/auth.json, or save your own \
                          ~/.config/thclaws/auth/default.json"
-                            .to_string(),
-                    )
-                })?;
+                        .to_string(),
+                )
+            })?;
             // The base URL is fixed — chatgpt.com/backend-api/codex/responses
             // is undocumented and locked to match themion's known-good
             // wire shape. Token refresh isn't implemented yet (v1 patch);

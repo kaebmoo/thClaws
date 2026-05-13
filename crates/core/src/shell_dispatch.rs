@@ -348,8 +348,7 @@ pub async fn dispatch(
             // `free: true` (zero prompt + zero completion price). Only
             // OpenRouter ships the `free` flag — every other provider
             // is unaffected.
-            let free_only =
-                provider_name == "openrouter" && state.config.openrouter_free_only;
+            let free_only = provider_name == "openrouter" && state.config.openrouter_free_only;
             if free_only {
                 rows.retain(|(_, e)| e.free == Some(true));
             }
@@ -477,8 +476,9 @@ pub async fn dispatch(
                                 // shipping. React strips the prefix for
                                 // display (see ModelPickerModal).
                                 let canonical = match kind {
-                                    Some(k) if crate::providers::ProviderKind::detect(id)
-                                        != Some(k) =>
+                                    Some(k)
+                                        if crate::providers::ProviderKind::detect(id)
+                                            != Some(k) =>
                                     {
                                         format!("{prov}/{id}")
                                     }
