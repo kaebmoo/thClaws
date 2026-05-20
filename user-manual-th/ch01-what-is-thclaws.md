@@ -145,8 +145,7 @@ registry ชุดเดียวกัน — ห้า surface แรกสำ
   ในชื่อของคุณ — จะถูก *Company จ้าง* (เป็น employee / freelancer ผ่าน
   [บทที่ 22](ch22-paperclip-adapter.md)) หรือยืนเดี่ยวรับงานเองก็ได้
   flow การ deploy มาในรูป plugin host จึงสลับเปลี่ยนได้ ไม่มีการล็อก
-  client (Agentic Press Hosting ที่ร่วมมือกับ SIS Cloud Service และ
-  Artech.Cloud อยู่ระหว่างเตรียมเปิด)
+  client
 - **Shell escape** — ใส่ `!` นำหน้าบรรทัดใน REPL เพื่อรันคำสั่ง shell
   โดยตรง ไม่เสีย token ไม่มี prompt ขออนุมัติ (เช่น `! git status`)
 

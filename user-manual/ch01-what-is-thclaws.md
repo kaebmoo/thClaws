@@ -226,9 +226,7 @@ software hire thClaws to do work:
   employee or freelancer via [Chapter 22](ch22-paperclip-adapter.md))
   or standing alone to take work directly. The deploy flow ships as a
   plugin (`/plugin install …-deploy`) so hosts are swappable — the
-  client never locks you in. (Agentic Press Hosting, our partnership
-  with SIS Cloud Service and Artech.Cloud, is staged for a later
-  release.)
+  client never locks you in.
 - **Shell escape.** Prefix any REPL line with `!` to run the rest as a
   shell command directly in your terminal — no tokens, no approval
   prompt, no agent round-trip (e.g. `! git status`).
