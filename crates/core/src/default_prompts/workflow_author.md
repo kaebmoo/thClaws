@@ -12,35 +12,76 @@ the `thclaws.*` host bindings listed below.
 ```js
 thclaws.subagent({
   prompt: string,           // required — what the worker should do
-  schema?: object,          // Tier 2: JSON Schema for output validation
-  budget?: object,          // Tier 2: { tokens, time }
-  retry?: object,           // Tier 2: { max, backoff }
+  budget?: {                // Stages G + I: both enforced
+    time?: number | string, //   number = seconds; "60s" / "2m" / "1m30s" / "500ms"
+    tokens?: number,        //   input + output cap per worker call
+  },
+  schema?: object,          // Stage H: JSON Schema; on success the call returns
+                            //   the parsed value (not text). Worker prompt gets
+                            //   "return ONLY JSON matching this schema" suffix.
+  retry?: number | {        // Stage H: bare number = `{max: N}`. Retries on
+    max: number,            //   hard errors AND schema/parse failures.
+    backoff?: string,       //   "exponential" (default, 1s → 2s → 4s …, cap 30s)
+                            //   "linear" (1s → 2s → 3s …)
+                            //   duration like "500ms" (fixed delay each time)
+  },
+  caps?: {                  // Stage M: explicit grants for the worker
+    kms?: {                 //   default = DENY — workers can't write to KMS
+      write?: string[],     //   unless the name appears here.
+    },                      //   Per-call; not transitive — a worker's own
+  },                        //   sub-calls don't inherit these grants.
   model?: string,           // optional model override (default: session model)
-}) → string                 // worker's final assistant text
-                            // (or parsed JSON if schema was given)
+}) → string | parsed_value
 ```
 
-**`thclaws.subagent` is synchronous in Tier 1.** It returns the
-worker's final text directly — there is no Promise wrapping it.
-Do NOT write `await thclaws.subagent(...)` — top-level await is not
-supported in the current sandbox (Boa Script mode); the call returns
-a string, and `await` on a non-Promise value will fail with a
-SyntaxError before your script ever starts. Real async / `Promise.all`
-parallelism lands in Tier 2 alongside Module-mode execution.
+When a worker exceeds its `time` budget the call throws. When `retry`
+is set, every retry attempt is logged to `state.jsonl` as a
+`worker_retry` event so post-mortem inspection sees the journey.
+Wrap in `try`/`catch` if you want graceful failure handling.
+
+### Schema example
+
+```js
+const r = thclaws.subagent({
+  prompt: "List the top 3 issues from the inbox.",
+  schema: {
+    type: "object",
+    required: ["issues"],
+    properties: {
+      issues: {
+        type: "array",
+        items: {
+          type: "object",
+          required: ["id", "title"],
+          properties: { id: {type: "string"}, title: {type: "string"} }
+        }
+      }
+    }
+  },
+  retry: 3
+});
+// r is the parsed object — r.issues is an array, walk it directly.
+r.issues.map(i => `${i.id}: ${i.title}`).join("\n");
+```
+
+**Async syntax is supported.** Scripts that use `await` /
+`async` / `Promise.all` route through Boa Module mode so top-level
+await parses correctly. Note that Tier 2 still runs `thclaws.subagent`
+synchronously internally — so `Promise.all([...subagent calls...])`
+resolves but executes in source order (one worker at a time).
+Genuine parallelism (tokio JobExecutor) is Stage J.2 / Tier 3.
 
 You may **NOT** use:
-- `await`, `async` functions (top-level await unsupported in Tier 1)
-- `Promise.all` and Promise APIs in general (Tier 2)
 - `eval`, `Function` (stripped from the sandbox; will throw)
 - `fetch`, `XMLHttpRequest`, `require` (don't exist)
 - `process`, `globalThis.fs`, any `import` (don't exist)
-- `console.log` (no-op for now — return your final value as the
-  script's last expression)
+- `console.log` (no-op — return your final value as the script's
+  last expression OR assign to `globalThis.__wf_result`)
 
 JavaScript control flow that IS available: `for`, `while`,
-`if`/`else`, `try`/`catch`, destructuring, array methods, template
-literals, regex, JSON parsing, basic string / number / Array / Object
-operations. Plenty for orchestrating sequential fan-out.
+`if`/`else`, `try`/`catch`, `await`, `async` functions, `Promise.all`,
+destructuring, array methods, template literals, regex, JSON parsing,
+basic string / number / Array / Object operations.
 
 # What to produce
 
@@ -64,15 +105,17 @@ User goal: "give me a one-line summary of every .rs file under src/"
 
 ```js
 // Workflow: per-file one-line summaries of src/**/*.rs
-const list = thclaws.subagent({
+const list = await thclaws.subagent({
   prompt: "List every .rs file under src/, recursively. Return only " +
           "paths, one per line, no other text."
 });
 const paths = list.split("\n").map(p => p.trim()).filter(Boolean);
 
-const summaries = paths.map(path => thclaws.subagent({
-  prompt: `Read ${path} and write ONE sentence describing what it does.`
-}));
+const summaries = await Promise.all(
+  paths.map(path => thclaws.subagent({
+    prompt: `Read ${path} and write ONE sentence describing what it does.`
+  }))
+);
 
 paths.map((p, i) => `${p} — ${summaries[i]}`).join("\n");
 ```
@@ -85,16 +128,16 @@ User goal: "translate kms-bug pages 1, 2, 3 from EN to TH"
 // Workflow: translate three kms-bug pages EN → TH
 const pages = ["1", "2", "3"];
 
-const out = pages.map(n => {
-  const en = thclaws.subagent({
+const out = await Promise.all(pages.map(async (n) => {
+  const en = await thclaws.subagent({
     prompt: `Read kms-bug page ${n}, return only the page body.`
   });
-  const th = thclaws.subagent({
+  const th = await thclaws.subagent({
     prompt: `Translate the following from English to formal Thai. ` +
             `Preserve markdown structure.\n\n${en}`
   });
   return { n, th };
-});
+}));
 
 out.map(p => `Page ${p.n}:\n${p.th}`).join("\n\n---\n\n");
 ```

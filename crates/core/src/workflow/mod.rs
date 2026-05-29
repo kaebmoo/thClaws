@@ -19,10 +19,26 @@
 //!   statement; `--resume` is Tier 2.
 //! - Stage E — REPL worker grid + `ch25-workflows.md`.
 
+pub mod approval;
+pub mod headless;
+mod inspect;
 mod runtime;
 mod script;
 mod state;
 
-pub(crate) use runtime::{set_task_tool, WorkflowSandbox};
+pub use approval::{parse_chat_decision, WorkflowApprover, WorkflowDecision};
+
+pub(crate) use inspect::{
+    delete_workflow, list_workflows, read_completed_workers, read_events, read_workflow_script,
+    resolve_id_prefix, write_workflow_script,
+};
+pub use runtime::check_kms_write_capability;
+pub(crate) use runtime::{
+    push_worker_usage, replay_remaining, set_replay_cache, set_task_tool, set_usage_sink,
+    take_all_usages, WorkflowSandbox,
+};
+
+#[cfg(feature = "gui")]
+pub(crate) use runtime::{set_cancel, set_events_tx, WORKFLOW_CANCELLED_MSG};
 pub(crate) use script::author;
 pub(crate) use state::{generate_workflow_id, set_logger, LoggerHandle, WorkflowLogger};

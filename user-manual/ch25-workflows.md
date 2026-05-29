@@ -76,54 +76,84 @@ fields:
 ```js
 thclaws.subagent({
   prompt: string,           // required — the worker's task
-  // schema?, budget?, retry?, model? — Tier 2; ignored in Tier 1
-}) → string                 // worker's final assistant text
+  budget?: {                // Stages G + I: both enforced
+    time?: number | string, //   "60s" / "2m" / "1m30s" / 60 (seconds)
+    tokens?: number,        //   input + output cap per worker call
+  },
+  schema?: object,          // Stage H: JSON Schema. Worker is asked for JSON
+                            //   matching the schema; on success the call
+                            //   returns the parsed value (not text).
+  retry?: number | {        // Stage H: retries on hard errors + schema misses
+    max: number,
+    backoff?: string,       //   "exponential" / "linear" / "500ms" / etc.
+  },
+  caps?: {                  // Stage M: explicit grants — default DENY for KMS writes
+    kms?: { write?: string[] },
+  },
+  // model? — Stage L
+}) → string | parsed_value
 ```
 
-That's it for Tier 1. Workers inherit the parent session's provider,
+**`caps.kms.write` controls what a worker can write.** Outside a
+workflow run KMS write tools work as before. Inside `/workflow run`,
+workers default to **deny** for all KMS writes; the script must
+pass `caps: { kms: { write: ["scratch", "audit-log"] } }` to grant
+write access to specific KMS names for that single call. Grants are
+audited as `worker_caps` events in state.jsonl, and they are NOT
+transitive — a worker's own model-driven Task spawns get fresh
+(empty) caps unless re-granted explicitly.
+
+Time budget triggers `tokio::time::timeout`; exceeding it throws.
+Schema validation runs after each attempt — if the worker's text isn't
+parsable JSON or doesn't match the schema, the call retries up to
+`retry.max` with the chosen `backoff`. Every retry is logged as a
+`worker_retry` event so `/workflow inspect <id>` shows the journey. Workers inherit the parent session's provider,
 model, system prompt, tool registry, memory, KMS, and permission mode
 — so a worker can `Bash`, `Read`, `Edit`, search KMS, use MCP servers,
 etc. Subagent recursion (a worker calling Task itself) is bounded by
 the same `DEFAULT_MAX_DEPTH = 3` ceiling sub-agents already honour.
 
-**`thclaws.subagent` is synchronous in Tier 1** — it returns the
-worker's text directly, no Promise. Don't write `await
-thclaws.subagent(...)`; the sandbox runs Boa in Script mode, where
-top-level `await` is a syntax error. Real async + `Promise.all`
-parallelism lands in Tier 2 with Module-mode execution.
+**Async syntax works** — scripts that use `await` / `async` /
+`Promise.all` route through Boa Module mode. `thclaws.subagent` is
+still synchronous internally in Stage J MVP, so `Promise.all([...])`
+resolves correctly but workers execute in source order (one at a
+time). Genuine parallelism via tokio JobExecutor is Stage J.2.
 
 ### What you can write in the script
 
-Vanilla JS control flow: `for`, `while`, `if`/`else`, `try`/`catch`,
-destructuring, template literals, `Array` and `String` methods, regex,
-JSON parsing.
+JS control flow: `for`, `while`, `if`/`else`, `try`/`catch`, `await`,
+`async` functions, `Promise.all`, destructuring, template literals,
+`Array` and `String` methods, regex, JSON parsing.
 
 ### What you can't write
 
-- `await`, `async` functions, `Promise.*` (Tier 2)
 - `eval`, `Function` (stripped from the sandbox)
 - `fetch`, `require`, `process`, DOM, `console.log`
 
 Anything I/O-flavoured must go through a subagent.
 
-### A two-line example
+### A short example
 
 ```js
 // Workflow: list .rs files, summarise each
-const list = thclaws.subagent({
+const list = await thclaws.subagent({
   prompt: "List every .rs file under src/, recursively. Paths only."
 });
 const paths = list.split("\n").map(s => s.trim()).filter(Boolean);
 
-const summaries = paths.map(p => thclaws.subagent({
-  prompt: `Read ${p} and write ONE sentence describing what it does.`
-}));
+const summaries = await Promise.all(
+  paths.map(p => thclaws.subagent({
+    prompt: `Read ${p} and write ONE sentence describing what it does.`
+  }))
+);
 
 paths.map((p, i) => `${p} — ${summaries[i]}`).join("\n");
 ```
 
-The script's **final expression** is what becomes the assistant's
-output — here the joined list.
+For sync scripts the **last expression** is the result. For async
+scripts (which run in Module mode) the result is the last expression
+the auto-wrapper finds, OR an explicit `globalThis.__wf_result = …`
+assignment, OR `undefined` if neither.
 
 ## State on disk
 
@@ -145,9 +175,25 @@ file in a recoverable shape. Event shapes:
 ```
 
 You can `cat`, `grep`, or `jq` the file at any time — it's plain
-JSONL, never opaque. Tier 2 will add `/workflow list`, `/workflow
-inspect <id>`, and `/workflow rm <id>` so you don't have to navigate
-to the directory yourself.
+JSONL, never opaque. The companion `script.js` (the approved JS) is
+written next to it at start, so `/workflow resume <id>` can replay
+against the same source.
+
+Slash commands for managing runs (all REPL-only in Tier 2):
+
+```text
+/workflow list             one line per run on disk, newest first
+/workflow inspect <id>     dump state.jsonl events in human form
+/workflow resume <id>      re-run, replaying completed workers from
+                           the cache; fresh spawns continue numbering
+/workflow rm <id>          y/N confirm + remove the workflow dir
+```
+
+`resume` is keyed by **prompt match** at each `thclaws.subagent`
+call. A cached entry is consumed only when its prompt equals the
+current call's prompt; mismatches fall through to fresh spawn (the
+script may have been edited or paths changed). Any cached entries
+left over at script end are reported as "diverged" so you know.
 
 If `.thclaws/` can't be written (read-only volume, permissions), the
 workflow runs anyway and prints:
@@ -163,31 +209,40 @@ produces a script that needs your review before execution; `-p` mode
 has no surface for that review and default-approving an arbitrary
 script is dangerous.
 
-A pre-authored script can run headless via `thclaws --workflow
-<file.js>` — that's Tier 2 (it needs the file-input plumbing and the
-`--resume` machinery), so for now keep workflows in interactive REPL
-mode.
+Pre-authored scripts run headless via `thclaws --workflow <file.js>`
+(Stage L). The author phase is skipped entirely — the file is
+operator-vetted. Useful for CI, cron jobs (chapter 19), and
+dev-plan/28 deploy hooks.
+
+```sh
+# Fresh run:
+thclaws --workflow ./scripts/audit-crates.js
+
+# Resume a previous workflow id (or unique prefix):
+thclaws --workflow ./scripts/audit-crates.js --resume wf-18b3fa
+
+# stdout = script's final value; stderr = id + done summary.
+# Pipe stdout to jq, redirect to file, etc.:
+thclaws --workflow ./scripts/audit-crates.js > result.txt
+```
+
+Exit code is 0 on success, 1 on script failure. Headless mode auto-
+approves every subagent tool call (same as
+`--dangerously-skip-permissions` — the operator vetted the script).
 
 ## What's missing in Tier 1
 
 These are documented gaps, not bugs — they land in Tier 2 / 3 per
 [dev-plan/32](../dev-plan/32-dynamic-workflows.md) (workspace-only):
 
-- **Synchronous subagent calls; no `await` or `Promise`.** Boa runs
-  scripts in Script mode where top-level `await` is a syntax error, so
-  `thclaws.subagent(...)` is exposed as a synchronous function that
-  returns the worker's text directly. Calls fan out sequentially in
-  source order — wall-clock time is the sum of subagent latencies, not
-  the max. Tier 2 ships Module mode + a tokio-integrated job executor
-  so `await`, `async`, and `Promise.all` come back with genuine
-  parallelism behind them; until then, write workflows assuming serial.
-- **No schema validation.** The `schema:` option is accepted but
-  ignored. Workers return free-form text. Tier 2 wires `jsonschema`
-  validation + auto-retry on shape failure.
-- **No `--resume`.** The state.jsonl log is written but not read back
-  yet. A crash partway through a 200-worker run currently means
-  starting over. Tier 2 implements log-replay resume with call-site
-  matching so already-completed workers aren't re-spawned.
+- **`Promise.all` resolves but doesn't truly parallelise (Stage J MVP).**
+  Boa now runs scripts that use `await` / `Promise.all` in Module mode,
+  so the syntax parses and `await thclaws.subagent(...)` returns the
+  worker's text. But the host function still blocks the JS thread
+  per-call, so each subagent call inside `Promise.all` runs
+  sequentially. Wall-clock = sum of latencies, not max. Stage J.2 will
+  add a tokio-integrated JobExecutor so workers genuinely run in
+  parallel.
 - **No budget caps.** Per-worker `budget: { tokens, time }` is
   ignored. Tier 2 enforces both.
 - **No verification phase.** `thclaws.verify({...})` doesn't exist
@@ -208,8 +263,9 @@ Two practical guardrails:
   unbounded ("every file"), have a *discovery* subagent return the
   list first so you see the cardinality before approving the script.
 - **Watch the close-out summary.** `workflow done — N workers, total
-  Xm Ys` tells you how much you spent on wall time; Tier 2 will add a
-  rolled-up token + dollar figure to that line.
+  Xs, In tokens / Out tokens (≈$Y.YY)` is printed after every
+  `/workflow run`. Tier-billed or unknown models show `(cost unknown)`
+  instead of a number.
 
 ## Quick reference
 

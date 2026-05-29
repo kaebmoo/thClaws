@@ -45,6 +45,13 @@ impl WorkflowLogger {
         self.next_worker
     }
 
+    /// Stage K: seed the worker counter when opening a logger for a
+    /// resumed run, so new worker_start events continue the numbering
+    /// past the workers that already exist in state.jsonl.
+    pub fn set_next_worker_id(&mut self, next: u32) {
+        self.next_worker = next;
+    }
+
     pub fn start(&mut self, prompt: &str, script: &str) -> std::io::Result<()> {
         self.write_event(json!({
             "ts": now_iso(),
@@ -89,6 +96,39 @@ impl WorkflowLogger {
             "id": &self.id,
             "worker": format!("w{worker_id}"),
             "error": err,
+        }))
+    }
+
+    /// Stage H: a worker attempt failed (hard error or schema
+    /// violation) and the runtime is about to retry. The terminal
+    /// `worker_done` / `worker_error` event still fires once the
+    /// retries settle.
+    pub fn worker_retry(
+        &mut self,
+        worker_id: u32,
+        attempt: u32,
+        prior_error: &str,
+    ) -> std::io::Result<()> {
+        self.write_event(json!({
+            "ts": now_iso(),
+            "kind": "worker_retry",
+            "id": &self.id,
+            "worker": format!("w{worker_id}"),
+            "attempt": attempt,
+            "prior_error": prior_error,
+        }))
+    }
+
+    /// Stage M: script granted the worker explicit KMS write access.
+    /// Only emitted when the grant is non-empty so default workflows
+    /// (no grants, KMS writes denied) stay quiet in the log.
+    pub fn worker_caps(&mut self, worker_id: u32, kms_write: &[String]) -> std::io::Result<()> {
+        self.write_event(json!({
+            "ts": now_iso(),
+            "kind": "worker_caps",
+            "id": &self.id,
+            "worker": format!("w{worker_id}"),
+            "kms_write": kms_write,
         }))
     }
 
