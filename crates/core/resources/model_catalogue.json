@@ -388,16 +388,6 @@
           "input_per_mtok": 1.6,
           "output_per_mtok": 6.4
         },
-        "dashscope/qwen-max-2025-01-25": {
-          "context": 131072,
-          "source": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-05-13"
-        },
-        "dashscope/qwen-max-latest": {
-          "context": 131072,
-          "source": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-05-13"
-        },
         "dashscope/qwen-mt-flash": {
           "context": 131072,
           "source": "https://dashscope.aliyuncs.com/compatible-mode/v1/models",
@@ -478,43 +468,7 @@
           "input_per_mtok": 0.05,
           "output_per_mtok": 0.2
         },
-        "dashscope/qwen-turbo-2024-11-01": {
-          "context": 131072,
-          "source": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models (context unverified) + litellm:dashscope/qwen-turbo-2024-11-01",
-          "verified_at": "2026-05-19",
-          "input_per_mtok": 0.05,
-          "output_per_mtok": 0.2
-        },
-        "dashscope/qwen-turbo-2025-04-28": {
-          "context": 131072,
-          "source": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models (context unverified) + litellm:dashscope/qwen-turbo-2025-04-28",
-          "verified_at": "2026-05-19",
-          "input_per_mtok": 0.05,
-          "output_per_mtok": 0.2
-        },
-        "dashscope/qwen-turbo-latest": {
-          "context": 131072,
-          "source": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models (context unverified) + litellm:dashscope/qwen-turbo-latest",
-          "verified_at": "2026-05-19",
-          "input_per_mtok": 0.05,
-          "output_per_mtok": 0.2
-        },
         "dashscope/qwen-vl-max": {
-          "context": 131072,
-          "source": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-05-13"
-        },
-        "dashscope/qwen-vl-max-2025-04-08": {
-          "context": 131072,
-          "source": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-05-13"
-        },
-        "dashscope/qwen-vl-max-2025-08-13": {
-          "context": 131072,
-          "source": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-05-13"
-        },
-        "dashscope/qwen-vl-max-latest": {
           "context": 131072,
           "source": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models (context unverified)",
           "verified_at": "2026-05-13"
@@ -529,67 +483,7 @@
           "source": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models (context unverified)",
           "verified_at": "2026-05-13"
         },
-        "dashscope/qwen-vl-plus-2025-01-25": {
-          "context": 131072,
-          "source": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-05-13"
-        },
-        "dashscope/qwen-vl-plus-2025-05-07": {
-          "context": 131072,
-          "source": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-05-13"
-        },
-        "dashscope/qwen-vl-plus-latest": {
-          "context": 131072,
-          "source": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-05-13"
-        },
         "dashscope/qwen2-7b-instruct": {
-          "context": 131072,
-          "source": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-05-13"
-        },
-        "dashscope/qwen2.5-14b-instruct": {
-          "context": 131072,
-          "source": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-05-13"
-        },
-        "dashscope/qwen2.5-14b-instruct-1m": {
-          "context": 131072,
-          "source": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-05-13"
-        },
-        "dashscope/qwen2.5-32b-instruct": {
-          "context": 131072,
-          "source": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-05-13"
-        },
-        "dashscope/qwen2.5-72b-instruct": {
-          "context": 131072,
-          "source": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-05-13"
-        },
-        "dashscope/qwen2.5-7b-instruct": {
-          "context": 131072,
-          "source": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-05-13"
-        },
-        "dashscope/qwen2.5-7b-instruct-1m": {
-          "context": 131072,
-          "source": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-05-13"
-        },
-        "dashscope/qwen2.5-vl-32b-instruct": {
-          "context": 131072,
-          "source": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-05-13"
-        },
-        "dashscope/qwen3-0.6b": {
-          "context": 131072,
-          "source": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-05-13"
-        },
-        "dashscope/qwen3-1.7b": {
           "context": 131072,
           "source": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models (context unverified)",
           "verified_at": "2026-05-13"
@@ -630,11 +524,6 @@
           "verified_at": "2026-05-13"
         },
         "dashscope/qwen3-32b": {
-          "context": 131072,
-          "source": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-05-13"
-        },
-        "dashscope/qwen3-4b": {
           "context": 131072,
           "source": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models (context unverified)",
           "verified_at": "2026-05-13"
@@ -1008,385 +897,6 @@
           "context": 131072,
           "source": "https://dashscope.aliyuncs.com/compatible-mode/v1/models",
           "verified_at": "2026-06-02"
-        },
-        "qwen-flash": {
-          "context": 995904,
-          "max_output": 32768,
-          "source": "https://help.aliyun.com/zh/model-studio/developer-reference/what-is-qwen-llm",
-          "verified_at": "2026-04-24"
-        },
-        "qwen-max": {
-          "context": 32768,
-          "max_output": 8192,
-          "source": "https://help.aliyun.com/zh/model-studio/developer-reference/what-is-qwen-llm + litellm:dashscope/qwen-max",
-          "verified_at": "2026-05-19",
-          "input_per_mtok": 1.6,
-          "output_per_mtok": 6.4
-        },
-        "qwen-max-latest": {
-          "context": 131072,
-          "source": "https://help.aliyun.com/zh/model-studio/developer-reference/what-is-qwen-llm",
-          "verified_at": "2026-04-24"
-        },
-        "qwen-plus": {
-          "context": 1000000,
-          "max_output": 32768,
-          "source": "https://help.aliyun.com/zh/model-studio/developer-reference/what-is-qwen-llm + litellm:dashscope/qwen-plus",
-          "verified_at": "2026-05-19",
-          "input_per_mtok": 0.4,
-          "output_per_mtok": 1.2
-        },
-        "qwen-plus-2025-01-25": {
-          "context": 129024,
-          "max_output": 8192,
-          "source": "https://www.alibabacloud.com/help/en/model-studio/models + litellm:dashscope/qwen-plus-2025-01-25",
-          "verified_at": "2026-05-19",
-          "input_per_mtok": 0.4,
-          "output_per_mtok": 1.2
-        },
-        "qwen-plus-2025-04-28": {
-          "context": 131072,
-          "max_output": 16384,
-          "source": "https://www.alibabacloud.com/help/en/model-studio/models + litellm:dashscope/qwen-plus-2025-04-28",
-          "verified_at": "2026-05-19",
-          "input_per_mtok": 0.4,
-          "output_per_mtok": 1.2
-        },
-        "qwen-plus-2025-07-14": {
-          "context": 131072,
-          "max_output": 16384,
-          "source": "https://www.alibabacloud.com/help/en/model-studio/models + litellm:dashscope/qwen-plus-2025-07-14",
-          "verified_at": "2026-05-19",
-          "input_per_mtok": 0.4,
-          "output_per_mtok": 1.2
-        },
-        "qwen-plus-2025-09-11": {
-          "context": 131072,
-          "max_output": 16384,
-          "source": "https://www.alibabacloud.com/help/en/model-studio/models",
-          "verified_at": "2026-04-24"
-        },
-        "qwen-plus-2025-12-01": {
-          "context": 1000000,
-          "max_output": 32768,
-          "source": "https://help.aliyun.com/zh/model-studio/developer-reference/what-is-qwen-llm",
-          "verified_at": "2026-04-24"
-        },
-        "qwen-plus-latest": {
-          "context": 1000000,
-          "max_output": 32768,
-          "source": "https://www.alibabacloud.com/help/en/model-studio/models",
-          "verified_at": "2026-04-24"
-        },
-        "qwen-turbo": {
-          "context": 131072,
-          "max_output": 16384,
-          "source": "https://help.aliyun.com/zh/model-studio/developer-reference/what-is-qwen-llm + litellm:dashscope/qwen-turbo",
-          "verified_at": "2026-05-19",
-          "input_per_mtok": 0.05,
-          "output_per_mtok": 0.2
-        },
-        "qwen-turbo-2024-11-01": {
-          "context": 1000000,
-          "max_output": 8192,
-          "source": "https://www.alibabacloud.com/help/en/model-studio/models + litellm:dashscope/qwen-turbo-2024-11-01",
-          "verified_at": "2026-05-19",
-          "input_per_mtok": 0.05,
-          "output_per_mtok": 0.2
-        },
-        "qwen-turbo-2025-04-28": {
-          "context": 1000000,
-          "max_output": 16384,
-          "source": "https://www.alibabacloud.com/help/en/model-studio/models + litellm:dashscope/qwen-turbo-2025-04-28",
-          "verified_at": "2026-05-19",
-          "input_per_mtok": 0.05,
-          "output_per_mtok": 0.2
-        },
-        "qwen-turbo-latest": {
-          "context": 1000000,
-          "max_output": 16384,
-          "source": "https://www.alibabacloud.com/help/en/model-studio/models + litellm:dashscope/qwen-turbo-latest",
-          "verified_at": "2026-05-19",
-          "input_per_mtok": 0.05,
-          "output_per_mtok": 0.2
-        },
-        "qwen2-7b-instruct": {
-          "context": 32768,
-          "source": "https://huggingface.co/Qwen/Qwen2-7B-Instruct",
-          "verified_at": "2026-04-24"
-        },
-        "qwen2.5-14b-instruct": {
-          "context": 131072,
-          "max_output": 8192,
-          "source": "https://qwenlm.github.io/blog/qwen2.5-llm/",
-          "verified_at": "2026-04-24"
-        },
-        "qwen2.5-14b-instruct-1m": {
-          "context": 1010000,
-          "max_output": 8192,
-          "source": "https://huggingface.co/Qwen/Qwen2.5-14B-Instruct-1M",
-          "verified_at": "2026-04-24"
-        },
-        "qwen2.5-32b-instruct": {
-          "context": 131072,
-          "max_output": 8192,
-          "source": "https://qwenlm.github.io/blog/qwen2.5-llm/",
-          "verified_at": "2026-04-24"
-        },
-        "qwen2.5-72b-instruct": {
-          "context": 131072,
-          "max_output": 8192,
-          "source": "https://qwenlm.github.io/blog/qwen2.5-llm/",
-          "verified_at": "2026-04-24"
-        },
-        "qwen2.5-7b-instruct": {
-          "context": 131072,
-          "max_output": 8192,
-          "source": "https://qwenlm.github.io/blog/qwen2.5-llm/",
-          "verified_at": "2026-04-24"
-        },
-        "qwen2.5-7b-instruct-1m": {
-          "context": 1010000,
-          "max_output": 8192,
-          "source": "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-1M",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3-0.6b": {
-          "context": 32768,
-          "source": "https://qwenlm.github.io/blog/qwen3/",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3-1.7b": {
-          "context": 32768,
-          "source": "https://qwenlm.github.io/blog/qwen3/",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3-14b": {
-          "context": 131072,
-          "source": "https://qwenlm.github.io/blog/qwen3/",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3-235b-a22b": {
-          "context": 131072,
-          "source": "https://qwenlm.github.io/blog/qwen3/",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3-235b-a22b-instruct-2507": {
-          "context": 262144,
-          "source": "https://huggingface.co/Qwen/Qwen3-235B-A22B-Instruct-2507",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3-235b-a22b-thinking-2507": {
-          "context": 262144,
-          "source": "https://huggingface.co/Qwen/Qwen3-235B-A22B-Instruct-2507",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3-30b-a3b": {
-          "context": 131072,
-          "source": "https://qwenlm.github.io/blog/qwen3/",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3-30b-a3b-instruct-2507": {
-          "context": 262144,
-          "source": "https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3-30b-a3b-thinking-2507": {
-          "context": 262144,
-          "source": "https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3-32b": {
-          "context": 131072,
-          "source": "https://qwenlm.github.io/blog/qwen3/",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3-4b": {
-          "context": 32768,
-          "source": "https://qwenlm.github.io/blog/qwen3/",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3-8b": {
-          "context": 131072,
-          "source": "https://qwenlm.github.io/blog/qwen3/",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3-coder-480b-a35b-instruct": {
-          "context": 262144,
-          "source": "https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3-coder-flash": {
-          "context": 1000000,
-          "max_output": 65536,
-          "source": "https://www.alibabacloud.com/help/en/model-studio/models",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3-coder-next": {
-          "context": 262144,
-          "max_output": 65536,
-          "source": "https://www.alibabacloud.com/help/en/model-studio/models",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3-coder-plus": {
-          "context": 1000000,
-          "max_output": 65536,
-          "source": "https://help.aliyun.com/zh/model-studio/developer-reference/what-is-qwen-llm",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3-coder-plus-2025-07-22": {
-          "context": 1000000,
-          "max_output": 65536,
-          "source": "https://www.alibabacloud.com/help/en/model-studio/models",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3-coder-plus-2025-09-23": {
-          "context": 1000000,
-          "max_output": 65536,
-          "source": "https://www.alibabacloud.com/help/en/model-studio/models",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3-max": {
-          "context": 262144,
-          "max_output": 65536,
-          "source": "https://help.aliyun.com/zh/model-studio/developer-reference/what-is-qwen-llm",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3-max-2025-09-23": {
-          "context": 262144,
-          "max_output": 65536,
-          "source": "https://help.aliyun.com/zh/model-studio/developer-reference/what-is-qwen-llm",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3-max-2026-01-23": {
-          "context": 262144,
-          "max_output": 65536,
-          "source": "https://help.aliyun.com/zh/model-studio/developer-reference/what-is-qwen-llm",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3-max-preview": {
-          "context": 262144,
-          "max_output": 65536,
-          "source": "https://help.aliyun.com/zh/model-studio/developer-reference/what-is-qwen-llm",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3-next-80b-a3b-instruct": {
-          "context": 262144,
-          "source": "https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct + litellm:dashscope/qwen3-next-80b-a3b-instruct",
-          "verified_at": "2026-05-19",
-          "input_per_mtok": 0.15,
-          "output_per_mtok": 1.2
-        },
-        "qwen3-next-80b-a3b-thinking": {
-          "context": 262144,
-          "source": "https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Thinking + litellm:dashscope/qwen3-next-80b-a3b-thinking",
-          "verified_at": "2026-05-19",
-          "input_per_mtok": 0.15,
-          "output_per_mtok": 1.2
-        },
-        "qwen3.5-122b-a10b": {
-          "context": 262144,
-          "max_output": 65536,
-          "source": "https://www.alibabacloud.com/help/en/model-studio/models",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3.5-27b": {
-          "context": 262144,
-          "max_output": 65536,
-          "source": "https://www.alibabacloud.com/help/en/model-studio/models",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3.5-35b-a3b": {
-          "context": 262144,
-          "max_output": 65536,
-          "source": "https://www.alibabacloud.com/help/en/model-studio/models",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3.5-397b-a17b": {
-          "context": 262144,
-          "max_output": 65536,
-          "source": "https://www.alibabacloud.com/help/en/model-studio/models",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3.5-flash": {
-          "context": 1000000,
-          "max_output": 65536,
-          "source": "https://help.aliyun.com/zh/model-studio/developer-reference/what-is-qwen-llm",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3.5-flash-2026-02-23": {
-          "context": 1000000,
-          "max_output": 65536,
-          "source": "https://help.aliyun.com/zh/model-studio/developer-reference/what-is-qwen-llm",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3.5-plus": {
-          "context": 1000000,
-          "max_output": 65536,
-          "source": "https://help.aliyun.com/zh/model-studio/developer-reference/what-is-qwen-llm",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3.5-plus-2026-02-15": {
-          "context": 1000000,
-          "max_output": 65536,
-          "source": "https://help.aliyun.com/zh/model-studio/developer-reference/what-is-qwen-llm",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3.5-plus-2026-04-20": {
-          "context": 1000000,
-          "max_output": 65536,
-          "source": "https://www.alibabacloud.com/help/en/model-studio/models",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3.6-27b": {
-          "context": 262144,
-          "max_output": 65536,
-          "source": "https://www.alibabacloud.com/help/en/model-studio/models",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3.6-35b-a3b": {
-          "context": 262144,
-          "max_output": 65536,
-          "source": "https://www.alibabacloud.com/help/en/model-studio/models",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3.6-flash": {
-          "context": 1000000,
-          "max_output": 65536,
-          "source": "https://www.alibabacloud.com/help/en/model-studio/models",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3.6-flash-2026-04-16": {
-          "context": 1000000,
-          "max_output": 65536,
-          "source": "https://www.alibabacloud.com/help/en/model-studio/models",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3.6-max-preview": {
-          "context": 262144,
-          "max_output": 65536,
-          "source": "https://www.alibabacloud.com/help/en/model-studio/models",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3.6-plus": {
-          "context": 1000000,
-          "max_output": 65536,
-          "source": "https://www.alibabacloud.com/help/en/model-studio/models",
-          "verified_at": "2026-04-24"
-        },
-        "qwen3.6-plus-2026-04-02": {
-          "context": 1000000,
-          "max_output": 65536,
-          "source": "https://www.alibabacloud.com/help/en/model-studio/models",
-          "verified_at": "2026-04-24"
-        },
-        "qwq-plus": {
-          "context": 131072,
-          "max_output": 8192,
-          "source": "https://help.aliyun.com/zh/model-studio/developer-reference/what-is-qwen-llm + litellm:dashscope/qwq-plus",
-          "verified_at": "2026-05-19",
-          "input_per_mtok": 0.8,
-          "output_per_mtok": 2.4
         }
       }
     },
@@ -1583,12 +1093,6 @@
       "list_url": "https://api.minimax.io/v1/models",
       "default_context": 200000,
       "models": {
-        "minimax/MiniMax-M1": {
-          "context": 1000000,
-          "max_output": 80000,
-          "source": "https://platform.minimaxi.com/document/MiniMax-M1",
-          "verified_at": "2026-05-10"
-        },
         "minimax/MiniMax-M2": {
           "context": 204800,
           "max_output": 131072,
@@ -1643,12 +1147,6 @@
           "context": 200000,
           "source": "https://api.minimax.io/v1/models",
           "verified_at": "2026-06-02"
-        },
-        "minimax/abab7-chat-preview": {
-          "context": 245760,
-          "max_output": 8192,
-          "source": "https://platform.minimaxi.com/document/abab",
-          "verified_at": "2026-05-10"
         }
       }
     },
@@ -1746,11 +1244,6 @@
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
           "verified_at": "2026-05-04"
         },
-        "nvidia/google/gemma-3-27b-it": {
-          "context": 131072,
-          "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
-          "verified_at": "2026-05-04"
-        },
         "nvidia/google/gemma-3-4b-it": {
           "context": 131072,
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
@@ -1797,11 +1290,6 @@
           "verified_at": "2026-05-04"
         },
         "nvidia/meta/codellama-70b": {
-          "context": 131072,
-          "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
-          "verified_at": "2026-05-04"
-        },
-        "nvidia/meta/llama-3.1-405b-instruct": {
           "context": 131072,
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
           "verified_at": "2026-05-04"
@@ -1881,27 +1369,12 @@
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
           "verified_at": "2026-05-04"
         },
-        "nvidia/minimaxai/minimax-m2.5": {
-          "context": 131072,
-          "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
-          "verified_at": "2026-05-04"
-        },
         "nvidia/minimaxai/minimax-m2.7": {
           "context": 131072,
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
           "verified_at": "2026-05-04"
         },
         "nvidia/mistralai/codestral-22b-instruct-v0.1": {
-          "context": 131072,
-          "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
-          "verified_at": "2026-05-04"
-        },
-        "nvidia/mistralai/devstral-2-123b-instruct-2512": {
-          "context": 131072,
-          "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
-          "verified_at": "2026-05-04"
-        },
-        "nvidia/mistralai/magistral-small-2506": {
           "context": 131072,
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
           "verified_at": "2026-05-04"
@@ -1931,11 +1404,6 @@
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
           "verified_at": "2026-05-04"
         },
-        "nvidia/mistralai/mistral-medium-3-instruct": {
-          "context": 131072,
-          "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
-          "verified_at": "2026-05-04"
-        },
         "nvidia/mistralai/mistral-medium-3.5-128b": {
           "context": 131072,
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
@@ -1951,32 +1419,12 @@
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
           "verified_at": "2026-05-04"
         },
-        "nvidia/mistralai/mixtral-8x22b-instruct-v0.1": {
-          "context": 131072,
-          "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
-          "verified_at": "2026-05-04"
-        },
         "nvidia/mistralai/mixtral-8x22b-v0.1": {
           "context": 131072,
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
           "verified_at": "2026-05-04"
         },
         "nvidia/mistralai/mixtral-8x7b-instruct-v0.1": {
-          "context": 131072,
-          "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
-          "verified_at": "2026-05-04"
-        },
-        "nvidia/moonshotai/kimi-k2-instruct": {
-          "context": 131072,
-          "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
-          "verified_at": "2026-05-04"
-        },
-        "nvidia/moonshotai/kimi-k2-instruct-0905": {
-          "context": 131072,
-          "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
-          "verified_at": "2026-05-04"
-        },
-        "nvidia/moonshotai/kimi-k2-thinking": {
           "context": 131072,
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
           "verified_at": "2026-05-04"
@@ -2061,17 +1509,7 @@
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
           "verified_at": "2026-05-04"
         },
-        "nvidia/nvidia/llama-3.2-nemoretriever-300m-embed-v1": {
-          "context": 131072,
-          "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
-          "verified_at": "2026-05-04"
-        },
         "nvidia/nvidia/llama-3.2-nv-embedqa-1b-v1": {
-          "context": 131072,
-          "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
-          "verified_at": "2026-05-04"
-        },
-        "nvidia/nvidia/llama-3.2-nv-embedqa-1b-v2": {
           "context": 131072,
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
           "verified_at": "2026-05-04"
@@ -2231,22 +1669,12 @@
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
           "verified_at": "2026-05-04"
         },
-        "nvidia/qwen/qwen2.5-coder-32b-instruct": {
-          "context": 131072,
-          "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
-          "verified_at": "2026-05-04"
-        },
         "nvidia/qwen/qwen3-coder-480b-a35b-instruct": {
           "context": 131072,
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
           "verified_at": "2026-05-04"
         },
         "nvidia/qwen/qwen3-next-80b-a3b-instruct": {
-          "context": 131072,
-          "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
-          "verified_at": "2026-05-04"
-        },
-        "nvidia/qwen/qwen3-next-80b-a3b-thinking": {
           "context": 131072,
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
           "verified_at": "2026-05-04"
@@ -2312,16 +1740,6 @@
           "verified_at": "2026-05-04"
         },
         "nvidia/z-ai/glm-5.1": {
-          "context": 131072,
-          "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
-          "verified_at": "2026-05-04"
-        },
-        "nvidia/z-ai/glm4.7": {
-          "context": 131072,
-          "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
-          "verified_at": "2026-05-04"
-        },
-        "nvidia/z-ai/glm5": {
           "context": 131072,
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
           "verified_at": "2026-05-04"
