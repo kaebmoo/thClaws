@@ -222,6 +222,84 @@ pub fn serve_shell_asset(shell: &ShellRef, rel: &str) -> Response<Body> {
         .expect("build asset response")
 }
 
+/// Serve a shell's index.html for the cloud `--serve` mount (Mode C):
+/// React parent loads the shell in an iframe, the bridge runs in
+/// postMessage mode (Mode A) talking to the parent — NOT to a
+/// per-shell WebSocket. So we inline the bridge runtime into the HTML
+/// and skip the Mode B WS-URL injection entirely (no relative-path
+/// games for `/__bridge.js` when the workspace lives under a traefik
+/// strip-prefix).
+pub fn serve_shell_index_inline(shell: &ShellRef) -> Response<Body> {
+    let (bytes, _mime) = match shell.read_asset("index.html") {
+        Ok(pair) => pair,
+        Err(e) => {
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from(format!("shell entry not readable: {e}")))
+                .expect("build 500");
+        }
+    };
+    let injected = inject_inline_bridge_with_id(&bytes, &shell.manifest().id);
+    Response::builder()
+        .header(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        )
+        .header(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store, must-revalidate"),
+        )
+        .header(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        )
+        .body(Body::from(injected))
+        .expect("build mode-c index response")
+}
+
+/// Inject the bridge runtime as an inline `<script>...</script>` at
+/// the start of `<head>`. No mode globals set → bridge defaults to
+/// Mode A (postMessage), matching the iframe-in-React-parent pattern
+/// UIView uses. Sets `window.__thclaws_shell_id` so the bridge skips
+/// URL-parsing (which would fail in cloud — the iframe path is
+/// `/u/<handle>/<slug>/gui-shell/<id>/...`, traefik strips the prefix
+/// before the engine sees it but the browser's `location.pathname`
+/// includes everything, so `parts[0] === "gui-shell"` is false).
+pub fn inject_inline_bridge_with_id(html: &[u8], shell_id: &str) -> Vec<u8> {
+    let bridge = super::BRIDGE_RUNTIME;
+    let id_json = serde_json::to_string(shell_id).unwrap_or_else(|_| "\"\"".into());
+    let injection = format!(
+        "<script>window.__thclaws_shell_id={id_json};</script><script>{bridge}</script>"
+    );
+    let lower = html.to_ascii_lowercase();
+    if let Some(idx) = find_subslice(&lower, b"<head>") {
+        let insert_at = idx + b"<head>".len();
+        let mut out = Vec::with_capacity(html.len() + injection.len());
+        out.extend_from_slice(&html[..insert_at]);
+        out.extend_from_slice(injection.as_bytes());
+        out.extend_from_slice(&html[insert_at..]);
+        out
+    } else if let Some(idx) = find_subslice(&lower, b"<head ") {
+        let after_open = html[idx..]
+            .iter()
+            .position(|&b| b == b'>')
+            .map(|p| idx + p + 1)
+            .unwrap_or(idx);
+        let mut out = Vec::with_capacity(html.len() + injection.len());
+        out.extend_from_slice(&html[..after_open]);
+        out.extend_from_slice(injection.as_bytes());
+        out.extend_from_slice(&html[after_open..]);
+        out
+    } else {
+        let mut out = Vec::with_capacity(html.len() + injection.len() + b"<head></head>".len());
+        out.extend_from_slice(b"<head>");
+        out.extend_from_slice(injection.as_bytes());
+        out.extend_from_slice(b"</head>");
+        out.extend_from_slice(html);
+        out
+    }
+}
+
 /// Serve the bridge runtime. Identical bytes to what Mode A's protocol
 /// handler returns; the Mode B HTML head injection sets the transport
 /// flag so the same bridge file behaves differently at runtime.

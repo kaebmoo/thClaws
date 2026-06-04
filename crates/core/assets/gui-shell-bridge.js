@@ -427,5 +427,32 @@
       { ns: "thclaws-shell", type: "ready", shellId, sessionId },
       "*",
     );
+    // Forward parent-app hotkeys that the iframe's focus would
+    // otherwise swallow. The full-screen-UI toggle (⌘⇧U / Ctrl⇧U)
+    // lives in the parent React app, so the parent's
+    // window.addEventListener("keydown") never fires while the user
+    // is typing inside the shell. Posting a `hotkey` envelope lets
+    // the parent run its handler regardless of focus.
+    window.addEventListener(
+      "keydown",
+      (e) => {
+        const isMac =
+          typeof navigator !== "undefined" &&
+          navigator.platform.startsWith("Mac");
+        const modOk = isMac
+          ? e.metaKey && !e.ctrlKey && !e.altKey && e.shiftKey
+          : e.ctrlKey && !e.metaKey && !e.altKey && e.shiftKey;
+        if (!modOk) return;
+        const key = (e.key || "").toLowerCase();
+        if (key !== "u") return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        parent.postMessage(
+          { ns: "thclaws-shell", type: "hotkey", key: "toggle-fullscreen-ui" },
+          "*",
+        );
+      },
+      { capture: true },
+    );
   }
 })();

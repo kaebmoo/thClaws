@@ -78,9 +78,21 @@ export function UIView({ active, shellId }: UIViewProps) {
   // re-run the shell's initial agent prompt.
   void active;
 
-  const src =
-    `thclaws://localhost/gui-shell/${encodeURIComponent(shellId)}/index.html` +
-    `?session=${encodeURIComponent(TIER1_SESSION_ID)}`;
+  // Mode A (desktop wry): `thclaws://localhost/...` — the protocol
+  // handler intercepts and injects the bridge script.
+  // Mode C (cloud `--serve` over http(s)): browsers have no
+  // `thclaws://` handler, so use a RELATIVE path. The iframe's URL
+  // resolves under the same traefik-stripped prefix as the parent
+  // workspace URL, so `gui-shell/<id>/...` lands on the engine's
+  // `/gui-shell/<id>/...` route regardless of how many path prefixes
+  // the reverse proxy peels off.
+  const isHttp =
+    typeof window !== "undefined" &&
+    (window.location.protocol === "http:" || window.location.protocol === "https:");
+  const src = isHttp
+    ? `gui-shell/${encodeURIComponent(shellId)}/?session=${encodeURIComponent(TIER1_SESSION_ID)}`
+    : `thclaws://localhost/gui-shell/${encodeURIComponent(shellId)}/index.html` +
+      `?session=${encodeURIComponent(TIER1_SESSION_ID)}`;
 
   return (
     <iframe

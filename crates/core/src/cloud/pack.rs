@@ -102,6 +102,29 @@ pub fn pack(folder: &Path, manifest_override: Option<&[u8]>) -> Result<PackResul
             continue;
         }
 
+        // `.thclaws/settings.json` carries publisher-only fields
+        // (the `agent` block — id/name/description/uuid — that binds
+        // this folder to its catalog row). The installer's workspace
+        // shouldn't inherit that binding, or a subsequent `cloud
+        // publish` from their copy would silently clobber the
+        // original. Strip the `agent` block before packing; everything
+        // else (guiShell, model, etc.) is user-facing config and
+        // stays.
+        if rel == std::path::Path::new(".thclaws/settings.json") {
+            let raw = std::fs::read(path)
+                .map_err(|e| format!("read settings.json: {e}"))?;
+            let cleaned = strip_publisher_fields(&raw)?;
+            let mut header = tar::Header::new_gnu();
+            header.set_size(cleaned.len() as u64);
+            header.set_mode(0o644);
+            header.set_mtime(0);
+            header.set_cksum();
+            tar.append_data(&mut header, rel, cleaned.as_slice())
+                .map_err(|e| format!("tar append settings.json: {e}"))?;
+            included.push(rel_str);
+            continue;
+        }
+
         let metadata = entry
             .metadata()
             .map_err(|e| format!("stat {}: {}", path.display(), e))?;
@@ -149,6 +172,21 @@ pub fn pack(folder: &Path, manifest_override: Option<&[u8]>) -> Result<PackResul
         included,
         stripped,
     })
+}
+
+/// Remove publisher-only fields from a packed `.thclaws/settings.json`.
+/// Currently drops the `agent` block (publish-binding identity that
+/// shouldn't carry over to installers). Falls back to passing the
+/// original bytes through unchanged if the file isn't valid JSON
+/// (don't fail the whole publish over a settings parse error).
+fn strip_publisher_fields(raw: &[u8]) -> Result<Vec<u8>, String> {
+    let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(raw) else {
+        return Ok(raw.to_vec());
+    };
+    if let Some(obj) = v.as_object_mut() {
+        obj.remove("agent");
+    }
+    serde_json::to_vec_pretty(&v).map_err(|e| format!("re-serialize settings.json: {e}"))
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

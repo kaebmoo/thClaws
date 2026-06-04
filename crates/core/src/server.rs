@@ -376,11 +376,20 @@ pub async fn run_with_engine(
     let app = if let Some(mode) = config.gui_shell.clone() {
         build_shell_router(&config.bind, state, mode)?
     } else {
+        // Mode C (cloud serve / browser SSH-tunnel): the React webapp
+        // hosts gui-shells in iframes. Browser has no `thclaws://`
+        // protocol handler, so expose the shell folders over HTTP
+        // under `/gui-shell/<id>/...`. The bridge runs in postMessage
+        // mode (inline-injected) — no per-shell WS.
         Router::new()
             .route("/", get(serve_index))
             .route("/healthz", get(serve_health))
             .route("/ws", get(ws_handler))
             .route("/upload", post(serve_upload))
+            .route("/gui-shell/{shell_id}", get(serve_gui_shell_index))
+            .route("/gui-shell/{shell_id}/", get(serve_gui_shell_index))
+            .route("/gui-shell/{shell_id}/index.html", get(serve_gui_shell_index))
+            .route("/gui-shell/{shell_id}/{*rest}", get(serve_gui_shell_asset))
             .with_state(state)
             .merge(crate::api_v1::router())
     };
@@ -669,6 +678,41 @@ async fn serve_health() -> impl IntoResponse {
     "ok"
 }
 
+/// `GET /gui-shell/<id>/` — serve a shell's index.html for Mode C
+/// (cloud serve / iframe-in-React-parent). Bridge runtime inlined so
+/// no relative-path resolution across traefik strip-prefixes.
+async fn serve_gui_shell_index(
+    axum::extract::Path(shell_id): axum::extract::Path<String>,
+) -> Response {
+    let shell = match crate::gui_shell::serve::resolve_bound_shell(&shell_id) {
+        Ok(s) => s,
+        Err(_) => {
+            return Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(axum::body::Body::from("shell not found"))
+                .expect("build 404");
+        }
+    };
+    crate::gui_shell::serve::serve_shell_index_inline(&shell)
+}
+
+/// `GET /gui-shell/<id>/<rel>` — serve a shell asset. Sandbox-checked
+/// against the shell folder by `serve_shell_asset`.
+async fn serve_gui_shell_asset(
+    axum::extract::Path((shell_id, rel)): axum::extract::Path<(String, String)>,
+) -> Response {
+    let shell = match crate::gui_shell::serve::resolve_bound_shell(&shell_id) {
+        Ok(s) => s,
+        Err(_) => {
+            return Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(axum::body::Body::from("shell not found"))
+                .expect("build 404");
+        }
+    };
+    crate::gui_shell::serve::serve_shell_asset(&shell, &rel)
+}
+
 /// `POST /upload` — multipart file upload from the --serve browser
 /// surface. Each part lands at `<workspace>/uploads/<name>` (with
 /// `_N` suffix on collision). After all parts are saved, the handler
@@ -954,6 +998,7 @@ async fn handle_socket(socket: WebSocket, state: ServeState, shared: Arc<SharedS
         })
     };
     let ctx = IpcContext {
+        is_serve_mode: true,
         // dev-plan/35 Tier 1: `shared` here is the RESOLVED handle
         // (per-user in multi-tenant mode; the default in single-
         // tenant mode). Subsequent state.shared references below

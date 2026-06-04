@@ -954,6 +954,7 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                 // the shared dispatch path today.
                 let on_zoom: crate::ipc::ZoomFn = Arc::new(|_scale: f64| {});
                 let ipc_ctx = crate::ipc::IpcContext {
+                    is_serve_mode: false,
                     shared: shared_for_ipc.clone(),
                     approver: approver_for_ipc.clone(),
                     pending_asks: pending_asks_for_ipc.clone(),

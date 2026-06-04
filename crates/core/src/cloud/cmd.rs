@@ -491,7 +491,6 @@ fn split_unified_manifest(
         .map_err(|e| format!("entering {}: {}", target.display(), e))?;
     let _restore = scopeguard_chdir(prior_cwd);
 
-    let mut project = crate::config::ProjectConfig::load().unwrap_or_default();
     // Identity AND UUID travel with the package. Preserving the UUID
     // makes "re-get into the same folder" act as an update (same agent
     // → CLI overwrites in place). Fork-safety is enforced server-side:
@@ -502,15 +501,35 @@ fn split_unified_manifest(
     let resolved_uuid = server_uuid
         .map(|s| s.to_string())
         .or_else(|| manifest.uuid.clone());
-    project.merge_agent(crate::config::AgentConfig {
-        id: Some(manifest.id.clone()),
-        name: Some(manifest.name.clone()),
-        description: Some(manifest.description.clone()),
-        uuid: resolved_uuid,
+    let agent_block = serde_json::json!({
+        "id": manifest.id,
+        "name": manifest.name,
+        "description": manifest.description,
+        "uuid": resolved_uuid,
     });
-    project
-        .save()
-        .map_err(|e| format!("write settings.json: {e}"))?;
+    // Direct JSON-level merge — set just the `agent` key, preserve
+    // everything else the tarball shipped (guiShell, model, etc.).
+    // Going through ProjectConfig::save() would also write every
+    // Option<bool> default-false field (shellTabEnabled, teamEnabled,
+    // …), bloating the installer's settings.json with noise.
+    let settings_path = std::path::Path::new(".thclaws").join("settings.json");
+    let mut existing: serde_json::Value = match std::fs::read(&settings_path) {
+        Ok(raw) => serde_json::from_slice(&raw).unwrap_or_else(|_| serde_json::json!({})),
+        Err(_) => serde_json::json!({}),
+    };
+    if let Some(obj) = existing.as_object_mut() {
+        obj.insert("agent".to_string(), agent_block);
+    }
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
+    std::fs::write(
+        &settings_path,
+        serde_json::to_string_pretty(&existing)
+            .map_err(|e| format!("serialize settings.json: {e}"))?,
+    )
+    .map_err(|e| format!("write settings.json: {e}"))?;
 
     // Strip identity fields from the on-disk manifest.json so the local
     // source of truth is unambiguous (settings.json::agent).

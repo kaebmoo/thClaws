@@ -67,6 +67,11 @@ pub type ZoomFn = Arc<dyn Fn(f64) + Send + Sync>;
 /// [`handle_ipc`] for each inbound message.
 #[derive(Clone)]
 pub struct IpcContext {
+    /// `true` for cloud `--serve` mode (no desktop wry window). Used
+    /// by `get_cwd` to skip the workspace-folder modal — the cloud
+    /// engine's cwd is fixed at `/workspace` by the runner template;
+    /// the desktop GUI lets the user pick at startup.
+    pub is_serve_mode: bool,
     pub shared: Arc<SharedSessionHandle>,
     pub approver: Arc<GuiApprover>,
     pub pending_asks: PendingAsks,
@@ -1259,11 +1264,22 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let cwd = std::env::current_dir()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| ".".into());
+            // Serve mode: cwd is fixed (cloud runner template mounts
+            // `/workspace`), so skip the picker modal. Also resolve
+            // `guiShell.tabDefault` and pass it through as `initial_tab`
+            // — the frontend uses this to land on the UI tab when a
+            // shell is pinned, instead of always defaulting to terminal.
+            let tab_default = crate::config::AppConfig::load().ok().and_then(|c| {
+                c.gui_shell
+                    .and_then(|s| s.tab_default().map(str::to_string))
+            });
+            let initial_tab = if tab_default.is_some() { Some("ui") } else { None };
             let payload = serde_json::json!({
                 "type": "current_cwd",
                 "path": cwd,
-                "needs_modal": true,
+                "needs_modal": !ctx.is_serve_mode,
                 "recent_dirs": crate::recent_dirs::load_recent_dirs(),
+                "initial_tab": initial_tab,
             });
             (ctx.dispatch)(payload.to_string());
         }
@@ -3331,7 +3347,7 @@ mod tests {
         let on_send_initial_state: SendInitialStateFn = Arc::new(|| {});
         let on_zoom: ZoomFn = Arc::new(|_scale: f64| {});
 
-        let ctx = IpcContext {
+        let ctx = IpcContext { is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -3366,7 +3382,7 @@ mod tests {
         let pending_asks: PendingAsks = Arc::new(Mutex::new(HashMap::new()));
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = captured.clone();
-        let ctx = IpcContext {
+        let ctx = IpcContext { is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -3402,7 +3418,7 @@ mod tests {
         let pending_asks: PendingAsks = Arc::new(Mutex::new(HashMap::new()));
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = captured.clone();
-        let ctx = IpcContext {
+        let ctx = IpcContext { is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -3435,7 +3451,7 @@ mod tests {
         let pending_asks: PendingAsks = Arc::new(Mutex::new(HashMap::new()));
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = captured.clone();
-        let ctx = IpcContext {
+        let ctx = IpcContext { is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -3476,7 +3492,7 @@ mod tests {
 
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = captured.clone();
-        let ctx = IpcContext {
+        let ctx = IpcContext { is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -3529,7 +3545,7 @@ mod tests {
         let pending_asks: PendingAsks = Arc::new(Mutex::new(HashMap::new()));
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = captured.clone();
-        let ctx = IpcContext {
+        let ctx = IpcContext { is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -3562,7 +3578,7 @@ mod tests {
         let pending_asks: PendingAsks = Arc::new(Mutex::new(HashMap::new()));
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = captured.clone();
-        let ctx = IpcContext {
+        let ctx = IpcContext { is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -3597,7 +3613,7 @@ mod tests {
         let pending_asks: PendingAsks = Arc::new(Mutex::new(HashMap::new()));
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = captured.clone();
-        let ctx = IpcContext {
+        let ctx = IpcContext { is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -3637,7 +3653,7 @@ mod tests {
         let pending_asks: PendingAsks = Arc::new(Mutex::new(HashMap::new()));
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = captured.clone();
-        let ctx = IpcContext {
+        let ctx = IpcContext { is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -3673,7 +3689,7 @@ mod tests {
         let shared = Arc::new(crate::shared_session::spawn());
         let (approver, _rx) = crate::permissions::GuiApprover::new();
         let pending_asks: PendingAsks = Arc::new(Mutex::new(HashMap::new()));
-        let ctx = IpcContext {
+        let ctx = IpcContext { is_serve_mode: false,
             shared,
             approver,
             pending_asks,

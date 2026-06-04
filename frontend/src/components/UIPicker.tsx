@@ -140,8 +140,19 @@ export function UIPicker({ onSelect, honourDefault = true }: UIPickerProps) {
 
 function ShellCard({ shell, onSelect }: { shell: ShellInfo; onSelect: (id: string) => void }) {
   const badge = sourceBadge(shell.source);
+  // Mode A (desktop wry): `thclaws://` protocol handler serves the
+  // icon. Mode C (cloud --serve over http(s)): use the relative HTTP
+  // path so the engine's /gui-shell/<id>/<asset> route handles it
+  // — browsers have no thclaws:// handler and `ERR_UNKNOWN_URL_SCHEME`
+  // would blank the icon and (because the iframe-sandbox warns on
+  // every blocked navigation) noise up the console.
+  const isHttp =
+    typeof window !== "undefined" &&
+    (window.location.protocol === "http:" || window.location.protocol === "https:");
   const iconUrl = shell.icon
-    ? `thclaws://localhost/gui-shell/${encodeURIComponent(shell.id)}/${shell.icon}`
+    ? isHttp
+      ? `gui-shell/${encodeURIComponent(shell.id)}/${shell.icon}`
+      : `thclaws://localhost/gui-shell/${encodeURIComponent(shell.id)}/${shell.icon}`
     : null;
   return (
     <button

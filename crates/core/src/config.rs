@@ -589,6 +589,14 @@ pub struct ProjectConfig {
     /// permissions, etc. CLI fuses both at publish time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentConfig>,
+    /// dev-plan/33 Tier 2 — pin a default GUI Shell for the UI tab
+    /// (`tabDefault`) and/or `--serve` (`serveDefault`). See
+    /// [`AppConfig::gui_shell`] for the parsed shape. Without this
+    /// field on ProjectConfig, serde silently drops the JSON block on
+    /// deserialize, so `guiShell.tabDefault` in `.thclaws/settings.json`
+    /// never reaches the picker.
+    #[serde(rename = "guiShell", skip_serializing_if = "Option::is_none")]
+    pub gui_shell: Option<GuiShellSetting>,
 }
 
 /// On-disk shape of the `agent` block in `./.thclaws/settings.json`.
@@ -653,6 +661,7 @@ impl Default for ProjectConfig {
             telegram: None,
             cloud: None,
             agent: None,
+            gui_shell: None,
         }
     }
 }
@@ -665,6 +674,32 @@ pub struct KmsSettings {
     /// every name in the list gets its `index.md` spliced into the
     /// system prompt.
     pub active: Vec<String>,
+}
+
+/// Shallow-overlay merge for `save()`'s non-destructive write. Two
+/// preservation rules:
+///
+///   - Keys in `target` but absent from `overlay` stay untouched
+///     (`_doc` comments, unknown shorthand aliases like `guiShell`
+///     that serde's `alias` only handles on deserialize, etc.).
+///   - Keys in `overlay` whose value is JSON null are skipped.
+///     ProjectConfig is field-heavy with `Option<T>` serialising
+///     to null when unset; without this rule every save() would
+///     balloon settings.json with a `"feature": null` line per
+///     unset field, drowning the keys the user actually cares about.
+///
+/// Non-object inputs at the top level are ignored (settings.json is
+/// always an object at root by convention).
+fn overlay_object(target: &mut serde_json::Value, overlay: &serde_json::Value) {
+    let (Some(t), Some(o)) = (target.as_object_mut(), overlay.as_object()) else {
+        return;
+    };
+    for (k, v) in o {
+        if v.is_null() {
+            continue;
+        }
+        t.insert(k.clone(), v.clone());
+    }
 }
 
 /// Parse a settings.json into ProjectConfig; on serde failure log a
@@ -722,12 +757,45 @@ impl ProjectConfig {
         None
     }
 
+    /// Persist this config to `.thclaws/settings.json`. Non-destructive
+    /// when the file already exists: merges this struct's keys into the
+    /// on-disk JSON via a top-level object overlay rather than writing
+    /// the serialised `ProjectConfig` verbatim. Preserves:
+    ///
+    ///   - `_doc` and any other user comments at the top level
+    ///   - Unknown keys (e.g. `guiShell` shorthand the model only sees
+    ///     via the `alias` attribute on deserialize — without merge,
+    ///     a `save()` after `load()` would drop it because serde
+    ///     serialises by field name, not alias)
+    ///   - The file's existing key ordering for known keys (we only
+    ///     overwrite values)
+    ///
+    /// First-time save (no existing file) writes the struct verbatim.
     pub fn save(&self) -> Result<()> {
         let path = Self::path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let s = serde_json::to_string_pretty(self)?;
+
+        let new_value = serde_json::to_value(self)?;
+        let mut base = if path.exists() {
+            let raw = std::fs::read(&path)?;
+            // Unparseable existing file → start from empty {} rather
+            // than fail outright (parse_or_warn already logs the
+            // warning on the read side). Better to write a clean
+            // overlay than to bail and leave bad JSON on disk.
+            serde_json::from_slice::<serde_json::Value>(&raw)
+                .unwrap_or_else(|_| serde_json::json!({}))
+        } else {
+            // Fresh file (e.g. `cloud get` extracting into a new
+            // folder): start from empty so the overlay's null-skipping
+            // produces a minimal settings.json with only the keys
+            // the caller actually set.
+            serde_json::json!({})
+        };
+        overlay_object(&mut base, &new_value);
+
+        let s = serde_json::to_string_pretty(&base)?;
         std::fs::write(&path, s)?;
         Ok(())
     }
@@ -894,6 +962,9 @@ impl ProjectConfig {
             if !trimmed.is_empty() {
                 config.remote_agent_url = Some(trimmed.to_string());
             }
+        }
+        if let Some(ref gs) = self.gui_shell {
+            config.gui_shell = Some(gs.clone());
         }
     }
 
