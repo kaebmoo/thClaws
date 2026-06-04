@@ -3149,6 +3149,78 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             }
         }
 
+        "file_download" => {
+            // Streams raw file bytes back as base64 so the frontend
+            // can wrap them in a Blob and trigger a browser-side
+            // <a download> click. Used by the Files-tab sidebar's
+            // "Download" context-menu action. Separate from
+            // `file_read` because that handler decides what to send
+            // based on extension (text vs base64 vs office-extracted)
+            // — for download we always want raw bytes, regardless
+            // of how the preview chose to render them.
+            let raw_path =
+                crate::file_preview::ospath(msg.get("path").and_then(|v| v.as_str()).unwrap_or(""));
+            let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let (ok, content_b64, filename, mime, error) =
+                match crate::sandbox::Sandbox::check(&raw_path) {
+                    Ok(path) => match std::fs::read(&path) {
+                        Ok(bytes) => {
+                            let b64 = crate::file_preview::encode_bytes_b64(&bytes);
+                            let name = path
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("download")
+                                .to_string();
+                            let ext = path
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .unwrap_or("")
+                                .to_lowercase();
+                            // Generic MIME for download; the browser
+                            // honours `download` attr regardless of
+                            // mime, but a sensible value helps when
+                            // the user opens the file directly from
+                            // the download bar.
+                            let mime = match ext.as_str() {
+                                "png" => "image/png",
+                                "jpg" | "jpeg" => "image/jpeg",
+                                "gif" => "image/gif",
+                                "svg" => "image/svg+xml",
+                                "webp" => "image/webp",
+                                "pdf" => "application/pdf",
+                                "json" => "application/json",
+                                "csv" => "text/csv",
+                                "html" | "htm" => "text/html",
+                                "md" | "markdown" => "text/markdown",
+                                "txt" => "text/plain",
+                                "zip" => "application/zip",
+                                "tar" => "application/x-tar",
+                                "gz" | "tgz" => "application/gzip",
+                                "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                _ => "application/octet-stream",
+                            }
+                            .to_string();
+                            (true, b64, name, mime, String::new())
+                        }
+                        Err(e) => (false, String::new(), String::new(), String::new(), format!("read: {e}")),
+                    },
+                    Err(e) => (false, String::new(), String::new(), String::new(), format!("access denied: {e}")),
+                };
+            let payload = serde_json::json!({
+                "type": "file_download_result",
+                "id": request_id,
+                "ok": ok,
+                "path": raw_path,
+                "content": content_b64,
+                "filename": filename,
+                "mime": mime,
+                "error": error,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
         "file_write" => {
             let raw_path = msg.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");

@@ -10,6 +10,7 @@ import {
   X,
   FilePlus,
   FolderPlus,
+  Download,
 } from "lucide-react";
 import { send, subscribe } from "../hooks/useIPC";
 import { useTheme } from "../hooks/useTheme";
@@ -177,6 +178,12 @@ export function FilesView({ active }: Props) {
   const [explorerMenu, setExplorerMenu] = useState<{ x: number; y: number } | null>(
     null,
   );
+  // Per-entry right-click menu (Download for files, navigate for dirs).
+  // Separate from `explorerMenu` (which is the empty-area "new file
+  // / new folder" menu) so the two don't shadow each other.
+  const [entryMenu, setEntryMenu] = useState<
+    { x: number; y: number; path: string; name: string; isDir: boolean } | null
+  >(null);
   // New file / folder name modal. null = closed; otherwise which kind.
   const [createKind, setCreateKind] = useState<"file" | "folder" | null>(null);
   const [createName, setCreateName] = useState("");
@@ -301,6 +308,49 @@ export function FilesView({ active }: Props) {
   // listing flips without waiting for the next 2s tick.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, currentPath, preview?.path, mode, themeMode, showHidden]);
+
+  // One-shot file download — sends `file_download` with a unique
+  // request id, waits for the matching `file_download_result`, then
+  // converts the base64 payload into a Blob and triggers a browser
+  // `<a download>` click. The subscriber unhooks itself once the
+  // matching reply lands so we don't leak handlers across clicks.
+  const downloadFile = useCallback((path: string) => {
+    const reqId = Date.now() + Math.floor(Math.random() * 1000);
+    const unsub = subscribe((msg) => {
+      if (msg.type !== "file_download_result" || msg.id !== reqId) return;
+      unsub();
+      if (!msg.ok) {
+        // Surface as a toast rather than a modal — same channel as
+        // save errors.
+        setSaveToast(`download failed: ${(msg.error as string) || "unknown"}`);
+        setTimeout(() => setSaveToast(null), 4000);
+        return;
+      }
+      const b64 = msg.content as string;
+      const mime = (msg.mime as string) || "application/octet-stream";
+      const filename = (msg.filename as string) || "download";
+      try {
+        const bin = atob(b64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const blob = new Blob([bytes], { type: mime });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        // Revoke after a short delay so Safari doesn't drop the
+        // download mid-flight.
+        setTimeout(() => URL.revokeObjectURL(url), 1500);
+      } catch (e) {
+        setSaveToast(`download decode failed: ${(e as Error).message}`);
+        setTimeout(() => setSaveToast(null), 4000);
+      }
+    });
+    send({ type: "file_download", id: reqId, path });
+  }, []);
 
   const navigate = (name: string) => {
     const path = currentPath === "." ? name : `${currentPath}/${name}`;
@@ -680,6 +730,20 @@ export function FilesView({ active }: Props) {
                   onClick={() =>
                     entry.is_dir ? navigate(entry.name) : onSidebarClick(entry.name)
                   }
+                  onContextMenu={(e) => {
+                    // Per-entry menu — close the explorer-level
+                    // "new file/folder" one if it was somehow open.
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setExplorerMenu(null);
+                    setEntryMenu({
+                      x: e.clientX,
+                      y: e.clientY,
+                      path: entryPath,
+                      name: entry.name,
+                      isDir: entry.is_dir,
+                    });
+                  }}
                 >
                   {entry.is_dir ? (
                     <Folder size={13} style={{ color: "var(--accent)", flexShrink: 0 }} />
@@ -871,6 +935,54 @@ export function FilesView({ active }: Props) {
           </div>
         )}
       </div>
+
+      {entryMenu && (
+        <>
+          <div
+            className="fixed inset-0 z-[55]"
+            onClick={() => setEntryMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setEntryMenu(null);
+            }}
+          />
+          <div
+            className="fixed z-[56] rounded border shadow-lg text-xs py-1"
+            style={{
+              left: entryMenu.x,
+              top: entryMenu.y,
+              minWidth: "160px",
+              background: "var(--bg-primary)",
+              borderColor: "var(--border)",
+              color: "var(--text-primary)",
+            }}
+          >
+            {/* Files-only: Download. Directories navigate; bulk
+                folder download would zip on the backend — not worth
+                the surface area until users ask for it. */}
+            {!entryMenu.isDir && (
+              <button
+                type="button"
+                className="flex items-center gap-2 w-full text-left px-3 py-1.5 hover:bg-white/10"
+                onClick={() => {
+                  downloadFile(entryMenu.path);
+                  setEntryMenu(null);
+                }}
+              >
+                <Download size={13} /> Download
+              </button>
+            )}
+            {entryMenu.isDir && (
+              <div
+                className="px-3 py-1.5"
+                style={{ color: "var(--text-secondary)" }}
+              >
+                No actions for folders yet.
+              </div>
+            )}
+          </div>
+        </>
+      )}
 
       {explorerMenu && (
         <>
