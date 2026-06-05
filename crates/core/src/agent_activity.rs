@@ -27,12 +27,29 @@
 //! path would be noisier than a static and buy nothing.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::SystemTime;
+
+use tokio::sync::Notify;
 
 static AGENT_BUSY_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 static BUSY_META: Mutex<Option<BusyMeta>> = Mutex::new(None);
+
+/// Fired on every transition of the user-facing busy state — both the
+/// idle→busy edge (`for_session` constructs the first meta) and the
+/// busy→idle edge (the owning guard drops). The cloud heartbeat
+/// listens on this so a busy transition triggers an immediate
+/// `/keepalive` POST instead of waiting up to 60s for the next
+/// periodic tick — without this the dashboard "running" pill lagged
+/// by up to a minute behind the actual turn.
+static BUSY_TRANSITION: LazyLock<Arc<Notify>> = LazyLock::new(|| Arc::new(Notify::new()));
+
+/// Shared notify the heartbeat task awaits to learn about busy
+/// transitions. Cloning is cheap (`Arc`) — keep one per subscriber.
+pub fn busy_transition() -> Arc<Notify> {
+    BUSY_TRANSITION.clone()
+}
 
 /// Snapshot of who's running, since when, and the last user-visible
 /// progress line. The UI displays this in the "running" chip; the
@@ -89,6 +106,10 @@ impl BusyGuard {
             started_at: SystemTime::now(),
             last_progress: None,
         });
+        // Drop the lock before notifying so any waiter that wakes and
+        // immediately reads `busy_meta()` doesn't contend with us.
+        drop(slot);
+        BUSY_TRANSITION.notify_waiters();
         Self { owns_meta: true }
     }
 
@@ -107,6 +128,12 @@ impl Drop for BusyGuard {
         AGENT_BUSY_COUNT.fetch_sub(1, Ordering::SeqCst);
         if self.owns_meta {
             *BUSY_META.lock().expect("BUSY_META poisoned") = None;
+            // Wake heartbeat waiters so the busy=false ping fires
+            // immediately on turn end instead of after up to 60s.
+            // The dashboard pill clears within the 90s server-side
+            // stickiness window from the last busy=true ping; the
+            // sooner this notify fires the better.
+            BUSY_TRANSITION.notify_waiters();
         }
     }
 }

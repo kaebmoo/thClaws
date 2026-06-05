@@ -647,8 +647,16 @@ fn spawn_cloud_heartbeat(connections: Arc<AtomicUsize>) {
         };
         let mut tick = tokio::time::interval(Duration::from_secs(60));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Race the 60s tick against busy-transition notifies so the
+        // dashboard "running" pill (dev-plan/36) appears within
+        // seconds of a turn starting instead of waiting up to a
+        // minute for the next periodic ping.
+        let transition = crate::agent_activity::busy_transition();
         loop {
-            tick.tick().await;
+            tokio::select! {
+                _ = tick.tick() => {}
+                _ = transition.notified() => {}
+            }
             let connected = connections.load(Ordering::SeqCst) > 0;
             let busy = crate::agent_activity::is_agent_busy();
             if !connected && !busy {
