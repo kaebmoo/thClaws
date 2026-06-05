@@ -361,15 +361,30 @@ fn maybe_wrap_with_venv(cmd: &str, cwd: &std::path::Path) -> String {
     }
 }
 
-/// Does this command need a Python venv? Any python/pip command should use
-/// the project venv if one exists, plus specific tool commands.
+/// Does this command need a Python venv? Trigger ONLY on commands that
+/// actually install or run framework servers — pip/pipx/poetry/uv,
+/// long-running server runners (uvicorn/gunicorn/flask), and the
+/// pytest/celery toolchains.
+///
+/// Plain `python3 script.py` does NOT trigger here. The previous
+/// heuristic fired on every `python3 ` prefix, which:
+///   - Wrapped agent-shipped stdlib scripts (e.g. image-generator's
+///     batch.py) in `python3 -m venv && source && python3 script.py`,
+///   - Printed `[creating .venv and activating before pip]` +
+///     `⚠ destructive command detected` warnings the model then
+///     mis-attributed to the script itself,
+///   - Created a `.venv/` directory inside agent workspaces that had
+///     no business owning one.
+/// If a user actually needs venv-bound python, they call `pip` or
+/// activate the venv themselves; both still get auto-handled here.
 fn needs_venv(cmd: &str) -> bool {
     let lower = cmd.to_lowercase();
-    // Any python/pip invocation should use the venv.
-    lower.starts_with("python ")
-        || lower.starts_with("python3 ")
-        || lower.contains("pip install")
+    lower.contains("pip install")
         || lower.contains("pip3 install")
+        || lower.contains("pipx ")
+        || lower.contains("poetry install")
+        || lower.contains("poetry add")
+        || lower.contains("uv pip ")
         || lower.contains("uvicorn ")
         || lower.contains("gunicorn ")
         || lower.contains("hypercorn ")
