@@ -3755,6 +3755,15 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             Ok(Arc::new(provider))
         }
         ProviderKind::DashScope => {
+            // Mainland Alibaba DashScope (`dashscope.aliyuncs.com`).
+            // Catalogue rows are stored with a `dashscope/` routing
+            // prefix (e.g. `dashscope/qwen-max`, `dashscope/deepseek-v3.2`)
+            // so heterogeneous Alibaba-hosted families (qwen, deepseek,
+            // glm, kimi, …) all route through one provider regardless of
+            // whether the bare id would have been disambiguating. The
+            // prefix is stripped here before the request reaches the
+            // OpenAI-compat upstream so it sees the bare id it expects.
+            // Bare `qwen-*` ids (legacy settings) flow through unchanged.
             let base = std::env::var("DASHSCOPE_BASE_URL").unwrap_or_else(|_| {
                 "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()
             });
@@ -3763,7 +3772,11 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             } else {
                 format!("{}/chat/completions", base.trim_end_matches('/'))
             };
-            Ok(Arc::new(OpenAIProvider::new(api_key).with_base_url(url)))
+            Ok(Arc::new(
+                OpenAIProvider::new(api_key)
+                    .with_base_url(url)
+                    .with_strip_model_prefix("dashscope/"),
+            ))
         }
         ProviderKind::QwenCloud => {
             // Singapore-region DashScope (`dashscope-intl.aliyuncs.com`).
