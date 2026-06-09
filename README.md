@@ -21,26 +21,6 @@ A native-Rust AI agent workspace that codes, automates, remembers, and coordinat
 
 ---
 
-## ✨ New in v0.32 — run Claude Code inside thClaws
-
-**On June 15, 2026, Anthropic [unbundles](https://support.anthropic.com/en/articles/15036540) subscription usage of the Claude Agent SDK and `claude -p` from your plan's normal limits onto a separate capped monthly credit** — $20 (Pro), $100 (Max 5×), $200 (Max 20×), metered at standard API list rates, no rollover, no pooling. Once the credit is gone, SDK calls fail unless you opt into pay-as-you-go overflow. **Interactive Claude Code in the terminal, Claude.ai chat, and Cowork all keep drawing from your normal subscription** — only headless SDK / `claude -p` paths move onto the credit.
-
-thClaws's `anthropic-agent` provider routes through the Agent SDK with subscription auth, so it sits squarely on the new capped credit after June 15. The `native` provider (direct API key) is unaffected — it was always per-token billing.
-
-The new **Shell** tab is the escape hatch. It hosts a real PTY-backed terminal alongside the Chat and Terminal tabs, so you can run **Claude Code** interactively from inside thClaws — which keeps your full normal subscription limits intact. Because `.thclaws/` and `.claude/` are intentionally compatible, the skills, MCP servers, and agent definitions you already keep on disk are shared between thClaws's agent and Claude Code — same workspace, two front-ends sitting side-by-side.
-
-<div align="center">
-
-<img src="docs/img/screens-hero.webp" alt="thClaws GUI — cycling through Chat, Terminal, and Shell (Claude Code) tabs" width="900" />
-
-**Chat** (thClaws agent · markdown · tool indicators)  ·  **Terminal** (REPL · slash commands · ANSI output)  ·  **Shell** (Claude Code interactively, on full subscription)
-
-</div>
-
-The Shell tab is **opt-in** because it gives an unsandboxed live shell with no agent-side permission gating. Enable it with `shellTabEnabled: true` in `.thclaws/settings.json`.
-
----
-
 ## See it work
 
 Three tabs, one binary — captured from a live thClaws session looking at its own source.
