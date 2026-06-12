@@ -15,6 +15,10 @@ pub const STRIP_PREFIXES: &[&str] = &[
     ".thclaws/sessions/",
     ".thclaws/kms/data/",
     ".thclaws/cache/",
+    // Cloud pods keep the managed browser's chromium profile on the
+    // workspace PVC so logins survive pod restarts (docs/browser).
+    // Cookies/tokens must NEVER ride along into a published agent.
+    ".thclaws/browser-profile/",
     ".git/",
     "node_modules/",
     "target/",

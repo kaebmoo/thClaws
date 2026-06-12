@@ -50,7 +50,9 @@ pub mod error;
 // (also gui-gated in Cargo.toml). M6.36 SERVE9 introduced them as
 // always-on by mistake; gate them behind the same `gui` feature so
 // the CLI-only thclaws-cli binary still builds.
-#[cfg(feature = "gui")]
+// NOT gui-gated: mcp.rs + config.rs (compiled into thclaws-cli too)
+// reference it, and its deps (tokio-tungstenite, futures, reqwest) are
+// all base dependencies. The gui-only callers are the IPC arms.
 pub mod browser_cdp;
 #[cfg(feature = "gui")]
 pub mod event_render;

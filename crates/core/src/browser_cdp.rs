@@ -277,10 +277,12 @@ pub fn ensure_up() -> Result<(), String> {
     // Containerized chromium has no userns for its own sandbox — the
     // pod is the sandbox (same reasoning as the runner image's
     // playwright-mcp flags).
-    if std::env::var("THCLAWS_INSIDE_DOCKER").ok().as_deref() == Some("1")
-        || std::env::var("THCLAWS_USES_GATEWAY").ok().as_deref() == Some("1")
-    {
+    if in_container() {
         cmd.arg("--no-sandbox");
+        // The profile lives on the workspace PVC in containers — keep
+        // it cookies/storage-only by pushing the (large, regenerable)
+        // disk cache onto ephemeral /tmp.
+        cmd.arg("--disk-cache-dir=/tmp/thclaws-browser-cache");
     }
     cmd.arg("about:blank");
 
@@ -302,12 +304,135 @@ pub fn ensure_up() -> Result<(), String> {
         if headless { "headless" } else { "headed" }
     );
     let _ = std::fs::write(&endpoint_file, &endpoint);
-    let mut guard = state().lock().unwrap();
-    if let Some(s) = guard.as_mut() {
-        s.launched = true;
-        s.child = Some(child);
+    {
+        let mut guard = state().lock().unwrap();
+        if let Some(s) = guard.as_mut() {
+            s.launched = true;
+            s.child = Some(child);
+        }
     }
+
+    // Cookie durability (docs/browser): chromium flushes its on-disk
+    // cookie store only on a ~30s timer, so an abrupt pod kill within
+    // that window loses a just-completed login. We snapshot cookies to
+    // a JSON file via CDP on a short timer (and restore on launch),
+    // closing the window independently of chromium's flush schedule.
+    // The file lives inside browser-profile/, which the publish packer
+    // strips — cookies never leak into a shared agent.
+    let endpoint_for_cookies = endpoint.clone();
+    rt().spawn(async move {
+        // Restore first (merge over whatever chromium loaded from its
+        // own SQLite store — newest wins per name/domain/path).
+        if let Err(e) = restore_cookies(&endpoint_for_cookies).await {
+            eprintln!("\x1b[2m[browser-cdp] cookie restore: {e}\x1b[0m");
+        }
+        // Then snapshot periodically while this chromium lives.
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+            if !cdp_active() {
+                break;
+            }
+            let _ = snapshot_cookies(&endpoint_for_cookies).await;
+        }
+    });
     Ok(())
+}
+
+fn cookies_path() -> PathBuf {
+    profile_dir().join("thclaws-cookies.json")
+}
+
+/// Browser-level DevTools websocket (not a page) — for the Storage
+/// domain cookie methods, which are browser-scoped.
+async fn browser_ws_url(endpoint: &str) -> Result<String, String> {
+    let body = reqwest::get(format!("{endpoint}/json/version"))
+        .await
+        .map_err(|e| format!("cdp /json/version: {e}"))?
+        .text()
+        .await
+        .map_err(|e| format!("cdp /json/version body: {e}"))?;
+    let v: Value = serde_json::from_str(&body).map_err(|e| format!("parse: {e}"))?;
+    v.get("webSocketDebuggerUrl")
+        .and_then(Value::as_str)
+        .map(String::from)
+        .ok_or_else(|| "no browser ws url".to_string())
+}
+
+/// One-shot CDP request on the browser-level websocket. Opens, sends,
+/// reads the matching reply, closes. Cheap enough for the cookie
+/// snapshot/restore cadence; avoids holding a second long-lived ws.
+async fn browser_call(endpoint: &str, method: &str, params: Value) -> Result<Value, String> {
+    use futures::{SinkExt, StreamExt};
+    let ws_url = browser_ws_url(endpoint).await?;
+    let (mut stream, _) = tokio_tungstenite::connect_async(&ws_url)
+        .await
+        .map_err(|e| format!("cdp connect: {e}"))?;
+    let frame = json!({ "id": 1, "method": method, "params": params }).to_string();
+    stream
+        .send(tokio_tungstenite::tungstenite::Message::Text(frame.into()))
+        .await
+        .map_err(|e| format!("cdp send: {e}"))?;
+    let deadline = std::time::Duration::from_secs(10);
+    loop {
+        let msg = tokio::time::timeout(deadline, stream.next())
+            .await
+            .map_err(|_| format!("cdp {method}: timed out"))?
+            .ok_or_else(|| format!("cdp {method}: stream closed"))?
+            .map_err(|e| format!("cdp recv: {e}"))?;
+        let tokio_tungstenite::tungstenite::Message::Text(text) = msg else {
+            continue;
+        };
+        let v: Value = serde_json::from_str(&text).map_err(|e| format!("parse: {e}"))?;
+        if v.get("id").and_then(Value::as_u64) == Some(1) {
+            if let Some(err) = v.get("error") {
+                return Err(format!("cdp {method}: {err}"));
+            }
+            return Ok(v.get("result").cloned().unwrap_or(Value::Null));
+        }
+    }
+}
+
+async fn snapshot_cookies(endpoint: &str) -> Result<(), String> {
+    let result = browser_call(endpoint, "Storage.getCookies", json!({})).await?;
+    let cookies = result.get("cookies").cloned().unwrap_or(json!([]));
+    let n = cookies.as_array().map(|a| a.len()).unwrap_or(0);
+    if n == 0 {
+        return Ok(()); // nothing to persist; don't clobber a prior snapshot
+    }
+    let path = cookies_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec(&cookies).unwrap_or_default())
+        .map_err(|e| format!("write cookies: {e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("rename cookies: {e}"))?;
+    Ok(())
+}
+
+async fn restore_cookies(endpoint: &str) -> Result<(), String> {
+    let path = cookies_path();
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Ok(()); // first run — nothing saved yet
+    };
+    let cookies: Value = serde_json::from_slice(&bytes).map_err(|e| format!("parse: {e}"))?;
+    if cookies.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+        return Ok(());
+    }
+    browser_call(endpoint, "Storage.setCookies", json!({ "cookies": cookies })).await?;
+    Ok(())
+}
+
+/// Best-effort synchronous cookie flush for shutdown/pause paths.
+pub fn flush_cookies() {
+    let endpoint = {
+        let guard = state().lock().unwrap();
+        match guard.as_ref() {
+            Some(s) if s.launched => s.endpoint.clone(),
+            _ => return,
+        }
+    };
+    let _ = rt().block_on(snapshot_cookies(&endpoint));
 }
 
 /// Minimal blocking health probe of a DevTools HTTP endpoint
@@ -338,7 +463,32 @@ fn endpoint_alive(endpoint: &str) -> bool {
     buf.contains("webSocketDebuggerUrl")
 }
 
+fn in_container() -> bool {
+    std::env::var("THCLAWS_INSIDE_DOCKER").ok().as_deref() == Some("1")
+        || std::env::var("THCLAWS_USES_GATEWAY").ok().as_deref() == Some("1")
+}
+
 fn profile_dir() -> PathBuf {
+    profile_dir_for(in_container())
+}
+
+/// Where the managed browser's chromium profile lives — this is what
+/// makes cookies/logins persist:
+/// - **Desktop**: `~/.cache/thclaws/browser-profile/<cwd-hash>` —
+///   outside the workspace so sessions can never be swept into a
+///   publish/sync, persistent across restarts.
+/// - **Cloud pods**: the home dir is EPHEMERAL (every restart logged
+///   users out), so the profile moves to the workspace PVC at
+///   `<cwd>/.thclaws/browser-profile`. Publish safety is restored by
+///   the pack strip rule (`cloud/pack.rs::STRIP_PREFIXES`), and the
+///   profile stays lean because the disk cache is redirected to /tmp
+///   at launch.
+fn profile_dir_for(container: bool) -> PathBuf {
+    if container {
+        return std::env::current_dir()
+            .unwrap_or_default()
+            .join(".thclaws/browser-profile");
+    }
     let cwd = std::env::current_dir().unwrap_or_default();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     use std::hash::{Hash, Hasher};
@@ -352,6 +502,7 @@ fn profile_dir() -> PathBuf {
 
 /// Kill the engine-owned chromium (used on shutdown paths; best-effort).
 pub fn shutdown() {
+    flush_cookies();
     if let Some(mut s) = state().lock().unwrap().take() {
         if let Some(child) = s.child.as_mut() {
             let _ = child.kill();
@@ -589,6 +740,9 @@ pub fn screencast_stop() {
     if let Some(s) = page_slot().lock().unwrap().take() {
         let _ = rt().block_on(s.call("Page.stopScreencast", json!({})));
     }
+    // A takeover session is the most likely moment a fresh login just
+    // happened — snapshot now so it survives even an immediate pause.
+    flush_cookies();
 }
 
 /// Native input on the live page. `kind`: click | move | wheel |
@@ -724,13 +878,22 @@ mod tests {
     }
 
     #[test]
-    fn profile_dir_is_outside_workspace() {
-        let p = profile_dir();
+    fn profile_dir_placement_per_environment() {
         let cwd = std::env::current_dir().unwrap();
+        // Desktop: outside the workspace (publish/sync can't sweep it).
+        let desktop = profile_dir_for(false);
         assert!(
-            !p.starts_with(&cwd),
-            "profile must not live in the workspace: {p:?}"
+            !desktop.starts_with(&cwd),
+            "desktop profile must not live in the workspace: {desktop:?}"
         );
-        assert!(p.to_string_lossy().contains("browser-profile"));
+        assert!(desktop.to_string_lossy().contains("browser-profile"));
+        // Container: on the workspace PVC so logins survive pod
+        // restarts — and the pack strip rule must cover that path.
+        let cloud = profile_dir_for(true);
+        assert!(cloud.starts_with(&cwd));
+        assert!(cloud.ends_with(".thclaws/browser-profile"));
+        assert!(crate::cloud::pack::is_strippable(std::path::Path::new(
+            ".thclaws/browser-profile/Default/Cookies"
+        )));
     }
 }
