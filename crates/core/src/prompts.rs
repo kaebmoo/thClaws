@@ -200,7 +200,8 @@ pub fn build_full_system_prompt(
     }
 
     // (4) External services
-    let services_section = services_prompt_section();
+    let browser_active = config.mcp_servers.iter().any(|s| s.name == "browser");
+    let services_section = services_prompt_section(browser_active);
     if !services_section.is_empty() {
         system.push_str("\n\n");
         system.push_str(&services_section);
@@ -305,8 +306,29 @@ fn append_repl_slash_shortcut_priming(system: &mut String) {
 /// configured, because unfamiliar tool names in the long tools-param
 /// list got glossed over. Moved here from `shared_session.rs` so CLI +
 /// print + agent_runtime get the same nudge.
-pub(crate) fn services_prompt_section() -> String {
+pub(crate) fn services_prompt_section(browser_active: bool) -> String {
     let mut bullets: Vec<String> = Vec::new();
+
+    // Browser automation (Playwright MCP). The model otherwise tends to
+    // reach for `browser_take_screenshot` and read content off the
+    // pixels — slower, lossy, and it mis-reads text. Steer it to the
+    // snapshot (the actual page text) for content extraction; pixels
+    // only for things you genuinely have to *see*.
+    if browser_active {
+        bullets.push(
+            "**Browser automation** (Playwright tools active). When you need to \
+             READ or EXTRACT content from a page — translating headlines, \
+             scraping a list, pulling article text, reading a table — use \
+             `browser_snapshot` as your PRIMARY source. It returns the page's \
+             actual text / accessibility tree (effectively the source content), \
+             which is more accurate, cheaper, and more reliable than reading \
+             pixels. Use `browser_take_screenshot` ONLY as a fallback — when the \
+             answer isn't in the snapshot: charts, canvases, image-embedded \
+             text, or layout you must visually see. Do NOT default to \
+             screenshots for text you could read from the snapshot."
+                .to_string(),
+        );
+    }
 
     // Gateway-aware: in hosted gateway mode HAL is reachable with no
     // local key, so the section advertises it there too.

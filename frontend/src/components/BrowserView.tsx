@@ -57,6 +57,7 @@ export function BrowserView({ active }: { active: boolean }) {
   const [shotBusy, setShotBusy] = useState(false);
   const [chat, setChat] = useState<ChatMsg[]>([]);
   const [chatInput, setChatInput] = useState("");
+  const [askPrompt, setAskPrompt] = useState<{ id: number; question: string } | null>(null);
   const [busy, setBusy] = useState(false);
   // Interactive takeover (Phase 2 slice 2): when on, the screenshot is
   // clickable/typeable — every action routes through the allowlisted
@@ -266,6 +267,7 @@ export function BrowserView({ active }: { active: boolean }) {
       }
       if (msg.type === "new_session_ack") {
         setChat([]);
+        setAskPrompt(null);
         return;
       }
       if (msg.type === "chat_history_replaced") {
@@ -282,8 +284,22 @@ export function BrowserView({ active }: { active: boolean }) {
         setChat(restored.slice(-MAX_CHAT));
         return;
       }
+      if (msg.type === "ask_user_question") {
+        const id = typeof msg.id === "number" ? msg.id : null;
+        const question = typeof msg.question === "string" ? msg.question : "";
+        if (id !== null) {
+          // The model paused the turn to ask. Surface the question and
+          // route the next sidebar input to the pending-ask responder
+          // (see sendChat) rather than starting a fresh turn — otherwise
+          // the turn hangs with no way to answer from this tab.
+          setAskPrompt({ id, question });
+          pushChat("assistant", question);
+        }
+        return;
+      }
       if (msg.type === "chat_done") {
         setBusy(false);
+        setAskPrompt(null);
         return;
       }
       // Activity: MCP tools register as `browser__<tool>`.
@@ -338,6 +354,16 @@ export function BrowserView({ active }: { active: boolean }) {
     const text = chatInput.trim();
     if (!text) return;
     setChatInput("");
+    if (askPrompt) {
+      // Answering an AskUserQuestion the model raised — route to the
+      // pending-ask responder, not a fresh turn. The backend echoes the
+      // reply to the Terminal only, so push a local user bubble here.
+      pushChat("user", text);
+      send({ type: "ask_user_response", id: askPrompt.id, text });
+      setAskPrompt(null);
+      setBusy(true);
+      return;
+    }
     setBusy(true);
     send({ type: "shell_input", text, attachments: [] });
   }
@@ -681,7 +707,7 @@ export function BrowserView({ active }: { active: boolean }) {
                 sendChat();
               }
             }}
-            placeholder="Direct the agent…"
+            placeholder={askPrompt ? "Answer the question above…" : "Direct the agent…"}
             className="flex-1 min-w-0 text-[12px] px-2 py-1.5 rounded border outline-none"
             style={{
               borderColor: "var(--border)",

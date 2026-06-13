@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.54.0] - 2026-06-13
+
+### Fixed
+- **Browser tab chat sidebar now handles `AskUserQuestion`.** When the
+  model asked a question during a turn driven from the Browser tab's
+  sidebar, the sidebar ignored the prompt — the question never showed
+  and the turn hung with no way to answer. The sidebar now surfaces the
+  question and routes the next input to the pending-ask responder
+  (mirroring the Chat tab).
+
+### Changed
+- **Browser content extraction prefers the page snapshot over
+  screenshots.** When the browser tools are active, the model is now
+  steered to use `browser_snapshot` (the page's text / accessibility
+  tree) as the primary source for reading or extracting content —
+  translating headlines, scraping lists, pulling article text — and to
+  fall back to `browser_take_screenshot` only for visual-only content
+  (charts, canvases, image-embedded text). Reading text off pixels was
+  slower, lossier, and mis-read characters.
+
 ## [0.53.0] - 2026-06-13
 
 ### Fixed
