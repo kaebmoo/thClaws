@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.56.0] - 2026-06-14
+
+### Added
+- **EPUB preview in the Files tab.** `.epub` files now render in-app via
+  epub.js — scroll-per-chapter with Prev/Next and arrow-key navigation, a
+  chapter label, and light/dark theming. Previously an EPUB opened as
+  "Error reading file" (it is a zipped XHTML bundle, not text); the backend
+  now serves it off `/file-asset` like PDF/audio/video.
+- **`PdfCreate` / `EpubCreate` font option.** Both tools accept
+  `font: "sans"` (default — Noto Sans + Noto Sans Thai) or `"serif"`
+  (Noto Serif + Noto Serif Thai). The serif faces ship with full Thai
+  shaping (GSUB/GPOS) for long-form / book typography; the PDF embeds the
+  chosen family and the EPUB switches its `@font-face` set accordingly.
+
+### Security
+- **Bumped `@xmldom/xmldom` to 0.8.13** (transitive via `epubjs`), fixing
+  five high-severity advisories — an uncontrolled-recursion DoS and several
+  XML-injection serialization issues — present in the pinned 0.7.13.
+
 ## [0.54.0] - 2026-06-13
 
 ### Fixed
