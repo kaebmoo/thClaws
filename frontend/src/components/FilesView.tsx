@@ -16,6 +16,7 @@ import { send, subscribe } from "../hooks/useIPC";
 import { useTheme } from "../hooks/useTheme";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { CodeEditor } from "./CodeEditor";
+import { EpubViewer } from "./EpubViewer";
 
 // Confirmation dialog with two backends.
 //
@@ -636,6 +637,7 @@ export function FilesView({ active }: Props) {
   const isHtml = preview?.mime === "text/html";
   const isImage = preview?.mime.startsWith("image/");
   const isPdf = preview?.mime === "application/pdf";
+  const isEpub = preview?.mime === "application/epub+zip";
   const isAudio = !!preview?.mime.startsWith("audio/");
   const isVideo = !!preview?.mime.startsWith("video/");
   const canEdit = preview && isTextEditable(preview.path);
@@ -901,6 +903,15 @@ export function FilesView({ active }: Props) {
                 className="w-full flex-1 min-h-0 rounded border"
                 style={{ borderColor: "var(--border)", background: "#fff" }}
                 title={preview.path}
+              />
+            ) : isEpub ? (
+              // EPUB renders via epub.js (see EpubViewer): it fetches
+              // the bytes off /file-asset and unzips client-side, since
+              // no browser renders EPUB natively the way it does PDF.
+              <EpubViewer
+                key={`epub-${preview.path}-${previewVersion}`}
+                url={assetUrl(preview.path)}
+                theme={themeMode}
               />
             ) : isAudio ? (
               // Audio + video stream off /file-asset/, not a base64

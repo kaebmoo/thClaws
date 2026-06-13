@@ -26,6 +26,15 @@ operations on top:
 The client module is the four CLI verbs + the slash dispatcher and
 the `settings.json` schema needed to support them.
 
+**Visibility is server-side too.** Each catalog row has a `visibility`
+of `public` (default) or `private`; private rows are hidden from the
+list/detail/download/fork endpoints for everyone but the author and
+root (those return `404`, not `403`, so private slugs aren't
+enumerable). There is **no client verb** for it — the owner flips it
+from the catalog web UI (`PATCH /api/agents/<slug>/visibility`), same
+as Rent. So `/cloud get <slug>` of someone else's private agent just
+404s; the slash dispatcher surfaces that verbatim.
+
 ## Module layout
 
 ```

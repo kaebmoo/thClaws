@@ -183,6 +183,28 @@ session ของ folder agent นั้น:
 row ของเจ้าของเดิม (และจะ fail ด้วย permission error — catalog gate
 การ publish ตาม author)
 
+## Visibility — public กับ private
+
+ทุก agent ที่ publish มีสถานะ **visibility** สองแบบ:
+
+| Visibility | ใครเห็น / ติดตั้งได้ |
+|---|---|
+| `public` (ค่า default) | ทุกคน — โผล่ใน `/browse`, หน้า `/a/<slug>`, และ `/cloud get` ได้ |
+| `private` | เฉพาะ **เจ้าของ** (author) และ admin (root) เท่านั้น |
+
+agent ที่ publish ใหม่จะเป็น **public โดย default** ส่วน agent ที่เป็น
+`private` จะถูกซ่อนจากทุกจุดที่ผู้ใช้คนอื่นเข้าถึงได้ — catalog list,
+หน้า detail, `/cloud get` (download), และ fork ทั้งหมดตอบ **404** (ไม่ใช่
+403 — ตั้งใจให้ slug ของ private agent เดาไม่ได้) สรุปคือคนที่ไม่ใช่
+เจ้าของจะไม่รู้ด้วยซ้ำว่า agent ตัวนั้นมีอยู่
+
+**เปลี่ยน visibility ยังไง** — ไปที่หน้า agent ของคุณบนเว็บ
+(`https://thclaws.cloud/a/<slug>`) จะมีปุ่ม toggle public/private ที่
+โผล่เฉพาะตอนคุณเป็นเจ้าของ (หรือ root) เท่านั้น *ยังไม่มี* คำสั่ง
+`/cloud` ฝั่ง desktop สำหรับเรื่องนี้ — เป็น web-only (เบื้องหลังเรียก
+`PATCH /api/agents/<slug>/visibility`) ใช้ private สำหรับ agent ที่ยัง
+อยู่ในช่วง beta/ทดสอบ หรือที่อยากแชร์เฉพาะทีมตัวเองก่อนเปิดสาธารณะ
+
 ## Hosted workspace (เช่าแทนที่จะติดตั้ง)
 
 ถ้าไม่อยากติดตั้ง agent บนเครื่อง laptop ตัวเอง catalog ก็รัน agent

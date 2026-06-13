@@ -189,6 +189,29 @@ Without `/cloud unbind`, the next publish would try to update the
 original author's catalog row (and fail with a permission error — the
 catalog gates publishes by author).
 
+## Visibility — public vs private
+
+Every published agent has a **visibility** setting:
+
+| Visibility | Who can see / install it |
+|---|---|
+| `public` (default) | Everyone — shows in `/browse`, the `/a/<slug>` page, and is installable with `/cloud get` |
+| `private` | Only the **author** and an admin (root) |
+
+New agents publish as **public by default**. A `private` agent is
+hidden from every path other users could reach it through — the catalog
+list, the detail page, `/cloud get` (download), and fork all return
+**404** (not 403 — deliberately, so private slugs aren't enumerable).
+A non-owner can't even tell the agent exists.
+
+**Changing visibility** — open your agent's page on the web
+(`https://thclaws.cloud/a/<slug>`); a public/private toggle appears
+there, but only when you're the owner (or root). There is *no* desktop
+`/cloud` verb for this — it's web-only (it calls
+`PATCH /api/agents/<slug>/visibility` under the hood). Use `private`
+for agents still in beta/testing, or ones you want to share with just
+your own team before going public.
+
 ## Hosted workspaces (rent, don't install)
 
 If you don't want to install agents on your laptop, the catalog also

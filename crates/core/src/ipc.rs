@@ -3357,6 +3357,11 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                     );
                     let is_video =
                         matches!(ext.as_str(), "mp4" | "m4v" | "webm" | "mov" | "mkv" | "ogv");
+                    // EPUB is a zipped XHTML bundle — `read_to_string`
+                    // would fail on the binary. Serve it off /file-asset
+                    // (empty inline content); the frontend renders it
+                    // with epub.js, which unzips client-side.
+                    let is_epub = ext == "epub";
                     let mime = match ext.as_str() {
                         "png" => "image/png",
                         "jpg" | "jpeg" => "image/jpeg",
@@ -3378,6 +3383,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         "mov" => "video/quicktime",
                         "mkv" => "video/x-matroska",
                         "ogv" => "video/ogg",
+                        "epub" => "application/epub+zip",
                         "md" | "markdown" => {
                             if source_mode {
                                 "text/markdown"
@@ -3389,9 +3395,10 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         "docx" | "xlsx" | "xlsm" | "xlsb" | "xls" | "ods" | "pptx" => "text/html",
                         _ => "text/plain",
                     };
-                    if is_audio || is_video {
+                    if is_audio || is_video || is_epub {
                         // No content payload — frontend mounts the
-                        // file-asset URL into <audio>/<video> directly.
+                        // file-asset URL into <audio>/<video> directly,
+                        // or hands the EPUB URL to epub.js.
                         let payload = serde_json::json!({
                             "type": "file_content",
                             "path": raw_path,
