@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.64.0] - 2026-06-16
+
+### Fixed
+- **Telegram: recover a stuck conversation without restarting** ([#164](https://github.com/thClaws/thClaws/issues/164)). When a provider error (e.g. HTTP 400 once the history grows too large) kept replaying every turn, the only fix was killing `thclaws --telegram` from the console. You can now send `/new` (or `/reset` / `/clear`) in the chat to wipe that agent's conversation and start fresh. Tolerates the group-mention suffix (`/reset@yourbot`).
+
 ## [0.63.0] - 2026-06-15
 
 Engine support for thClaws.cloud **shared agents** (company-owned agents

@@ -103,6 +103,17 @@ impl TelegramMessageHandler for HeadlessAgentHandler {
     ) -> Option<String> {
         let agent = self.agent_for(agent_id).await;
         let _turn = self.turn_lock.lock().await;
+        // Issue #164: a provider error (e.g. HTTP 400 when the history
+        // grows too large or gets structurally poisoned) keeps replaying
+        // every turn, with no way to recover from Telegram — only a
+        // process restart. Let the user wipe this agent's conversation
+        // with `/new` (or `/reset` / `/clear`) so a stuck chat recovers
+        // without VPS-console access. Held under turn_lock so it can't
+        // race an in-flight turn.
+        if is_reset_command(&text) {
+            agent.clear_history();
+            return Some("🧹 Conversation reset — fresh start.".into());
+        }
         let mut stream = Box::pin(agent.run_turn(text));
         // Capture the FINAL assistant text — cleared on each tool call so
         // only post-last-tool narration survives (matches the GUI worker).
@@ -125,6 +136,17 @@ impl TelegramMessageHandler for HeadlessAgentHandler {
         }
         Some(buf)
     }
+}
+
+/// True when a Telegram message is a conversation-reset command
+/// (issue #164): `/new`, `/reset`, or `/clear`. Tolerates the
+/// group-mention suffix Telegram appends (`/reset@mybot`) and any
+/// trailing text, but only matches the bare command as the first token
+/// (so `/resethard` or `hello /reset` don't trigger it).
+fn is_reset_command(text: &str) -> bool {
+    let first = text.trim().split_whitespace().next().unwrap_or("");
+    let cmd = first.split('@').next().unwrap_or(first);
+    matches!(cmd, "/new" | "/reset" | "/clear")
 }
 
 /// Permission mode for the headless bot. An explicit `auto` (from
@@ -332,5 +354,22 @@ mod tests {
         assert_eq!(resolve_perm_mode("ask"), PermissionMode::TelegramGated);
         assert_eq!(resolve_perm_mode(""), PermissionMode::TelegramGated);
         assert_eq!(resolve_perm_mode("plan"), PermissionMode::TelegramGated);
+    }
+
+    #[test]
+    fn reset_command_detection() {
+        // Triggers (issue #164).
+        assert!(is_reset_command("/new"));
+        assert!(is_reset_command("/reset"));
+        assert!(is_reset_command("/clear"));
+        assert!(is_reset_command("  /reset  "));
+        assert!(is_reset_command("/clear@mybot")); // group mention suffix
+        assert!(is_reset_command("/reset please"));
+        // Does NOT trigger.
+        assert!(!is_reset_command("reset"));
+        assert!(!is_reset_command("/resethard"));
+        assert!(!is_reset_command("hello /reset"));
+        assert!(!is_reset_command("/help"));
+        assert!(!is_reset_command(""));
     }
 }
