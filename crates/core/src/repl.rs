@@ -6124,7 +6124,13 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     };
                     match new_provider.list_models().await {
                         Ok(models) if !models.is_empty() => {
-                            let ok = models.iter().any(|m| m.id == resolved);
+                            // `openrouter/fusion+` is a thClaws pseudo-model
+                            // (build_provider maps it to the configured outer
+                            // model + injected fusion tool). It never appears
+                            // in OpenRouter's live /models list, so accept it
+                            // explicitly instead of rejecting as "unknown".
+                            let ok = resolved == crate::config::FUSION_PLUS_MODEL
+                                || models.iter().any(|m| m.id == resolved);
                             if !ok {
                                 println!(
                                     "{COLOR_YELLOW}unknown model '{resolved}' — try /models to see what's available{COLOR_RESET}"

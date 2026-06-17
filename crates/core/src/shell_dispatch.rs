@@ -3450,8 +3450,12 @@ async fn switch_model(
     // /provider X). Empty list / unsupported listing accepts the
     // requested model optimistically.
     let mut resolved = resolved_initial.clone();
+    // `openrouter/fusion+` is a thClaws pseudo-model (build_provider maps it
+    // to the configured outer model + injected fusion tool); it never appears
+    // in OpenRouter's live /models list, so skip the membership check for it.
+    let is_pseudo_model = resolved == crate::config::FUSION_PLUS_MODEL;
     if let Ok(models) = new_provider.list_models().await {
-        if !models.is_empty() && !models.iter().any(|m| m.id == resolved) {
+        if !is_pseudo_model && !models.is_empty() && !models.iter().any(|m| m.id == resolved) {
             if fallback_to_first {
                 let first = models[0].id.clone();
                 emit(
