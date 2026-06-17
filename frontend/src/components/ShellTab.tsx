@@ -151,6 +151,15 @@ export function ShellTab({ active }: Props) {
 
   // Re-fit + refocus when becoming active (xterm's fit is no-op when
   // the container is hidden, so we deferred it until now).
+  //
+  // The focus() is deferred one frame via requestAnimationFrame: this
+  // panel transitions from `visibility:hidden` to visible (see the tab
+  // wrapper in App.tsx) in the same commit that flips `active`, and a
+  // just-unhidden element isn't reliably focusable in the same frame —
+  // under the wry/Chromium webview the synchronous focus() is silently
+  // dropped, so keystrokes go nowhere until the user clicks (issue #166).
+  // Focusing on the next frame, once layout/visibility have settled,
+  // lets the terminal accept input immediately on tab switch.
   useEffect(() => {
     if (!active || !termRef.current || !fitRef.current) return;
     try {
@@ -158,7 +167,8 @@ export function ShellTab({ active }: Props) {
     } catch {
       // ignore
     }
-    termRef.current.focus();
+    const raf = requestAnimationFrame(() => termRef.current?.focus());
+    return () => cancelAnimationFrame(raf);
   }, [active]);
 
   // Theme switch — repaint xterm without rebuilding it.
@@ -181,7 +191,11 @@ export function ShellTab({ active }: Props) {
           shell: {errorMsg}
         </div>
       )}
-      <div ref={ref} className="flex-1 min-h-0" />
+      {/* Explicit click-to-focus as a belt-and-suspenders alongside the
+          deferred programmatic focus above: a physical click reliably
+          hands keyboard capture to xterm in the wry webview (issue #166).
+          Focusing an already-focused terminal is a no-op. */}
+      <div ref={ref} className="flex-1 min-h-0" onClick={() => termRef.current?.focus()} />
     </div>
   );
 }
