@@ -690,7 +690,7 @@ impl OpencodeGoProvider {
 
         if v.get("choices")
             .and_then(Value::as_array)
-            .map_or(true, |c| c.is_empty())
+            .is_none_or(|c| c.is_empty())
             && v.get("usage").is_some()
             && state.seen_message_start
         {

@@ -2019,7 +2019,7 @@ impl Tool for TeamMergeTool {
                         .args(["branch", "-D", branch])
                         .current_dir(&project_root)
                         .output();
-                    report.push(format!("    cleaned up worktree + branch"));
+                    report.push("    cleaned up worktree + branch".to_string());
                 }
                 continue;
             }

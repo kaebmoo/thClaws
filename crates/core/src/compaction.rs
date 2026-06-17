@@ -125,10 +125,8 @@ fn truncate_oversized_message(msg: &mut Message, budget_tokens: usize) {
     );
     for block in &mut msg.content {
         match block {
-            ContentBlock::Text { text } => {
-                if text.len() > target_chars {
-                    *text = format!("{}{notice}", char_safe_head(text, target_chars));
-                }
+            ContentBlock::Text { text } if text.len() > target_chars => {
+                *text = format!("{}{notice}", char_safe_head(text, target_chars));
             }
             ContentBlock::ToolResult { content, .. } => {
                 let s = content.to_text();

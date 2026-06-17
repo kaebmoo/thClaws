@@ -930,7 +930,7 @@ pub struct StreamRequest {
 pub const LONG_RUNNING_STREAM_CHUNK_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(900);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Usage {
     pub input_tokens: u32,
     pub output_tokens: u32,
@@ -945,18 +945,6 @@ pub struct Usage {
     /// as `None`. `Some(0)` ⇒ provider explicitly reported zero
     /// reasoning tokens (distinct from "didn't report").
     pub reasoning_output_tokens: Option<u32>,
-}
-
-impl Default for Usage {
-    fn default() -> Self {
-        Self {
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_creation_input_tokens: None,
-            cache_read_input_tokens: None,
-            reasoning_output_tokens: None,
-        }
-    }
 }
 
 impl Usage {

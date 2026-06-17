@@ -122,7 +122,7 @@ impl Tool for PdfReadTool {
         // Fall through to vision-OCR.
         render_pages_as_image_blocks(&validated, first, last)
             .await
-            .map(|blocks| ToolResultContent::Blocks(blocks))
+            .map(ToolResultContent::Blocks)
     }
 }
 

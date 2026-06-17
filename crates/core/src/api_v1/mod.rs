@@ -245,6 +245,7 @@ mod tests {
 
     #[test]
     fn auth_token_distinguishes_three_modes() {
+        let _guard = crate::kms::test_env_lock();
         // Order matters — env is process-wide and these tests can't run
         // in parallel without locks. Reading + restoring around each
         // assertion keeps the suite passable when run as a unit.

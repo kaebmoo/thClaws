@@ -127,23 +127,21 @@ fn parse_markdown_slides(content: &str) -> Vec<Slide> {
 
     for event in parser {
         match event {
-            Event::Start(Tag::Heading { level, .. }) => {
-                if level == pulldown_cmark::HeadingLevel::H1 {
-                    if let Some(s) = current.take() {
-                        slides.push(s);
-                    }
-                    text_buf.clear();
-                    in_heading = true;
+            Event::Start(Tag::Heading { level, .. })
+                if level == pulldown_cmark::HeadingLevel::H1 =>
+            {
+                if let Some(s) = current.take() {
+                    slides.push(s);
                 }
+                text_buf.clear();
+                in_heading = true;
             }
-            Event::End(TagEnd::Heading(level)) => {
-                if level == pulldown_cmark::HeadingLevel::H1 {
-                    current = Some(Slide {
-                        title: std::mem::take(&mut text_buf),
-                        bullets: Vec::new(),
-                    });
-                    in_heading = false;
-                }
+            Event::End(TagEnd::Heading(level)) if level == pulldown_cmark::HeadingLevel::H1 => {
+                current = Some(Slide {
+                    title: std::mem::take(&mut text_buf),
+                    bullets: Vec::new(),
+                });
+                in_heading = false;
             }
             Event::Start(Tag::Item) => {
                 in_item = true;
@@ -155,20 +153,14 @@ fn parse_markdown_slides(content: &str) -> Vec<Slide> {
                 }
                 in_item = false;
             }
-            Event::Text(s) => {
-                if in_heading || in_item {
-                    text_buf.push_str(&s);
-                }
+            Event::Text(s) if (in_heading || in_item) => {
+                text_buf.push_str(&s);
             }
-            Event::Code(s) => {
-                if in_heading || in_item {
-                    text_buf.push_str(&s);
-                }
+            Event::Code(s) if (in_heading || in_item) => {
+                text_buf.push_str(&s);
             }
-            Event::SoftBreak => {
-                if in_heading || in_item {
-                    text_buf.push(' ');
-                }
+            Event::SoftBreak if (in_heading || in_item) => {
+                text_buf.push(' ');
             }
             // Inline image placeholder. Real `<p:pic>` embedding via
             // OOXML manipulation is significantly more involved than
@@ -179,13 +171,11 @@ fn parse_markdown_slides(content: &str) -> Vec<Slide> {
             // silently empty.
             Event::Start(Tag::Image {
                 dest_url, title, ..
-            }) => {
-                if in_heading || in_item {
-                    text_buf.push_str(&format!(
+            }) if (in_heading || in_item) => {
+                text_buf.push_str(&format!(
                         "[image: {} — embed via DocxCreate or PdfCreate; pptx native image support coming]",
                         if !title.is_empty() { &*title } else { &*dest_url }
                     ));
-                }
             }
             _ => {}
         }

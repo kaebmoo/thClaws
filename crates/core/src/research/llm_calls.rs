@@ -800,7 +800,7 @@ fn parse_bulleted_list(text: &str) -> Vec<String> {
             continue;
         }
         let stripped = strip_list_marker(line);
-        let cleaned = stripped.trim_end_matches(|c: char| c == '.' || c == ',' || c == ';');
+        let cleaned = stripped.trim_end_matches(['.', ',', ';']);
         if !cleaned.is_empty() {
             out.push(cleaned.to_string());
         }

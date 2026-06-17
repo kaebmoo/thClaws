@@ -133,10 +133,8 @@ fn extract_shapes(xml: &str) -> Result<Vec<String>> {
                     in_text = true;
                 }
             }
-            Event::Empty(e) => {
-                if e.local_name().as_ref() == b"br" && depth_in_sp > 0 {
-                    current.push('\n');
-                }
+            Event::Empty(e) if e.local_name().as_ref() == b"br" && depth_in_sp > 0 => {
+                current.push('\n');
             }
             Event::End(e) => {
                 let local = e.local_name();
@@ -155,15 +153,13 @@ fn extract_shapes(xml: &str) -> Result<Vec<String>> {
                     }
                 }
             }
-            Event::Text(t) => {
-                if in_text {
-                    let raw = t
-                        .decode()
-                        .map_err(|e| Error::Tool(format!("text decode: {e}")))?;
-                    let unescaped = quick_xml::escape::unescape(&raw)
-                        .map_err(|e| Error::Tool(format!("text unescape: {e}")))?;
-                    current.push_str(&unescaped);
-                }
+            Event::Text(t) if in_text => {
+                let raw = t
+                    .decode()
+                    .map_err(|e| Error::Tool(format!("text decode: {e}")))?;
+                let unescaped = quick_xml::escape::unescape(&raw)
+                    .map_err(|e| Error::Tool(format!("text unescape: {e}")))?;
+                current.push_str(&unescaped);
             }
             Event::Eof => break,
             _ => {}

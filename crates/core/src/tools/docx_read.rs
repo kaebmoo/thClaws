@@ -156,18 +156,16 @@ fn walk_document_xml(xml: &str) -> Result<String> {
                 }
                 _ => {}
             },
-            Event::Text(t) => {
-                if in_text {
-                    let raw = t
-                        .decode()
-                        .map_err(|e| Error::Tool(format!("text decode: {e}")))?;
-                    // Resolve XML entities (&amp; &lt; &gt; &quot; &apos;).
-                    // OOXML body text rarely uses them but Word does encode
-                    // a literal `<` etc. — better to handle than not.
-                    let unescaped = quick_xml::escape::unescape(&raw)
-                        .map_err(|e| Error::Tool(format!("text unescape: {e}")))?;
-                    para_text.push_str(&unescaped);
-                }
+            Event::Text(t) if in_text => {
+                let raw = t
+                    .decode()
+                    .map_err(|e| Error::Tool(format!("text decode: {e}")))?;
+                // Resolve XML entities (&amp; &lt; &gt; &quot; &apos;).
+                // OOXML body text rarely uses them but Word does encode
+                // a literal `<` etc. — better to handle than not.
+                let unescaped = quick_xml::escape::unescape(&raw)
+                    .map_err(|e| Error::Tool(format!("text unescape: {e}")))?;
+                para_text.push_str(&unescaped);
             }
             Event::Eof => break,
             _ => {}

@@ -1112,10 +1112,9 @@ impl Agent {
                 // run_turn carries through every retry/iteration of
                 // the same turn. Cleared in the end-of-run_turn cleanup
                 // (alongside `model_override`).
-                let chunk_timeout_override = next_turn_chunk_timeout
+                let chunk_timeout_override = *next_turn_chunk_timeout
                     .lock()
-                    .expect("next_turn_chunk_timeout lock")
-                    .clone();
+                    .expect("next_turn_chunk_timeout lock");
                 // Cap the requested max_tokens against the model's
                 // documented `max_output` so we don't hit per-model 400s
                 // (e.g. gpt-4o = 16384, gpt-4-turbo = 4096). Pre-fix the
@@ -1569,7 +1568,7 @@ impl Agent {
                             // tool-level rejections); only the explicit
                             // approver Deny lands here.
                             if let Some(h) = &hooks {
-                                crate::hooks::fire_permission_denied(h, &name);
+                                crate::hooks::fire_permission_denied(h, name);
                             }
                             let denied = format!("denied by user: {name}");
                             result_blocks.push(ContentBlock::ToolResult {
@@ -1593,7 +1592,7 @@ impl Agent {
                     if let Some(h) = &hooks {
                         let input_str = serde_json::to_string(input)
                             .unwrap_or_else(|_| "<unserializable>".to_string());
-                        crate::hooks::fire_pre_tool_use(h, &name, &input_str);
+                        crate::hooks::fire_pre_tool_use(h, name, &input_str);
                     }
 
                     // ToolCallStart was yielded at parse time (see the
@@ -1643,7 +1642,7 @@ impl Agent {
                             crate::types::ToolResultContent::Text(s) => s.clone(),
                             crate::types::ToolResultContent::Blocks(_) => "<multimodal>".to_string(),
                         };
-                        crate::hooks::fire_post_tool_use(h, &name, &preview, is_error);
+                        crate::hooks::fire_post_tool_use(h, name, &preview, is_error);
                     }
                     result_blocks.push(ContentBlock::ToolResult {
                         tool_use_id: id.clone(),
@@ -1657,7 +1656,7 @@ impl Agent {
                     // errored tool call doesn't produce a widget. The
                     // fetch is best-effort — if it fails the user
                     // still sees the text result.
-                    let ui_resource = if matches!(tool_result, Ok(_)) {
+                    let ui_resource = if tool_result.is_ok() {
                         tool.fetch_ui_resource().await
                     } else {
                         None

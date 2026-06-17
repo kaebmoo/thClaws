@@ -296,8 +296,6 @@ mod tests {
     #[tokio::test]
     async fn cache_returns_same_instance_within_ttl() {
         _reset_cache_for_tests().await;
-        let prior_token = std::env::var("THCLAWS_API_TOKEN").ok();
-        std::env::set_var("THCLAWS_API_TOKEN", "test-cache");
 
         let first = get_info(AuthOk).await;
         let second = get_info(AuthOk).await;
@@ -305,11 +303,6 @@ mod tests {
         // between calls). Strong equality on a few stable fields.
         assert_eq!(first.workspace_dir, second.workspace_dir);
         assert_eq!(first.skills.len(), second.skills.len());
-
-        match prior_token {
-            Some(v) => std::env::set_var("THCLAWS_API_TOKEN", v),
-            None => std::env::remove_var("THCLAWS_API_TOKEN"),
-        }
     }
 
     #[tokio::test]

@@ -802,9 +802,9 @@ pub async fn ingest_pdf(
     });
     let alias_clean = sanitize_alias(&resolved_alias);
     if alias_clean.is_empty() {
-        return Err(Error::Tool(format!(
-            "alias derived from PDF is empty — pass --alias"
-        )));
+        return Err(Error::Tool(
+            "alias derived from PDF is empty — pass --alias".to_string(),
+        ));
     }
     // Run pdftotext in a blocking task — same shape PdfReadTool uses.
     let pdf_owned = pdf_path.to_path_buf();
@@ -1855,7 +1855,7 @@ fn extract_source_link_targets(body: &str) -> Vec<String> {
         let target = &rest[..end];
         // Strip optional `.md` suffix and any URL fragment / query.
         let cleaned = target
-            .split(|c| c == '#' || c == '?')
+            .split(['#', '?'])
             .next()
             .unwrap_or(target)
             .trim_end_matches(".md");

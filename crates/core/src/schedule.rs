@@ -500,10 +500,19 @@ fn wait_with_timeout(
 /// to `~/Library/Logs` so users have one consistent place to look
 /// across both OSes.
 pub fn log_dir_for(id: &str) -> Result<PathBuf> {
-    let home = crate::util::home_dir().ok_or_else(|| {
-        Error::Config("no home directory found — cannot place schedule logs".into())
-    })?;
-    Ok(home.join(".local/share/thclaws/logs").join(id))
+    #[cfg(test)]
+    // ponytail: test logs live in tmp so parallel HOME-mutating tests cannot delete them.
+    let base = std::env::temp_dir().join("thclaws-test-logs");
+
+    #[cfg(not(test))]
+    let base = {
+        let home = crate::util::home_dir().ok_or_else(|| {
+            Error::Config("no home directory found — cannot place schedule logs".into())
+        })?;
+        home.join(".local/share/thclaws/logs")
+    };
+
+    Ok(base.join(id))
 }
 
 // ─── Step 2: in-process scheduler ────────────────────────────────────

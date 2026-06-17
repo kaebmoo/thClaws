@@ -52,6 +52,7 @@ pub const MAX_HOOK_ENV_BYTES: usize = 8192;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
+#[derive(Default)]
 pub struct HooksConfig {
     pub pre_tool_use: Option<String>,
     pub post_tool_use: Option<String>,
@@ -64,22 +65,6 @@ pub struct HooksConfig {
     /// Per-hook timeout. M6.35 HOOK7. Defaults to
     /// [`DEFAULT_HOOK_TIMEOUT_SECS`] when None / unset.
     pub timeout_secs: Option<u64>,
-}
-
-impl Default for HooksConfig {
-    fn default() -> Self {
-        Self {
-            pre_tool_use: None,
-            post_tool_use: None,
-            post_tool_use_failure: None,
-            permission_denied: None,
-            session_start: None,
-            session_end: None,
-            pre_compact: None,
-            post_compact: None,
-            timeout_secs: None,
-        }
-    }
 }
 
 impl HooksConfig {

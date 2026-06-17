@@ -221,7 +221,6 @@ impl ResearchManager {
                 .split('-')
                 .next()
                 .unwrap_or("anon")
-                .to_string()
         );
         let cancel = CancelToken::new();
         let inner = JobInner {

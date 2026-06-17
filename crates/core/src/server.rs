@@ -1180,7 +1180,7 @@ async fn handle_socket(socket: WebSocket, state: ServeState, shared: Arc<SharedS
                 .as_ref()
                 .map(|r: &crate::multi_tenant::SessionRoots| r.sessions_dir.clone());
             let payload = build_initial_state_payload(sessions_dir);
-            let _ = initial_dispatch(payload);
+            initial_dispatch(payload);
         }),
         on_zoom: Arc::new(|_scale| {
             // Browser handles its own zoom (Cmd-+/-); no server-side

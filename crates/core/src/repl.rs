@@ -1215,7 +1215,7 @@ fn parse_research_start(args: &str) -> SlashCommand {
             }
             "--max-pages" if tokens.len() >= 2 => {
                 if let Ok(v) = tokens[1].parse::<u32>() {
-                    if v >= 1 && v <= 20 {
+                    if (1..=20).contains(&v) {
                         max_pages = Some(v);
                         tokens.drain(0..2);
                     } else {
@@ -1670,7 +1670,7 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
                 }
             } else if let Some(after_mp) = rest.strip_prefix("marketplace").map(str::trim_start) {
                 let parts: Vec<&str> = after_mp.split_whitespace().collect();
-                let refresh = parts.iter().any(|p| *p == "--refresh");
+                let refresh = parts.contains(&"--refresh");
                 SlashCommand::SkillMarketplace { refresh }
             } else if let Some(after_search) = rest.strip_prefix("search").map(str::trim_start) {
                 if after_search.is_empty() {
@@ -1915,10 +1915,8 @@ fn parse_memory_shortcut(input: &str) -> Option<SlashCommand> {
     // anchors the body separator.
     let after_hash = if let Some(rest) = input.strip_prefix("# ") {
         rest
-    } else if let Some(rest) = input.strip_prefix('#') {
-        rest
     } else {
-        return None;
+        input.strip_prefix('#')?
     };
 
     let (name_part, body_part) = after_hash.split_once(':')?;
@@ -5247,49 +5245,45 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 for msg in unread {
                     // Check for protocol messages (shutdown, etc.).
                     if let Some(proto) = crate::team::parse_protocol_message(msg.content()) {
-                        match proto {
-                            crate::team::ProtocolMessage::ShutdownRequest { from } => {
-                                // Check if we have unfinished work.
-                                let has_work = !pending_queue.is_empty();
-                                let has_active_task = mailbox
-                                    .task_queue()
-                                    .list(Some(crate::team::TaskStatus::InProgress))
-                                    .unwrap_or_default()
-                                    .iter()
-                                    .any(|t| t.owner.as_deref() == Some(agent_name));
+                        if let crate::team::ProtocolMessage::ShutdownRequest { from } = proto {
+                            // Check if we have unfinished work.
+                            let has_work = !pending_queue.is_empty();
+                            let has_active_task = mailbox
+                                .task_queue()
+                                .list(Some(crate::team::TaskStatus::InProgress))
+                                .unwrap_or_default()
+                                .iter()
+                                .any(|t| t.owner.as_deref() == Some(agent_name));
 
-                                if has_work || has_active_task {
-                                    // Reject shutdown — still working.
-                                    team_println!(
-                                        "[{agent_name}] shutdown rejected — still have unfinished work"
-                                    );
-                                    let reject = serde_json::to_string(
-                                        &crate::team::ProtocolMessage::ShutdownRejected {
-                                            from: agent_name.to_string(),
-                                            reason: "still have unfinished tasks".into(),
-                                        },
-                                    )
-                                    .unwrap_or_default();
-                                    let reject_msg =
-                                        crate::team::TeamMessage::new(agent_name, &reject);
-                                    let _ = mailbox.write_to_mailbox(&from, reject_msg);
-                                } else {
-                                    // Approve shutdown — idle, no tasks.
-                                    team_println!("[{agent_name}] shutdown approved — exiting");
-                                    let approve = serde_json::to_string(
-                                        &crate::team::ProtocolMessage::ShutdownApproved {
-                                            from: agent_name.to_string(),
-                                        },
-                                    )
-                                    .unwrap_or_default();
-                                    let approve_msg =
-                                        crate::team::TeamMessage::new(agent_name, &approve);
-                                    let _ = mailbox.write_to_mailbox(&from, approve_msg);
-                                    let _ = mailbox.write_status(agent_name, "stopped", None);
-                                    return Ok(());
-                                }
+                            if has_work || has_active_task {
+                                // Reject shutdown — still working.
+                                team_println!(
+                                    "[{agent_name}] shutdown rejected — still have unfinished work"
+                                );
+                                let reject = serde_json::to_string(
+                                    &crate::team::ProtocolMessage::ShutdownRejected {
+                                        from: agent_name.to_string(),
+                                        reason: "still have unfinished tasks".into(),
+                                    },
+                                )
+                                .unwrap_or_default();
+                                let reject_msg = crate::team::TeamMessage::new(agent_name, &reject);
+                                let _ = mailbox.write_to_mailbox(&from, reject_msg);
+                            } else {
+                                // Approve shutdown — idle, no tasks.
+                                team_println!("[{agent_name}] shutdown approved — exiting");
+                                let approve = serde_json::to_string(
+                                    &crate::team::ProtocolMessage::ShutdownApproved {
+                                        from: agent_name.to_string(),
+                                    },
+                                )
+                                .unwrap_or_default();
+                                let approve_msg =
+                                    crate::team::TeamMessage::new(agent_name, &approve);
+                                let _ = mailbox.write_to_mailbox(&from, approve_msg);
+                                let _ = mailbox.write_status(agent_name, "stopped", None);
+                                return Ok(());
                             }
-                            _ => {}
                         }
                     } else {
                         pending_queue.push_back(msg);

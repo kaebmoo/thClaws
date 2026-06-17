@@ -2555,17 +2555,15 @@ pub async fn dispatch(
                 .iter()
                 .rev()
                 .find(|m| matches!(m.role, crate::types::Role::Assistant))
-                .and_then(|m| {
-                    Some(
-                        m.content
-                            .iter()
-                            .filter_map(|b| match b {
-                                crate::types::ContentBlock::Text { text } => Some(text.as_str()),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n\n"),
-                    )
+                .map(|m| {
+                    m.content
+                        .iter()
+                        .filter_map(|b| match b {
+                            crate::types::ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n\n")
                 });
             let Some(answer_text) = answer.filter(|s| !s.trim().is_empty()) else {
                 emit(

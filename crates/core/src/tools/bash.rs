@@ -870,16 +870,15 @@ pub fn is_destructive_command(cmd: &str) -> bool {
     }
 
     // Detect piping download commands into a shell: curl ... | sh, wget ... | bash
-    if lower.contains("| sh")
+    if (lower.contains("| sh")
         || lower.contains("|sh")
         || lower.contains("| bash")
         || lower.contains("|bash")
         || lower.contains("| zsh")
-        || lower.contains("|zsh")
+        || lower.contains("|zsh"))
+        && (lower.contains("curl") || lower.contains("wget") || lower.contains("fetch "))
     {
-        if lower.contains("curl") || lower.contains("wget") || lower.contains("fetch ") {
-            return true;
-        }
+        return true;
     }
 
     false
