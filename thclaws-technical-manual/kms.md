@@ -432,6 +432,8 @@ _… index truncated at 200 entries (total: 487)_
 | `/kms migrate <name>` | Dry-run preview of the schema chain |
 | `/kms migrate <name> --apply` | Execute the chain. Aliases: `--execute`, `--run` (and `--dry-run` / `--plan` to opt back) |
 | `/kms file-answer <kms> <title>` (or `file`) | File latest assistant message as a new page |
+| `/kms export-okf <name> [<out-dir>]` (or `okf-export`) | Export the KMS as a conformant OKF v0.1 bundle to `./<name>-okf/` (or `<out-dir>`). See §16. |
+| `/kms import-okf <bundle-dir> <name> [--project]` (or `okf-import`) | Create a new KMS from an OKF bundle dir. Defaults to user scope; `--project` → `./.thclaws/kms/`. See §16. |
 
 **Source auto-detection** in `parse_slash`: `t == "$"` → `KmsIngestSession` (M6.28); `t.starts_with("http://") || t.starts_with("https://")` → `KmsIngestUrl`; `t.to_ascii_lowercase().ends_with(".pdf")` → `KmsIngestPdf`; otherwise `KmsIngest`.
 
@@ -617,7 +619,7 @@ When at least one KMS is in `kms_active`, **five tools** register into the `Tool
 | Tool | Approval | Purpose |
 |---|---|---|
 | `KmsRead` | No | Read a single page |
-| `KmsSearch` | No | Regex grep across all pages in one KMS |
+| `KmsSearch` | No | Two modes: `pattern:` (regex line grep, byte-identical pre-Tier-2 output) OR `query:` (BM25 ranked, requires `kms_search_index` feature). Optional `tags:` / `category:` / `limit:` filter the `query:` path. Mutually exclusive — `pattern` and `query` together return a clear error. See §"dev-plan/36 BM25 search architecture" below. |
 | `KmsWrite` | **Yes** | Create or replace a page |
 | `KmsAppend` | **Yes** | Append to a page |
 | `KmsDelete` | **Yes** | Remove a page (last resort; framed as "prefer KmsWrite to merge or supersede" in the system-prompt Tools block) |
@@ -766,7 +768,10 @@ crates/core/src/
 │                                          system_prompt_section + categorized index,
 │                                          mark_dependent_pages_stale + scan_stale_markers,
 │                                          Migration + migrations() + migrate +
-│                                          detect_schema_version + MigrationReport
+│                                          detect_schema_version + MigrationReport,
+│                                          export_okf + import_okf + OKF adapter helpers (§16)
+├── gui.rs (selected lines)             ── kms_export_okf / kms_import_okf IPC arms (native
+│                                          folder picker → export_okf / import_okf); §16
 ├── tools/
 │   └── kms.rs (430 LOC)                ── KmsRead, KmsSearch, KmsWrite, KmsAppend, KmsDelete
 ├── shell_dispatch.rs (selected lines)  ── /kms slash handlers (GUI), format_lint_report,
@@ -1000,3 +1005,270 @@ CLI emits the same `"GUI-only — dispatches the built-in kms-reconcile agent as
 | Produces "Conflict" pages | No | Yes (for genuinely-ambiguous findings) |
 
 The split is deliberate. `kms-linker` is *deterministic* — the lint report is generated mechanically and the agent acts on each entry. `kms-reconcile` is *judgment-driven* — every contradiction needs LLM evaluation (which side is more authoritative? is this evolution or contradiction?). Different jobs; same architectural seam.
+
+---
+
+## dev-plan/36 BM25 search architecture
+
+Tier 1–3 of dev-plan/36 add a tantivy-backed BM25 index sibling
+to the existing regex line-grep, exposed via `KmsSearch`'s new
+`query:` argument. Layout, write-path wiring, tokenizer, and
+manifest are documented here.
+
+### On-disk layout
+
+```text
+<kms_root>/
+├── pages/              ← source of truth (markdown)
+├── .index/             ← tantivy index dir (`kms_search_index` owns)
+│   ├── meta.json       ← tantivy's own metadata
+│   ├── *.fast / *.idx  ← tantivy segments
+│   └── manifest.json   ← thClaws metadata: {index_version,
+│                          last_full_rebuild_at}
+└── .index/vectors/     ← reserved for a future semantic-search
+                          dev-plan; never touched in Tier 1–3
+```
+
+Reserving `.index/vectors/` as a sibling means a future semantic-
+search PR can land without disk-schema migration.
+
+### Schema + field boosts
+
+| Field    | Type | Stored | Indexed   | Boost (query-time) |
+|----------|------|--------|-----------|--------------------|
+| page     | text | yes    | raw       | — (identity)       |
+| title    | text | yes    | tokenized | 4.0                |
+| topic    | text | yes    | tokenized | 2.0                |
+| body     | text | no     | tokenized | 1.0                |
+| tags     | text | yes    | raw, multi| — (filter)         |
+| category | text | yes    | raw       | — (filter)         |
+| sources  | text | no     | raw, multi| — (filter)         |
+| updated  | i64  | yes    | INDEXED + FAST | — (Tier 4 recency boost) |
+
+Body is **indexed but NOT stored** — page content lives on disk;
+duplicating it into the index would double disk usage. Snippet
+generation in `tools/kms.rs::format_hits` re-reads page bodies from
+disk for the top-K hits only.
+
+Field boosts are applied **at query time** via `QueryParser::
+set_field_boost`, not baked into the schema. This lets us revisit
+the boost values (or make them config-driven) without rebuilding
+existing indexes.
+
+### Tokenizer
+
+Custom `ThaiOrEnglishTokenizer` (in `kms_search_index.rs`) splits
+input by script:
+
+- ASCII whitespace + punct → separators
+- ASCII alphanumeric run → one token (English identifiers + numbers)
+- Non-ASCII run → segmented via `crate::thai::Segmenter`
+  (newmm-style maximum matching over an `fst::Set` Thai dict)
+
+Token filter chain: `LowerCaser` only. English stemming is
+intentionally NOT in the pipeline — applying en-stemmer to Thai
+tokens mangles them, and per-token language detection costs more
+than it's worth for BM25 indexing.
+
+The Thai segmenter is documented in `crates/core/src/thai/` —
+see the module's `//!` docs for the algorithm + the
+`scripts/build_thai_dict/README.md` for the Wiktionary dictionary
+pipeline.
+
+### Write-path wiring
+
+`crates/core/src/kms.rs` fires `kms_search_index::on_page_mutated`
+after every successful page mutation:
+
+| KMS fn          | Op                              |
+|-----------------|---------------------------------|
+| `write_page`    | `Upsert`                        |
+| `append_to_page`| `Upsert` (re-reads whole page) |
+| `delete_page`   | `Delete`                        |
+| `rename_page`   | `Delete(old)` + `Upsert(new)`   |
+| `merge_into`    | NOT wired (per-page) — relies on auto-rebuild-on-stale or `/kms reindex` |
+| `auto_link`     | NOT wired (per-page) — same     |
+
+`merge_into` + `auto_link` mutate many pages in one call; wiring
+per-page hooks there would require threading the affected-page set
+through their internals. The auto-rebuild-on-stale path catches
+them; operators can also `/kms reindex <name>` after a bulk op.
+
+### Concurrency: per-kms-root SearchIndex registry
+
+Tantivy's `IndexWriter` holds a directory-level lock. Naive
+"open a fresh index per mutation" collides on `LockBusy`.
+`kms_search_index::registry()` is a process-wide
+`OnceLock<Mutex<HashMap<PathBuf, Arc<SearchIndex>>>>` that hands
+out one cached `Arc<SearchIndex>` per `kms_root` for the process
+lifetime. The `SearchIndex`'s internal writer `Mutex` serialises
+concurrent upsert/delete cleanly. `drop_cached(kms_root)` is the
+explicit eviction handle used by `full_rebuild` (which deletes
+`.index/` and needs to reopen).
+
+### Auto-build-on-stale manifest
+
+`<kms_root>/.index/manifest.json`:
+
+```json
+{
+  "index_version": 1,
+  "last_full_rebuild_at": 1717200000
+}
+```
+
+On every `KmsSearch(query: …)`, `tools/kms.rs::kms_search_query_path`
+reads the manifest. If absent OR `index_version` doesn't match the
+current binary's `kms_search_index::INDEX_VERSION` const, calls
+`full_rebuild` before serving the query + emits an
+`[index rebuilt — N page(s) indexed]` advisory. Bump
+`INDEX_VERSION` whenever a non-backward-compatible schema or
+tokenizer change ships; users get a one-time rebuild on first
+search after the upgrade.
+
+### Feature gating: `kms_search_index`
+
+Per dev-plan/36 D3 the feature is **opt-in forever** at the Cargo
+level (`default = []`; `kms_search_index = ["dep:tantivy",
+"dep:fst"]`). Adds ~4-5 MB to the binary.
+
+Build wiring:
+
+- `Makefile` `build-cli` / `build-app` add `--features
+  kms_search_index` so day-to-day local builds match released
+  binaries.
+- `.github/workflows/release.yml` adds the feature to the matrix
+  that produces shipped binaries.
+- `.github/workflows/ci.yml` runs a second job with
+  `--features kms_search_index` (build + test) to prevent
+  bitrot in the BM25 path; the default `--features gui` job
+  catches the regex-only path.
+- `cargo install thclaws-core` defaults to OFF; users opt in via
+  `--features kms_search_index`.
+- `KmsSearch(query: …)` from a feature-off binary returns a clear
+  "feature not enabled, use `pattern:` instead" error.
+
+### `/kms reindex <name>` slash command
+
+`SlashCommand::KmsReindex(name)`; handlers in `repl.rs` (CLI) +
+`shell_dispatch.rs` (GUI / `--serve`). Drops `.index/` and calls
+`full_rebuild`. Operator-only (no `KmsReindex` model-callable
+tool — the auto-build-on-stale path covers self-healing).
+
+---
+
+## 16. OKF (Open Knowledge Format) import/export
+
+[OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog) (Google,
+v0.1) formalizes the same Karpathy "LLM wiki" pattern the KMS is built
+on: a directory of markdown concept files with YAML frontmatter, an
+`index.md`, a `log.md`, and markdown cross-links. The KMS is an
+opinionated **superset**, so interop is a thin frontmatter/layout
+**adapter** — `export_okf` / `import_okf` in `kms.rs` — not a second
+store. We deliberately did **not** convert the KMS to be OKF-native:
+OKF's value is portable interchange, while the KMS is the live working
+store with security hardening, scopes, BM25, and `manifest.json`
+enforcement. The adapter keeps each side's contract intact and is fully
+reversible.
+
+### Field mapping
+
+| KMS | OKF | Direction |
+|---|---|---|
+| `category:` | `type:` (OKF's only REQUIRED field) | both — export falls back to `Note`; import prefers `category:`, else `type:`, else `uncategorized` |
+| `topic:` | `description:` | both |
+| `updated:` | `timestamp:` | both — import takes the date part of an ISO 8601 stamp |
+| `tags: a, b` (CSV string) | `tags: [a, b]` (YAML list) | both — `tags_to_yaml_list` / `tags_to_csv` |
+| `pages/<stem>.md` | concept `.md` (any path) | export keeps `pages/`; import flattens nested paths to a stem and de-collides |
+| `sources/<f>` | `references/<f>` | both — `.md` sources get a reversible `type: Source` shim so they stay conformant |
+| `[[wikilink]]` | `[wikilink](/pages/wikilink.md)` | export only (`wikilinks_to_okf`); import rewrites concept links to KMS-relative + follows the flattening |
+| `## [date] verb \| alias` | `## date` + `* **Verb**: alias` | both — `kms_log_to_okf` / `okf_log_to_kms` |
+| `SCHEMA.md` (no frontmatter) | `SCHEMA.md` + `type: OKF Schema` | export adds the shim; import strips it |
+| `manifest.json` | `manifest.json` (verbatim) | copied both ways — non-`.md`, OKF ignores it; aids round-trip |
+
+KMS-only keys with no OKF home (`sources`, `verified`, `created`) ride
+along verbatim — OKF tolerates arbitrary producer keys, so
+KMS→OKF→KMS is lossless for them.
+
+### `export_okf(name, out_dir) -> OkfExportReport`
+
+Resolves the KMS, then writes a **conformant OKF v0.1 bundle** (every
+non-reserved `.md` carries a `type`):
+
+```
+out_dir/
+  index.md        — okf_version: "0.1" frontmatter + the KMS index body
+  log.md          — date-grouped OKF history
+  SCHEMA.md       — KMS schema with a `type: OKF Schema` shim
+  manifest.json   — copied verbatim
+  pages/<stem>.md — concepts: frontmatter normalised, wikilinks → md links
+  references/<f>  — raw sources (md gets the `type: Source` shim)
+```
+
+`OkfExportReport { pages, sources, out_dir }`.
+
+### `import_okf(bundle, name, scope) -> OkfImportReport`
+
+Creates a **new** KMS (errors if `name` already exists at `scope`),
+then ingests the bundle **permissively** per OKF §9 — unknown types,
+missing fields, and broken links are all tolerated:
+
+- **Concepts** are collected recursively (`collect_okf_concepts`),
+  skipping symlinks, reserved files (`index.md` / `log.md` /
+  `SCHEMA.md` at any level), and the `references/` subtree. Concepts may
+  live **anywhere** in the tree, not just `pages/`. Each gets a flat
+  stem (`okf_concept_stem`: drop a leading `pages/`, join nested
+  components with `-`), de-colliding with a `-2`, `-3`… suffix.
+- A two-pass walk builds a bundle-path → stem map first, then rewrites
+  each page's cross-concept links (`rewrite_okf_concept_links`) so a
+  link to `/tables/x.md` follows the flattening to `pages/tables-x.md`.
+- `references/` → `sources/`, unwrapping the `type: Source` shim.
+- `log.md` / `SCHEMA.md` / `manifest.json` are converted/restored.
+- The KMS `index.md` is **rebuilt from the imported pages**
+  (`rebuild_index_from_pages`) rather than translated — the OKF index
+  is "an optimization," and the result must be KMS-native.
+
+`OkfImportReport { pages, sources, root }`.
+
+### Slash commands
+
+`SlashCommand::KmsExportOkf { name, output_dir }` and
+`KmsImportOkf { bundle, name, scope }` — parsed in `repl.rs`, dispatched
+in both `shell_dispatch.rs` (GUI / `--serve`) and `repl.rs` (CLI). Export
+defaults `output_dir` to `./<name>-okf`; import defaults to user scope
+(`--project` opts into project scope). Pure file transforms — no agent
+turn, no LLM.
+
+### GUI: "Knowledge" header context menu
+
+The desktop sidebar's **Knowledge** section header has a right-click
+context menu (`Sidebar.tsx`):
+
+- **Import OKF bundle…** opens a modal for the new KMS name + scope,
+  then sends `kms_import_okf`.
+- **Export OKF bundle** lists each KMS (export is per-KMS); clicking one
+  sends `kms_export_okf`.
+
+Both IPC messages are handled in **`gui.rs`** (not the
+transport-agnostic `handle_ipc` path) because each opens a native `rfd`
+folder picker — for export the destination, for import the bundle dir —
+which only exists in the desktop binary. The picker blocks the event
+loop the same way the existing `pick_directory` arm does
+(`pick_directory_native` gained a `title` parameter). Results come back
+as a `kms_okf_result` `{ ok, message }` envelope rendered as a transient
+status line under the header; a successful import additionally re-emits
+`build_update_payload()` so the KMS list refreshes and the new base
+appears with its attach checkbox. In `--serve` / remote mode the menu
+still renders but the messages no-op (you cannot pop a host-side dialog
+for a remote browser) — the slash commands are the path for non-GUI
+surfaces.
+
+### Tests
+
+`kms.rs` test module: `okf_tag_conversions_round_trip`,
+`okf_wikilinks_become_bundle_relative_links`,
+`okf_export_produces_conformant_bundle`,
+`okf_round_trip_preserves_page_fields` (full KMS→OKF→KMS),
+`okf_import_handles_root_level_concepts_and_missing_type`,
+`okf_import_rejects_existing_name`. Parser coverage in `repl.rs`:
+`parse_slash_kms_export_okf`, `parse_slash_kms_import_okf`.

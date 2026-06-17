@@ -370,19 +370,70 @@ impl SkillStore {
         // for the `dream` built-in agent: ship a curated default,
         // let users redefine if they want.
         store.seed_builtins();
-        for dir in Self::user_skill_dirs() {
-            if dir.exists() {
-                store.load_dir(&dir);
+        // Shared-agent strict mode (dev-plan/41): skip every member-scope
+        // source so only built-ins + the company skills load.
+        let strict = crate::shared::is_strict();
+        if !strict {
+            for dir in Self::user_skill_dirs() {
+                if dir.exists() {
+                    store.load_dir(&dir);
+                }
+            }
+            for dir in extra {
+                if dir.exists() {
+                    store.load_dir(dir);
+                }
+            }
+            for dir in Self::project_skill_dirs() {
+                if dir.exists() {
+                    store.load_dir(&dir);
+                }
             }
         }
-        for dir in extra {
-            if dir.exists() {
-                store.load_dir(dir);
+        // Company skills load LAST so they win on name collision (and are
+        // the only disk source under strict mode).
+        if let Some(shared) = crate::shared::shared_skills_dir() {
+            if shared.exists() {
+                store.load_dir(&shared);
             }
         }
-        for dir in Self::project_skill_dirs() {
-            if dir.exists() {
-                store.load_dir(&dir);
+        store
+    }
+
+    /// Workspace-scoped discovery. Mirrors [`Self::discover_with_extra`]
+    /// but joins the project skill dirs (`.claude/skills`,
+    /// `.thclaws/skills`) onto the supplied `workspace_dir` rather than
+    /// the process CWD. Used by the `/agent/run` endpoint where each
+    /// request carries its own per-agent workspace path — see
+    /// `dev-plan/25-thclaws-as-agent.md`.
+    pub fn discover_in(workspace_dir: &Path, extra: &[PathBuf]) -> Self {
+        let mut store = Self::default();
+        store.seed_builtins();
+        // dev-plan/41: mirror discover_with_extra's shared-agent handling
+        // on the workspace surface — strict mode skips member-scope skills,
+        // and the company's shared skills load last (and win).
+        let strict = crate::shared::is_strict();
+        if !strict {
+            for dir in Self::user_skill_dirs() {
+                if dir.exists() {
+                    store.load_dir(&dir);
+                }
+            }
+            for dir in extra {
+                if dir.exists() {
+                    store.load_dir(dir);
+                }
+            }
+            for rel in Self::project_skill_dirs() {
+                let dir = workspace_dir.join(rel);
+                if dir.exists() {
+                    store.load_dir(&dir);
+                }
+            }
+        }
+        if let Some(shared) = crate::shared::shared_skills_dir() {
+            if shared.exists() {
+                store.load_dir(&shared);
             }
         }
         store
@@ -1766,6 +1817,64 @@ mod tests {
             .contains("{skill_dir}"));
     }
 
+    #[test]
+    fn discover_in_finds_skills_in_workspace_subdirs() {
+        // Workspace-scoped discovery: `.thclaws/skills/<name>/SKILL.md`
+        // and `.claude/skills/<name>/SKILL.md` resolved against the
+        // supplied workspace_dir, not the process CWD. Critical for
+        // `/agent/run` where each request carries its own workspace.
+        let workspace = tempdir().unwrap();
+        let thclaws_dir = workspace.path().join(".thclaws/skills");
+        let claude_dir = workspace.path().join(".claude/skills");
+        std::fs::create_dir_all(&thclaws_dir).unwrap();
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        create_skill(
+            &thclaws_dir,
+            "deploy",
+            "---\nname: deploy\ndescription: Deploy to staging\n---\nbody",
+            &[],
+        );
+        create_skill(
+            &claude_dir,
+            "lint",
+            "---\nname: lint\ndescription: Run linters\n---\nbody",
+            &[],
+        );
+
+        let store = SkillStore::discover_in(workspace.path(), &[]);
+        assert!(
+            store.get("deploy").is_some(),
+            "should find .thclaws/skills/deploy"
+        );
+        assert!(
+            store.get("lint").is_some(),
+            "should find .claude/skills/lint"
+        );
+    }
+
+    #[test]
+    fn discover_in_ignores_skills_outside_workspace() {
+        // Skills in some other directory must NOT leak into the
+        // workspace-scoped store — that's the isolation contract for
+        // multi-agent daemons.
+        let workspace = tempdir().unwrap();
+        let unrelated = tempdir().unwrap();
+        let unrelated_thclaws = unrelated.path().join(".thclaws/skills");
+        std::fs::create_dir_all(&unrelated_thclaws).unwrap();
+        create_skill(
+            &unrelated_thclaws,
+            "leak",
+            "---\nname: leak\ndescription: should not appear\n---\nbody",
+            &[],
+        );
+
+        let store = SkillStore::discover_in(workspace.path(), &[]);
+        assert!(
+            store.get("leak").is_none(),
+            "skill in unrelated workspace must not appear in this workspace's store"
+        );
+    }
+
     // ── built-in skills (seed_builtins) ──────────────────────────────
 
     #[test]
@@ -1911,13 +2020,12 @@ mod tests {
         }
     }
 
-    /// Serializes tests in this module that mutate process-global CWD
-    /// — `set_current_dir` is a process-wide effect and parallel
-    /// `cargo test` runs would interleave otherwise. Same pattern as
-    /// `agent::tests::with_cwd`.
+    /// Serializes against the crate-wide env lock so concurrent tests
+    /// in kms/plugins/context/agent/config/repl/web that also mutate
+    /// cwd or HOME don't race with us. A module-local CWD_LOCK would
+    /// only block siblings inside this file.
     fn with_cwd<R>(dir: &Path, f: impl FnOnce() -> R) -> R {
-        static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = CWD_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = crate::kms::test_env_lock();
         let prior = std::env::current_dir().expect("cwd readable");
         std::env::set_current_dir(dir).expect("cwd to test dir");
         let out = f();
@@ -1960,6 +2068,68 @@ mod tests {
         assert!(
             body.contains("LOAD ME AFTER CWD CHANGE"),
             "lazy body should resolve under absolute path, got: {body:?}",
+        );
+    }
+
+    /// Tier-1 fix regression test for the v0.24 audit:
+    /// `SkillStore::discover()` is cwd-sensitive — its project-dir
+    /// scan resolves relative paths against `std::env::current_dir()`
+    /// indirectly via `load_dir`. The GUI worker's
+    /// `ShellInput::ChangeCwd` arm (`shared_session.rs:2866`) relies
+    /// on this: it calls `SkillStore::discover()` after `cwd`
+    /// updates, expecting the new cwd's `.thclaws/skills/<name>/`
+    /// to surface and any previous-cwd project skills to drop out.
+    ///
+    /// Without this property, the in-session "switch project"
+    /// affordance silently retains the previous project's skill
+    /// catalog forever — the original v0.24 bug.
+    ///
+    /// User-level skills (`~/.config/thclaws/skills/`, absolute) are
+    /// out of scope here; they correctly persist across cwd changes
+    /// regardless. This test only pins project-scope behaviour.
+    #[test]
+    fn discover_is_cwd_sensitive_for_project_skills() {
+        let proj_a = tempdir().unwrap();
+        let proj_b = tempdir().unwrap();
+
+        std::fs::create_dir_all(proj_a.path().join(".thclaws/skills/alpha")).unwrap();
+        std::fs::write(
+            proj_a.path().join(".thclaws/skills/alpha/SKILL.md"),
+            "---\nname: alpha\ndescription: only in project A\n---\nA body\n",
+        )
+        .unwrap();
+
+        std::fs::create_dir_all(proj_b.path().join(".thclaws/skills/beta")).unwrap();
+        std::fs::write(
+            proj_b.path().join(".thclaws/skills/beta/SKILL.md"),
+            "---\nname: beta\ndescription: only in project B\n---\nB body\n",
+        )
+        .unwrap();
+
+        // discover() from project A — should see alpha, not beta.
+        let from_a = with_cwd(proj_a.path(), SkillStore::discover);
+        assert!(
+            from_a.skills.contains_key("alpha"),
+            "expected alpha in A's discover, got keys: {:?}",
+            from_a.skills.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !from_a.skills.contains_key("beta"),
+            "beta must NOT leak across cwd boundaries"
+        );
+
+        // discover() from project B — should see beta, not alpha.
+        // This is what the ChangeCwd fix at shared_session.rs:~2944
+        // re-runs after the worker's cwd flips.
+        let from_b = with_cwd(proj_b.path(), SkillStore::discover);
+        assert!(
+            from_b.skills.contains_key("beta"),
+            "expected beta in B's discover, got keys: {:?}",
+            from_b.skills.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !from_b.skills.contains_key("alpha"),
+            "alpha must NOT leak across cwd boundaries"
         );
     }
 

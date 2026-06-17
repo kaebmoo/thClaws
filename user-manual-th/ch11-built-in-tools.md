@@ -138,6 +138,54 @@ thClaws redistribute ได้ภายใต้ MIT/Apache ฟอนต์ Noto
   style, formula, chart และ conditional formatting ในส่วนที่ไม่เกี่ยวข้อง
   จะอยู่ครบหลังจากโหลด+แก้+เซฟ เซลล์ใช้ที่อยู่แบบ A1 (`B7`, `AA12`)
 
+## สื่อ — สร้างภาพและวิดีโอ
+
+เครื่องมือสร้างและแก้ไขภาพ/วิดีโอแบบ provider-abstracted หนึ่ง tool ต่อ
+หนึ่งงาน เลือก backend ด้วยอาร์กิวเมนต์ `provider` + `model` **ปิดอยู่โดย
+ค่าเริ่มต้น** — ดู "เปิดใช้ media tools" ด้านล่าง ภาพถูกเขียนไปที่
+`output/img-<ts>-<hash>.<ext>` ส่วนวิดีโอรันเป็น async job แล้วไปอยู่ที่
+`output/vid-<ts>-<hash>.mp4` เมื่อเสร็จ
+
+| Tool | การอนุมัติ | สรุป |
+|---|---|---|
+| `TextToImage` | prompt | prompt → ภาพ |
+| `ImageToImage` | prompt | ภาพต้นทาง + prompt → ภาพที่แก้แล้ว |
+| `TextToVideo` | prompt | prompt → วิดีโอ (async job) |
+| `ImageToVideo` | prompt | ภาพต้นทางเป็นเฟรมแรก + prompt → วิดีโอ (async job) |
+| `MediaJobStatus` | auto | poll งาน async ด้วย `job_id` → `running` / `done` (path) / `failed` |
+
+**โมเดลและ key** (เลือกด้วยอาร์กิวเมนต์ `model`):
+
+| Provider | โมเดลภาพ | โมเดลวิดีโอ | Key |
+|---|---|---|---|
+| Google Gemini | `gemini-3.1-flash-image`, `gemini-3.1-pro-image` | `veo-3.1-fast-generate-preview`, `veo-3.1-generate-preview`, `veo-3.1-lite-generate-preview` | `GEMINI_API_KEY` / `GOOGLE_API_KEY` |
+| OpenAI | `gpt-image-2` | — | `OPENAI_API_KEY` |
+| Alibaba DashScope | `qwen-image-2.0`, `qwen-image-2.0-pro` | `happyhorse-1.0-t2v` (text→video), `happyhorse-1.0-i2v` (image→video) | `DASHSCOPE_API_KEY` |
+
+- **วิดีโอเป็นแบบ asynchronous** `TextToVideo` / `ImageToVideo` จะ submit
+  งานแล้วคืน `job_id` ทันที — ไฟล์ยังไม่พร้อม เรียก
+  `MediaJobStatus { job_id }` เพื่อ poll: `running`, `done` (พร้อม path
+  `output/…mp4`) หรือ `failed` (พร้อม error ของ provider) สถานะงานถูก
+  บันทึกที่ `.thclaws/media-jobs.jsonl` การ poll จึงรอดแม้รีสตาร์ท
+- **คลิป Veo ยาว 4–8 วินาที** Veo และ HappyHorse รับ `resolution` เป็น
+  `720P` หรือ `1080P`
+- **`ImageToVideo`** ใช้ภาพในเครื่องเป็นเฟรมแรก ส่งแบบ inline (base64
+  data URI) — ไม่มีขั้นตอน upload แยก
+
+### เปิดใช้ media tools
+
+media tools มีค่าใช้จ่ายต่อภาพ / ต่อวินาทีวิดีโอ จึง **ปิดอยู่โดยค่า
+เริ่มต้น** เปิดใน `settings.json`:
+
+```jsonc
+// ./.thclaws/settings.json
+{ "mediaToolsEnabled": true }   // alias เดิม: "imageToolsEnabled"
+```
+
+GUI shell **Media Studio** ที่มีมาให้ (บทที่ 26) จะเปิด media tools ให้
+อัตโนมัติสำหรับ session ของมันเองโดยไม่สนใจ flag นี้ — เป็นทางเข้าแบบ
+คลิก ๆ ไม่ต้องตั้งค่า สำหรับคนที่ไม่ได้สั่ง agent ผ่านแชต
+
 ## ปฏิสัมพันธ์กับผู้ใช้
 
 | Tool | การอนุมัติ | สรุป |
@@ -204,16 +252,24 @@ turn ปกติจะมีหน้าตาแบบนี้:
 ❯ check if there's a README and show me its first section
 
 [tool: Glob: README*] ✓
-[tool: Read: README.md] ✓
+[tool: Read: README.md] ✓ 0.2s
 The README's first section is "Install" — it walks through…
 [tokens: 2100in/145out · 1.8s]
 ```
 
 - `[tool: Name: detail]` — tool ที่ถูกเรียก พร้อมพรีวิว argument
-  แบบย่อ (path แรก, คำสั่ง, URL ฯลฯ)
-- `✓` ต่อท้าย — tool ทำงานสำเร็จ
+  แบบย่อ (path แรก, คำสั่ง, URL, search query ฯลฯ) โดยค่าที่ดูเหมือน
+  secret เช่น token, API key, password และ bearer auth header จะถูก
+  redact ก่อนแสดงผล
+- `✓ <duration>` ต่อท้าย — tool ทำงานสำเร็จ พร้อมเวลาที่ใช้
 - `✗ <error>` ต่อท้าย — tool ล้มเหลว โดยโมเดลจะได้รับ error คืนและอาจ
   ลองใหม่ด้วยวิธีอื่น
+- tool ที่รันนานจะแสดง heartbeat แบบไม่ถี่เกินไป หลังประมาณ 10 วินาที
+  แล้วตามด้วยทุก ๆ ประมาณ 30 วินาทีขณะยังรันอยู่:
+
+```
+[tool: Bash (cargo test -p thclaws-core)] still running 40s
+```
 
 ## การตัด tool output
 

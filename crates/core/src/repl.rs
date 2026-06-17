@@ -6,10 +6,8 @@
 
 use crate::agent::{Agent, AgentEvent};
 use crate::config::{AppConfig, ProjectConfig};
-use crate::context::ProjectContext;
 use crate::error::{Error, Result};
 use crate::mcp::{McpClient, McpServerConfig, McpTool};
-use crate::memory::MemoryStore;
 use crate::permissions::{PermissionMode, ReplApprover};
 use crate::providers::{
     anthropic::AnthropicProvider, gemini::GeminiProvider, ollama::OllamaProvider,
@@ -33,11 +31,69 @@ const COLOR_RED: &str = "\x1b[31m";
 
 const REPL_PROMPT: &str = "❯ ";
 
+/// Compact display of a token count: <1k as raw, 1k–9.9k as `X.Yk`,
+/// 10k+ as `XXk`, 1M+ as `X.YM`. Used in the workflow run summary
+/// (dev-plan/32 Stage I).
+fn format_token_count(n: u64) -> String {
+    if n < 1_000 {
+        format!("{n}")
+    } else if n < 10_000 {
+        format!("{:.1}k", (n as f64) / 1_000.0)
+    } else if n < 1_000_000 {
+        format!("{}k", n / 1_000)
+    } else {
+        format!("{:.1}M", (n as f64) / 1_000_000.0)
+    }
+}
+
 fn readline_config() -> rustyline::Config {
     let builder = rustyline::Config::builder();
     #[cfg(windows)]
     let builder = builder.behavior(rustyline::Behavior::PreferTerm);
     builder.build()
+}
+
+/// Number of codepoints in the last `n` grapheme clusters of `before`
+/// (the text left of the cursor). Drives grapheme-aware Backspace so a
+/// single press deletes a whole user-perceived character — Thai/Lao
+/// consonant + vowel/tone marks, Hindi/Arabic combining marks, emoji ZWJ
+/// sequences — instead of orphaning one codepoint at a time. `0` when
+/// `before` is empty (caller falls back to rustyline's default).
+fn grapheme_backspace_chars(before: &str, n: usize) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+    before
+        .graphemes(true)
+        .rev()
+        .take(n.max(1))
+        .map(|g| g.chars().count())
+        .sum()
+}
+
+/// rustyline keybinding: make Backspace delete a grapheme cluster rather
+/// than a single codepoint. The default Backspace is
+/// `Cmd::Kill(Movement::BackwardChar(1))`; we generalise the count to the
+/// cluster size at the cursor. Avoids vendoring/forking rustyline (cf.
+/// thClaws#126) — it's the public `ConditionalEventHandler` API.
+struct GraphemeBackspace;
+
+impl rustyline::ConditionalEventHandler for GraphemeBackspace {
+    fn handle(
+        &self,
+        _evt: &rustyline::Event,
+        n: rustyline::RepeatCount,
+        _positive: bool,
+        ctx: &rustyline::EventContext,
+    ) -> Option<rustyline::Cmd> {
+        let before = &ctx.line()[..ctx.pos()];
+        let chars = grapheme_backspace_chars(before, n);
+        // At beginning-of-line (nothing to delete) defer to the default.
+        if chars == 0 {
+            return None;
+        }
+        Some(rustyline::Cmd::Kill(rustyline::Movement::BackwardChar(
+            chars,
+        )))
+    }
 }
 /// Render the current plan as a coloured ANSI block for the CLI
 /// terminal — analogue of the right-side `PlanSidebar` component the
@@ -177,6 +233,12 @@ pub enum SlashCommand {
         key: String,
         value: String,
     },
+    /// Session-level cost counter shown alongside the per-turn token
+    /// line. `reset: true` zeroes the accumulator; `reset: false`
+    /// prints the current value.
+    Cost {
+        reset: bool,
+    },
     Save,
     Load(String),
     Sessions,
@@ -291,6 +353,10 @@ pub enum SlashCommand {
         name: String,
         url: String,
         user: bool,
+        /// Optional HTTP headers from repeatable `--header "K: V"` flags.
+        /// Values may contain `${VAR}` — resolved from the environment at
+        /// connection time so secrets stay out of mcp.json.
+        headers: Vec<(String, String)>,
     },
     /// `/mcp add <name> <command> [args...]` — stdio transport, sibling
     /// of `McpAdd` (HTTP). Routed by `parse_mcp_subcommand` based on
@@ -304,6 +370,14 @@ pub enum SlashCommand {
     McpRemove {
         name: String,
         user: bool,
+    },
+    /// `/mcp reauth <name>` — re-authorize a remote (HTTP) MCP server.
+    /// Clears any cached token for that server and runs a fresh OAuth
+    /// flow: laptop opens the user's browser, pod surfaces a clickable
+    /// auth URL whose redirect lands on `/v1/oauth/callback`. See
+    /// `api_v1::oauth_callback` for the pod-side flow.
+    McpReauth {
+        name: String,
     },
     Plugins,
     PluginInstall {
@@ -347,6 +421,23 @@ pub enum SlashCommand {
     /// session's on-disk JSONL has grown past the working threshold
     /// and continuing in-place would keep bloating the file.
     Fork,
+    /// `/reload` — re-execute the current thclaws binary in place.
+    /// Drops in-memory state (MCP handles, system prompt, skill
+    /// caches, current chat) and starts fresh; on-disk sessions
+    /// survive so the user can resume. Works the same on pod
+    /// (--serve) and laptop (GUI/CLI). For a real container restart
+    /// that picks up a new image, use `/deploy --restart` instead.
+    Reload,
+    /// Rebuild the agent's system prompt in-place from the current
+    /// project state (skills, MCP instructions, KMS catalogue,
+    /// memory, AGENTS.md, etc.) without re-execing. Use after
+    /// editing AGENTS.md / memory files / KMS catalogue when you
+    /// want the change to reach the model before the next /reload.
+    /// Mid-session mutators that the REPL already knows about
+    /// (`/mcp add`, `/skill install`, `/kms use`, …) rebuild
+    /// automatically — this is the escape hatch for everything
+    /// else.
+    ReloadPrompt,
     Doctor,
     Skills,
     /// Org-policy SSO subcommands (Phase 4).
@@ -499,6 +590,28 @@ pub enum SlashCommand {
     /// M6.25 BUG #3: lint a KMS for orphans / broken links / index drift /
     /// missing frontmatter. Pure-read; no mutation.
     KmsLint(String),
+    /// dev-plan/36 Tier 3.B: drop `<kms_root>/.index/` and rebuild
+    /// from `pages/` on disk. Used after a `merge_into` /
+    /// `auto_link` (which mutate many pages without firing per-page
+    /// index hooks) or after a manual `pages/` edit outside the
+    /// thClaws tools. Operator-only; the model does NOT have a
+    /// reindex tool — auto-build-on-stale-manifest handles the
+    /// self-healing case. No-op when the `kms_search_index` Cargo
+    /// feature is off (the slash command prints a clear message).
+    KmsReindex(String),
+    /// dev-plan/36 follow-up: operator-facing one-shot search
+    /// without a model round-trip. `name` accepts `*` to fan out
+    /// across every visible KMS (project + user scope per
+    /// `kms::list_all`); results are grouped under a per-KMS
+    /// `── KMS: <name> ──` header so attribution stays clear.
+    /// `is_pattern: true` routes through the regex line-grep path
+    /// (same surface as the model-callable tool's `pattern:`);
+    /// false uses BM25 `query:`.
+    KmsSearch {
+        name: String,
+        query: String,
+        is_pattern: bool,
+    },
     /// Session-end review: lint + stale-marker scan rolled into one
     /// summary so the user closes the loop before quitting. Pure-read
     /// by default; `--fix` dispatches the built-in `kms-linker`
@@ -530,6 +643,25 @@ pub enum SlashCommand {
     KmsHtml {
         name: String,
         output_dir: Option<String>,
+    },
+    /// `/kms export-okf <name> [<output-dir>]` — write the KMS as a
+    /// conformant Open Knowledge Format (OKF v0.1) bundle to the cwd
+    /// (defaults to `./<name>-okf/`). Pure file transform — frontmatter
+    /// is normalised (`category`→`type`, `topic`→`description`, tags
+    /// list-ified), wikilinks become markdown links, `sources/` becomes
+    /// `references/`.
+    KmsExportOkf {
+        name: String,
+        output_dir: Option<String>,
+    },
+    /// `/kms import-okf <bundle-dir> <name> [--project]` — create a new
+    /// KMS from an OKF bundle on disk. Defaults to user scope; pass
+    /// `--project` for `.thclaws/kms/`. Errors if `name` already exists
+    /// at the target scope.
+    KmsImportOkf {
+        bundle: String,
+        name: String,
+        scope: crate::kms::KmsScope,
     },
     /// `/schedule` — list schedules (same as `/schedule list`).
     Schedule,
@@ -598,7 +730,80 @@ pub enum SlashCommand {
         /// 3b inside dream.md) to every page Pass 3 touched.
         all_sessions: bool,
     },
+    /// `/deploy [--pod URL] [--token TOKEN] [--dry-run] [--full]
+    /// [--include-memory] [--allow-stdio-mcp] [--no-restart]` — ship
+    /// the current project's .thclaws/ to a thclaws --serve pod.
+    /// URL + token default to the configured deploy target
+    /// (remote_agent_url + remote-agent-token keychain entry). The
+    /// pod is restarted by default after the swap so MCP servers,
+    /// plugin runtimes, skill caches, and the system prompt
+    /// re-initialise; pass --no-restart to keep the running process
+    /// up. See dev-plan/28.
+    Deploy {
+        pod: Option<String>,
+        token: Option<String>,
+        dry_run: bool,
+        full: bool,
+        include_memory: bool,
+        allow_stdio_mcp: bool,
+        restart: bool,
+    },
+    /// dev-plan/32 Stage B: author + run a deterministic workflow
+    /// script for the given goal. The model writes a JS file using the
+    /// `thclaws.*` API; the REPL shows it for review; on approve, Boa
+    /// executes it and prints the script's final value. The arg is the
+    /// raw user goal — everything after `/workflow run`.
+    WorkflowRun(String),
+    /// dev-plan/32 Stage F: list every workflow under
+    /// `.thclaws/workflows/`, newest first, with worker counts +
+    /// terminal status.
+    WorkflowList,
+    /// dev-plan/32 Stage F: dump one workflow's state.jsonl event
+    /// stream in human form. The arg is an id or a unique prefix.
+    WorkflowInspect(String),
+    /// dev-plan/32 Stage F: delete a workflow's directory after a
+    /// y/N confirm. The arg is an id or a unique prefix.
+    WorkflowRm(String),
+    /// dev-plan/32 Stage K: re-run an interrupted workflow against
+    /// its persisted script. Completed workers come from state.jsonl;
+    /// only the calls past the resume point spawn fresh.
+    WorkflowResume(String),
+    /// Run a pre-authored workflow script straight from disk — same
+    /// entry point as the headless `thclaws --workflow <path.js>` CLI
+    /// flag, but available mid-session. Skips the author + review
+    /// phase that `/workflow run` uses. Arg is the path to the .js
+    /// script.
+    WorkflowExec(String),
+    /// dev-plan/34: thClaws.cloud catalog. URL + token live in
+    /// Settings → thClaws.cloud (or `~/.config/thclaws/settings.json`).
+    /// `/cloud list` → browse the catalog; `/cloud status` → show
+    /// resolved URL + whether a token is stored.
+    Cloud(CloudSlash),
     Unknown(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloudSlash {
+    /// `/cloud list [--mine]` — list catalog agents.
+    List { mine: bool },
+    /// `/cloud status` — show resolved URL + whether a token is stored.
+    Status,
+    /// `/cloud get <slug>` — install/update the given agent into cwd.
+    /// Empty cwd → fresh extract. Non-empty cwd + matching agent UUID
+    /// → safe overwrite. Non-empty cwd + mismatching/missing UUID →
+    /// abort. CLI `--force` bypass not exposed at the slash surface.
+    Get { slug: String },
+    /// `/cloud publish` — tar cwd, upload to the catalog as a new
+    /// version. Inside-session-only path (the standalone CLI
+    /// `thclaws cloud publish` subcommand exits with a pointer here);
+    /// the token comes from the session's settings.json/keychain so
+    /// it isn't required on the shell-command line.
+    Publish,
+    /// `/cloud unbind` — clear settings.json::agent.uuid in cwd so
+    /// the next `/cloud publish` registers a new catalog entry
+    /// instead of trying to update someone else's. Used when forking
+    /// an agent you `/cloud get`'d from another publisher.
+    Unbind,
 }
 
 /// Subcommands of `/sso`. `/sso` with no arg defaults to `Status`.
@@ -732,6 +937,62 @@ fn parse_plugin_subcommand(cmd: &str, args: &str) -> SlashCommand {
 /// Bare `/schedule` lists. `add` is intentionally not supported as a
 /// slash command — multi-line prompt + cron + flags doesn't fit a
 /// REPL line cleanly; users go to `thclaws schedule add` for that.
+/// dev-plan/32 Stages B + F. `run` authors + executes; `list` /
+/// `inspect <id>` / `rm <id>` read or remove on-disk state.
+fn parse_workflow_subcommand(args: &str) -> SlashCommand {
+    let args = args.trim();
+    let (sub, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
+    let rest = rest.trim();
+    match sub {
+        "run" => {
+            if rest.is_empty() {
+                SlashCommand::Unknown(
+                    "usage: /workflow run <goal> — describe what the workflow should accomplish"
+                        .to_string(),
+                )
+            } else {
+                SlashCommand::WorkflowRun(rest.to_string())
+            }
+        }
+        "list" | "ls" => SlashCommand::WorkflowList,
+        "inspect" | "show" | "cat" => {
+            if rest.is_empty() {
+                SlashCommand::Unknown("usage: /workflow inspect <id-or-prefix>".to_string())
+            } else {
+                SlashCommand::WorkflowInspect(rest.to_string())
+            }
+        }
+        "rm" | "delete" | "del" => {
+            if rest.is_empty() {
+                SlashCommand::Unknown("usage: /workflow rm <id-or-prefix>".to_string())
+            } else {
+                SlashCommand::WorkflowRm(rest.to_string())
+            }
+        }
+        "resume" => {
+            if rest.is_empty() {
+                SlashCommand::Unknown("usage: /workflow resume <id-or-prefix>".to_string())
+            } else {
+                SlashCommand::WorkflowResume(rest.to_string())
+            }
+        }
+        "exec" | "file" | "script" => {
+            if rest.is_empty() {
+                SlashCommand::Unknown("usage: /workflow exec <path-to-script.js>".to_string())
+            } else {
+                SlashCommand::WorkflowExec(rest.to_string())
+            }
+        }
+        "" => SlashCommand::Unknown(
+            "usage: /workflow run <goal> · /workflow exec <path> · /workflow list · /workflow inspect <id> · /workflow resume <id> · /workflow rm <id>"
+                .to_string(),
+        ),
+        _ => SlashCommand::Unknown(format!(
+            "unknown workflow subcommand: '{sub}' (try: run | list | inspect | resume | rm)"
+        )),
+    }
+}
+
 fn parse_schedule_subcommand(args: &str) -> SlashCommand {
     let args = args.trim();
     if args.is_empty() || args == "list" || args == "ls" {
@@ -1015,45 +1276,87 @@ fn parse_mcp_subcommand(args: &str) -> SlashCommand {
     let (sub, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
     match sub {
         "add" => {
-            let mut parts: Vec<&str> = rest.split_whitespace().collect();
+            // Quote-aware tokenize so `--header "X-API-KEY: abc"` keeps
+            // its value (which contains a space after the colon) intact.
+            let tokens = tokenize_quoted(rest);
             let mut user = false;
-            if parts.first().copied() == Some("--user") {
-                user = true;
-                parts.remove(0);
-            } else if parts.first().copied() == Some("--project") {
-                parts.remove(0);
+            let mut idx = 0;
+            // Leading scope flags. (`--header` is parsed *after* the URL,
+            // curl-style, so a stdio command's own flags pass through.)
+            while idx < tokens.len() {
+                match tokens[idx].as_str() {
+                    "--user" => {
+                        user = true;
+                        idx += 1;
+                    }
+                    "--project" => {
+                        idx += 1;
+                    }
+                    _ => break,
+                }
             }
+            let positionals = &tokens[idx..];
             // Need at least <name> <url-or-command>.
-            if parts.len() < 2 {
+            if positionals.len() < 2 {
                 return SlashCommand::Unknown(
-                    "usage: /mcp add [--user] <name> <url>\n   or: /mcp add [--user] <name> <command> [args...]"
+                    "usage: /mcp add [--user] <name> <url> [--header \"Key: Value\"]\n   or: /mcp add [--user] <name> <command> [args...]"
                         .into(),
                 );
             }
-            let name = parts[0].to_string();
-            let target = parts[1];
+            let name = positionals[0].clone();
+            let target = positionals[1].clone();
+            let trailing = &positionals[2..];
             // Route by shape: a URL means HTTP transport; anything
             // else is treated as a stdio command. We don't probe the
             // command — first spawn happens in the dispatch arm and
             // surfaces any failure (missing binary, missing env, etc.)
             // via the existing error path.
             if target.starts_with("http://") || target.starts_with("https://") {
-                if parts.len() != 2 {
-                    return SlashCommand::Unknown(
-                        "usage: /mcp add [--user] <name> <url> (HTTP transport takes no extra args)"
-                            .into(),
-                    );
+                // Trailing tokens for HTTP are `--header`/`-H "Key: Value"`
+                // pairs (repeatable). Values may contain `${VAR}`, resolved
+                // from the environment at connect time.
+                let mut headers: Vec<(String, String)> = Vec::new();
+                let mut j = 0;
+                while j < trailing.len() {
+                    match trailing[j].as_str() {
+                        "--header" | "-H" => {
+                            let Some(spec) = trailing.get(j + 1) else {
+                                return SlashCommand::Unknown(
+                                    "--header expects a following \"Key: Value\"".into(),
+                                );
+                            };
+                            let Some((k, v)) = spec.split_once(':') else {
+                                return SlashCommand::Unknown(format!(
+                                    "--header expects \"Key: Value\" (got '{spec}')"
+                                ));
+                            };
+                            let key = k.trim();
+                            if key.is_empty() {
+                                return SlashCommand::Unknown(format!(
+                                    "--header has an empty key (got '{spec}')"
+                                ));
+                            }
+                            headers.push((key.to_string(), v.trim().to_string()));
+                            j += 2;
+                        }
+                        other => {
+                            return SlashCommand::Unknown(format!(
+                                "unexpected arg '{other}' after <url> — HTTP transport accepts only --header \"Key: Value\""
+                            ));
+                        }
+                    }
                 }
                 SlashCommand::McpAdd {
                     name,
-                    url: target.to_string(),
+                    url: target,
                     user,
+                    headers,
                 }
             } else {
                 SlashCommand::McpAddStdio {
                     name,
-                    command: target.to_string(),
-                    args: parts[2..].iter().map(|s| (*s).to_string()).collect(),
+                    command: target,
+                    args: trailing.iter().map(|s| s.to_string()).collect(),
                     user,
                 }
             }
@@ -1110,8 +1413,19 @@ fn parse_mcp_subcommand(args: &str) -> SlashCommand {
                 _ => SlashCommand::Unknown("usage: /mcp install [--user] <name>".into()),
             }
         }
+        "reauth" | "login" => {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            match parts.as_slice() {
+                [name] => SlashCommand::McpReauth {
+                    name: (*name).to_string(),
+                },
+                _ => SlashCommand::Unknown(
+                    "usage: /mcp reauth <name>  (re-authorize a remote MCP server)".into(),
+                ),
+            }
+        }
         other => SlashCommand::Unknown(format!(
-            "unknown mcp subcommand: '{other}' (try: /mcp, /mcp add, /mcp remove, /mcp marketplace, /mcp search, /mcp info, /mcp install)"
+            "unknown mcp subcommand: '{other}' (try: /mcp, /mcp add, /mcp remove, /mcp reauth, /mcp marketplace, /mcp search, /mcp info, /mcp install)"
         )),
     }
 }
@@ -1208,6 +1522,25 @@ pub fn default_model_for_provider(provider: &str) -> Option<&'static str> {
     ProviderKind::from_name(provider).map(|k| k.default_model())
 }
 
+/// Shared `/<skill-name>` → model-prompt rewrite text. CLI (`run_repl`)
+/// and GUI / --serve (`shared_session::handle_line`) call this so the
+/// instruction that lands in the next agent turn is byte-identical
+/// across surfaces — pre-extract, the two had parallel implementations
+/// that could drift. The caller decides whether `word` actually
+/// matches a discovered skill (CLI uses a `skill_names` snapshot;
+/// GUI queries the live `state.skill_store` Mutex); this helper just
+/// builds the canonical rewrite once `word` is known to match.
+pub fn make_skill_rewrite_prompt(word: &str, args: &str) -> String {
+    let args_note = if args.is_empty() {
+        String::new()
+    } else {
+        format!(" The user's task for this skill: {args}")
+    };
+    format!(
+        "The user ran the `/{word}` slash command. Call `Skill(name: \"{word}\")` right away and follow the instructions it returns.{args_note}"
+    )
+}
+
 /// Parse a line as a slash command. Returns `None` when the line isn't a
 /// slash command (so the caller can treat it as a user prompt).
 ///
@@ -1290,7 +1623,16 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
         "cwd" | "pwd" => SlashCommand::Cwd,
         "thinking" => SlashCommand::Thinking(args.to_string()),
         "compact" => SlashCommand::Compact,
+        "cost" => match args {
+            "" => SlashCommand::Cost { reset: false },
+            "reset" | "clear" | "zero" => SlashCommand::Cost { reset: true },
+            other => SlashCommand::Unknown(format!(
+                "unknown /cost subcommand: '{other}' (try: /cost, /cost reset)"
+            )),
+        },
         "fork" => SlashCommand::Fork,
+        "reload" | "restart" => SlashCommand::Reload,
+        "reload-prompt" | "reload_prompt" | "refresh-prompt" => SlashCommand::ReloadPrompt,
         "doctor" | "diag" => SlashCommand::Doctor,
         "sso" => match args.trim() {
             "" | "status" => SlashCommand::Sso {
@@ -1383,8 +1725,11 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
         "loop" => parse_loop_subcommand(args),
         "goal" => parse_goal_subcommand(args),
         "schedule" | "sched" => parse_schedule_subcommand(args),
+        "workflow" | "wf" => parse_workflow_subcommand(args),
         "agent" => parse_agent_subcommand(args),
         "agents" => SlashCommand::AgentsList,
+        "deploy" => parse_deploy_subcommand(args),
+        "cloud" => parse_cloud_subcommand(args),
         "dream" => {
             // Parse `--all` flag (order-insensitive). Anything else is
             // the focus topic. `/dream auth --all` and `/dream --all
@@ -1422,6 +1767,100 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
         }
         _ => SlashCommand::Unknown(cmd.to_string()),
     })
+}
+
+/// Parse `/cloud <subcommand>` — `list [--mine]` / `status`. URL +
+/// token come from settings.json::cloud.url + the secrets backend, both
+/// editable via Settings → thClaws.cloud or the CLI's `cloud login`.
+fn parse_cloud_subcommand(args: &str) -> SlashCommand {
+    let trimmed = args.trim();
+    let (sub, rest) = trimmed
+        .split_once(char::is_whitespace)
+        .unwrap_or((trimmed, ""));
+    match sub {
+        "" | "status" => SlashCommand::Cloud(CloudSlash::Status),
+        "list" => {
+            let mine = rest.split_whitespace().any(|t| t == "--mine");
+            SlashCommand::Cloud(CloudSlash::List { mine })
+        }
+        "get" => {
+            let slug = rest.split_whitespace().next().unwrap_or("").to_string();
+            if slug.is_empty() {
+                SlashCommand::Unknown(
+                    "usage: /cloud get <slug>   (installs/updates the agent into cwd)".into(),
+                )
+            } else {
+                SlashCommand::Cloud(CloudSlash::Get { slug })
+            }
+        }
+        "publish" => SlashCommand::Cloud(CloudSlash::Publish),
+        "unbind" => SlashCommand::Cloud(CloudSlash::Unbind),
+        other => SlashCommand::Unknown(format!(
+            "unknown cloud subcommand: '{other}' \
+             (try: /cloud status, /cloud list [--mine], /cloud get <slug>, \
+             /cloud publish, /cloud unbind)"
+        )),
+    }
+}
+
+/// Parse `/deploy [--pod URL] [--token TOKEN] [--dry-run] [--full]
+/// [--include-memory] [--allow-stdio-mcp] [--no-restart]`. All flags
+/// optional — missing URL/token fall back to the configured
+/// remote-agent target (see dev-plan/28). The pod is restarted by
+/// default; `--no-restart` opts out.
+fn parse_deploy_subcommand(args: &str) -> SlashCommand {
+    let mut pod: Option<String> = None;
+    let mut token: Option<String> = None;
+    let mut dry_run = false;
+    let mut full = false;
+    let mut include_memory = false;
+    let mut allow_stdio_mcp = false;
+    let mut restart = true;
+    let mut tokens = args.split_whitespace().peekable();
+    while let Some(tok) = tokens.next() {
+        match tok {
+            "--dry-run" | "--plan" => dry_run = true,
+            "--full" | "--no-diff" => full = true,
+            "--include-memory" => include_memory = true,
+            "--allow-stdio-mcp" => allow_stdio_mcp = true,
+            // Default-on — accepted as a no-op for muscle-memory
+            // compatibility with v0.13.4's --restart opt-in flag.
+            "--restart" => restart = true,
+            "--no-restart" => restart = false,
+            "--pod" => {
+                pod = tokens.next().map(|s| s.to_string());
+                if pod.as_deref().is_none() {
+                    return SlashCommand::Unknown("--pod requires a URL".into());
+                }
+            }
+            "--token" => {
+                token = tokens.next().map(|s| s.to_string());
+                if token.as_deref().is_none() {
+                    return SlashCommand::Unknown("--token requires a value".into());
+                }
+            }
+            other if other.starts_with("--pod=") => {
+                pod = Some(other.trim_start_matches("--pod=").to_string());
+            }
+            other if other.starts_with("--token=") => {
+                token = Some(other.trim_start_matches("--token=").to_string());
+            }
+            other => {
+                return SlashCommand::Unknown(format!(
+                    "unknown arg '{other}' — usage: /deploy [--pod URL] [--token T] [--dry-run] [--full] [--include-memory] [--allow-stdio-mcp] [--no-restart]"
+                ));
+            }
+        }
+    }
+    SlashCommand::Deploy {
+        pod,
+        token,
+        dry_run,
+        full,
+        include_memory,
+        allow_stdio_mcp,
+        restart,
+    }
 }
 
 /// Parse `/agent <name> <prompt>` and `/agent cancel <id>`. Bare
@@ -2276,6 +2715,66 @@ fn parse_kms_subcommand(args: &str) -> SlashCommand {
                 SlashCommand::KmsLint(rest.to_string())
             }
         }
+        "reindex" => {
+            // dev-plan/36 Tier 3.B: rebuild the BM25 index from
+            // pages/ on disk. Useful after a merge_into / auto_link
+            // (which bypass per-page index hooks) or after hand-
+            // editing pages/<x>.md outside the thClaws tools.
+            if rest.is_empty() {
+                SlashCommand::Unknown("usage: /kms reindex <name>".into())
+            } else {
+                SlashCommand::KmsReindex(rest.to_string())
+            }
+        }
+        "search" => {
+            // dev-plan/36 follow-up: `/kms search <name> <query>`
+            // — operator-facing one-shot search. `<name>` accepts
+            // `*` to fan out across every visible KMS. Default mode
+            // is BM25 `query:`; `--pattern <regex>` switches to the
+            // regex line-grep surface.
+            //
+            // Examples:
+            //   /kms search notes token refresh
+            //   /kms search * token refresh
+            //   /kms search notes --pattern bearer
+            //   /kms search * --pattern ^TODO
+            let mut tokens = rest.split_whitespace();
+            let name = match tokens.next() {
+                Some(n) => n.to_string(),
+                None => {
+                    return SlashCommand::Unknown(
+                        "usage: /kms search <name|*> <query> | --pattern <regex>".into(),
+                    );
+                }
+            };
+            // The rest of the line is the query body. Manually
+            // re-slice to preserve internal whitespace ("token
+            // refresh" stays two words separated by one space, not
+            // re-joined arbitrarily).
+            let after_name = rest
+                .strip_prefix(&name)
+                .map(|s| s.trim_start())
+                .unwrap_or("");
+            let (is_pattern, query_body) =
+                if let Some(rest_after_flag) = after_name.strip_prefix("--pattern ") {
+                    (true, rest_after_flag.trim().to_string())
+                } else if after_name == "--pattern" {
+                    (true, String::new())
+                } else {
+                    (false, after_name.trim().to_string())
+                };
+            if query_body.is_empty() {
+                SlashCommand::Unknown(format!(
+                    "usage: /kms search {name} <query> | --pattern <regex>"
+                ))
+            } else {
+                SlashCommand::KmsSearch {
+                    name,
+                    query: query_body,
+                    is_pattern,
+                }
+            }
+        }
         "wrap-up" | "wrapup" | "wrap" => {
             // `/kms wrap-up <name> [--fix]` — pure-read by default,
             // --fix hands the report to the kms-linker subagent.
@@ -2491,6 +2990,70 @@ fn parse_kms_subcommand(args: &str) -> SlashCommand {
                 ),
             }
         }
+        "export-okf" | "okf-export" => {
+            // `/kms export-okf <name> [<output-dir>]` — positional;
+            // first non-flag is the KMS name, optional second is the
+            // output dir (defaults to `./<name>-okf` at dispatch time).
+            let mut name: Option<String> = None;
+            let mut output_dir: Option<String> = None;
+            for tok in rest.split_whitespace() {
+                if tok.starts_with("--") {
+                    return SlashCommand::Unknown(format!(
+                        "unknown flag '{tok}' — usage: /kms export-okf <name> [<output-dir>]"
+                    ));
+                }
+                if name.is_none() {
+                    name = Some(tok.to_string());
+                } else if output_dir.is_none() {
+                    output_dir = Some(tok.to_string());
+                }
+            }
+            match name {
+                Some(n) => SlashCommand::KmsExportOkf {
+                    name: n,
+                    output_dir,
+                },
+                None => SlashCommand::Unknown(
+                    "usage: /kms export-okf <name> [<output-dir>]".into(),
+                ),
+            }
+        }
+        "import-okf" | "okf-import" => {
+            // `/kms import-okf <bundle-dir> <name> [--project|--user]` —
+            // first non-flag is the bundle directory, second is the new
+            // KMS name. Defaults to user scope.
+            let mut bundle: Option<String> = None;
+            let mut name: Option<String> = None;
+            let mut scope = crate::kms::KmsScope::User;
+            for tok in rest.split_whitespace() {
+                match tok {
+                    "--project" => scope = crate::kms::KmsScope::Project,
+                    "--user" => scope = crate::kms::KmsScope::User,
+                    other if !other.starts_with("--") => {
+                        if bundle.is_none() {
+                            bundle = Some(other.to_string());
+                        } else if name.is_none() {
+                            name = Some(other.to_string());
+                        }
+                    }
+                    other => {
+                        return SlashCommand::Unknown(format!(
+                            "unknown flag '{other}' — usage: /kms import-okf <bundle-dir> <name> [--project]"
+                        ));
+                    }
+                }
+            }
+            match (bundle, name) {
+                (Some(b), Some(n)) => SlashCommand::KmsImportOkf {
+                    bundle: b,
+                    name: n,
+                    scope,
+                },
+                _ => SlashCommand::Unknown(
+                    "usage: /kms import-okf <bundle-dir> <name> [--project]".into(),
+                ),
+            }
+        }
         "migrate" | "upgrade" => {
             // `/kms migrate <name> [--apply]` — dry-run by default, --apply
             // to execute. Order-insensitive so `--apply <name>` also works.
@@ -2537,7 +3100,7 @@ fn parse_kms_subcommand(args: &str) -> SlashCommand {
             }
         }
         other => SlashCommand::Unknown(format!(
-            "unknown kms subcommand: '{other}' (try: /kms, /kms new …, /kms use …, /kms off …, /kms show …, /kms ingest …, /kms dump …, /kms challenge …, /kms html …, /kms merge …, /kms drop …, /kms link …, /kms lint …, /kms wrap-up …, /kms reconcile …, /kms migrate …, /kms file-answer …)"
+            "unknown kms subcommand: '{other}' (try: /kms, /kms new …, /kms use …, /kms off …, /kms show …, /kms ingest …, /kms dump …, /kms challenge …, /kms html …, /kms merge …, /kms drop …, /kms link …, /kms lint …, /kms wrap-up …, /kms reconcile …, /kms migrate …, /kms export-okf …, /kms import-okf …, /kms file-answer …)"
         )),
     }
 }
@@ -2728,6 +3291,7 @@ pub async fn install_mcp_from_marketplace(
             url: entry.url.clone(),
             headers: Default::default(),
             trusted: true,
+            engine_managed: false,
         }
     } else {
         crate::mcp::McpServerConfig {
@@ -2739,6 +3303,7 @@ pub async fn install_mcp_from_marketplace(
             url: String::new(),
             headers: Default::default(),
             trusted: true,
+            engine_managed: false,
         }
     };
     let saved_to =
@@ -2779,6 +3344,8 @@ pub fn built_in_commands() -> &'static [BuiltInCommand] {
         BuiltInCommand { name: "clear",    description: "Clear conversation history",                 category: "Session", usage: "" },
         BuiltInCommand { name: "compact",  description: "Compact history (drop oldest, keep recent)", category: "Session", usage: "" },
         BuiltInCommand { name: "fork",     description: "Save + start a new session seeded with a summary", category: "Session", usage: "" },
+        BuiltInCommand { name: "reload",   description: "Re-exec thclaws (re-init MCP / system prompt; sessions survive)", category: "Session", usage: "" },
+        BuiltInCommand { name: "reload-prompt", description: "Rebuild system prompt from current state (skills/MCP/KMS/memory) without re-exec", category: "Session", usage: "" },
         BuiltInCommand { name: "save",     description: "Force-save the current session",             category: "Session", usage: "" },
         BuiltInCommand { name: "load",     description: "Load a saved session by id or name",         category: "Session", usage: "ID|NAME" },
         BuiltInCommand { name: "sessions", description: "List saved sessions",                        category: "Session", usage: "" },
@@ -2791,7 +3358,7 @@ pub fn built_in_commands() -> &'static [BuiltInCommand] {
         BuiltInCommand { name: "provider",  description: "Switch provider to its default model",      category: "Model", usage: "NAME" },
         BuiltInCommand { name: "providers", description: "List all supported providers",              category: "Model", usage: "" },
         BuiltInCommand { name: "thinking",  description: "Set extended-thinking token budget",        category: "Model", usage: "BUDGET" },
-        BuiltInCommand { name: "permissions", description: "Show or set the permission mode",         category: "Model", usage: "[auto|ask]" },
+        BuiltInCommand { name: "permissions", description: "Show or set the permission mode",         category: "Model", usage: "[auto|ask|linegated]" },
         BuiltInCommand { name: "plan",        description: "Toggle plan mode (read-only + sidebar)", category: "Model", usage: "[enter|exit|status]" },
 
         // Context / memory / knowledge
@@ -2805,7 +3372,7 @@ pub fn built_in_commands() -> &'static [BuiltInCommand] {
         BuiltInCommand { name: "skill",    description: "Skill subcommands (install / marketplace / search / info / show)", category: "Extensions", usage: "<sub> [args]" },
         BuiltInCommand { name: "plugins",  description: "List installed plugins",                     category: "Extensions", usage: "" },
         BuiltInCommand { name: "plugin",   description: "Plugin subcommands (install / marketplace / search / info / show / enable / disable)", category: "Extensions", usage: "<sub> [args]" },
-        BuiltInCommand { name: "mcp",      description: "MCP subcommands (add / remove / install / marketplace / search / info)", category: "Extensions", usage: "[sub] [args]" },
+        BuiltInCommand { name: "mcp",      description: "MCP subcommands (add / remove / install / reauth / marketplace / search / info)", category: "Extensions", usage: "[sub] [args]" },
 
         // Team
         BuiltInCommand { name: "team",     description: "Show team agent status",                     category: "Team", usage: "" },
@@ -2814,11 +3381,21 @@ pub fn built_in_commands() -> &'static [BuiltInCommand] {
         // Research
         BuiltInCommand { name: "research", description: "Background research → KMS",                  category: "Research", usage: "<query> | list | status <id> | show <id> | cancel <id> | wait <id>" },
 
+        // Deploy
+        BuiltInCommand { name: "deploy",   description: "Ship .thclaws/ to a remote pod (dev-plan/28)", category: "Deploy", usage: "[--pod URL] [--token T] [--dry-run] [--full] [--no-restart]" },
+
+        // Cloud (dev-plan/34)
+        BuiltInCommand { name: "cloud",    description: "thClaws.cloud catalog — list / get / status (dev-plan/34)", category: "Cloud", usage: "list [--mine] | get <slug> | status" },
+
+        // Learn
+        BuiltInCommand { name: "quiz",     description: "Generate & play a study quiz from a URL, file, or topic", category: "Learn", usage: "<topic|url|file>" },
+
         // System
         BuiltInCommand { name: "help",     description: "Show this help",                             category: "System", usage: "" },
         BuiltInCommand { name: "version",  description: "Show version",                               category: "System", usage: "" },
         BuiltInCommand { name: "cwd",      description: "Show current working directory",             category: "System", usage: "" },
         BuiltInCommand { name: "usage",    description: "Show token usage by provider and model",     category: "System", usage: "" },
+        BuiltInCommand { name: "cost",     description: "Show or reset accumulated session cost",     category: "System", usage: "[reset]" },
         BuiltInCommand { name: "doctor",   description: "Run diagnostics",                            category: "System", usage: "" },
         BuiltInCommand { name: "config",   description: "Set a config value (session-only)",          category: "System", usage: "key=value" },
         BuiltInCommand { name: "quit",     description: "Exit",                                       category: "System", usage: "" },
@@ -2971,10 +3548,13 @@ pub fn render_help() -> &'static str {
      /memory           List memory entries\n  \
      /memory read NAME Show a memory entry by name\n  \
      /mcp              List active MCP servers and their tools\n  \
-     /mcp add [--user] <name> <url>\n  \
+     /mcp add [--user] <name> <url> [--header \"K: V\"]\n  \
                        Register a remote (HTTP) MCP server. Writes to\n  \
                        .thclaws/mcp.json (or ~/.config/thclaws/mcp.json\n  \
                        with --user), then connects and registers tools.\n  \
+                       --header (repeatable) sets auth headers, e.g.\n  \
+                       --header \"X-API-KEY: ${MY_KEY}\" (${VAR} resolves\n  \
+                       from the environment at connect time).\n  \
      /mcp add [--user] <name> <command> [args...]\n  \
                        Register a local (stdio) MCP server. Same persist\n  \
                        + spawn flow; first arg is the binary, remaining\n  \
@@ -3000,6 +3580,8 @@ pub fn render_help() -> &'static str {
      /version          Show version\n  \
      /team             Attach to team tmux session (or show status)\n  \
      /usage            Show token usage by provider and model\n  \
+     /cost             Show accumulated session cost in USD\n  \
+     /cost reset       Zero the session cost counter\n  \
      /skill show NAME  Show full description + path for a skill\n  \
      /skill install [--user] <url> [name]\n  \
      \x20                 Install a skill (or bundle) from a git repo or\n  \
@@ -3033,6 +3615,13 @@ pub fn render_help() -> &'static str {
      \x20                 --llm switches to a semantic per-page LLM\n  \
      \x20                 pass (synonyms + related concepts; slower\n  \
      \x20                 + costs tokens, still dry-run by default).\n  \
+     /kms export-okf NAME [OUT]\n  \
+     \x20                 Export a KMS as an Open Knowledge Format\n  \
+     \x20                 (OKF v0.1) bundle to ./NAME-okf/ (or OUT).\n  \
+     /kms import-okf BUNDLE NAME [--project]\n  \
+     \x20                 Create a new KMS from an OKF bundle dir.\n  \
+     \x20                 Defaults to ~/.config/thclaws/kms/ (--project\n  \
+     \x20                 for ./.thclaws/kms/).\n  \
      /schedule         List scheduled jobs (use `thclaws schedule add` from\n  \
      \x20                 the shell to create one — multi-line prompts don't\n  \
      \x20                 fit a REPL line)\n  \
@@ -3055,8 +3644,48 @@ pub fn render_help() -> &'static str {
      /translate PROMPT    Alias for /agent translator PROMPT (GUI-only).\n  \
      \x20                   Runs the built-in translator subagent in the\n  \
      \x20                   background. Override its model via settings.json\n  \
-     \x20                   `translator_subagent_model`.\n\n  \
+     \x20                   `translator_subagent_model`.\n  \
+     /cloud status        Show the configured catalog URL + whether a\n  \
+     \x20                   CLI token is stored.\n  \
+     /cloud list [--mine] Browse thClaws.cloud catalog (dev-plan/34).\n  \
+     /cloud get <slug>    Install or update an agent into the current\n  \
+     \x20                   folder. Empty folder → fresh install.\n  \
+     \x20                   Matching UUID → safe update. Mismatched\n  \
+     \x20                   UUID or no agent block → abort.\n  \
+     /cloud publish       Tar the current folder + upload to the catalog\n  \
+     \x20                   as a new version.\n  \
+     /cloud unbind        Clear settings.json::agent.uuid in cwd so the\n  \
+     \x20                   next /cloud publish creates a fresh entry.\n  \
+     \x20                   Use after /cloud get'ing someone else's agent\n  \
+     \x20                   if you want to fork it.\n  \
+     \x20                   (Configure URL + token via Settings →\n  \
+     \x20                   thClaws.cloud; mint tokens at /dashboard.)\n\n  \
      ! <command>       Run a shell command directly (e.g. ! git status)"
+}
+
+/// Resolve `(api_key, chat-completions URL)` for an OpenAI-compatible
+/// provider: the thClaws Gateway overlay when enabled for this kind
+/// (gateway access key + `<gateway>/<segment>/chat/completions`),
+/// otherwise the env-overridable native upstream. Every cloud-routable
+/// compat provider (DashScope, ZAi, DeepSeek, …) MUST build through
+/// this — a `provider_segment` entry alone doesn't route anything.
+fn compat_endpoint(
+    config: &AppConfig,
+    kind: ProviderKind,
+    base_env: &str,
+    default_base: &str,
+    api_key: String,
+) -> (String, String) {
+    if let Some(o) = crate::providers::thclaws_gateway::for_kind(config, kind) {
+        return (o.access_key, format!("{}/chat/completions", o.base_url));
+    }
+    let base = std::env::var(base_env).unwrap_or_else(|_| default_base.to_string());
+    let url = if base.ends_with("/chat/completions") {
+        base
+    } else {
+        format!("{}/chat/completions", base.trim_end_matches('/'))
+    };
+    (api_key, url)
 }
 
 /// Build a Provider for the current `config.model`. Picks the impl based on the
@@ -3065,6 +3694,19 @@ pub fn render_help() -> &'static str {
 /// `OLLAMA_BASE_URL`).
 pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
     let kind = config.detect_provider_kind()?;
+
+    // Shared-agent mode (dev-plan/41) is gateway-only: reject any provider
+    // that has no gateway route, so a member can't `/model` onto a native,
+    // un-metered backend (ollama/lmstudio/…) on a company-billed agent.
+    // Gateway-routable providers still get the overlay further down.
+    if crate::shared::is_active()
+        && crate::providers::thclaws_gateway::provider_name_for_config(kind).is_none()
+    {
+        return Err(crate::error::Error::Config(format!(
+            "shared agents are gateway-only — '{}' has no gateway route",
+            config.model
+        )));
+    }
 
     // Org policy gateway (EE Phase 3): when policies.gateway.enabled and
     // this provider should route through the gateway, replace the entire
@@ -3171,22 +3813,27 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
         _ => {}
     }
 
-    let api_key = config.api_key_from_env().ok_or_else(|| {
-        let envar = kind.api_key_env().unwrap_or("<none>");
-        Error::Config(format!(
-            "no API key found for provider '{}' — set {envar}",
-            kind.name()
-        ))
-    })?;
-    match kind {
-        ProviderKind::AgenticPress => {
-            // Hosted gateway — URL is fixed by the service, no env override.
-            Ok(Arc::new(
-                OpenAIProvider::new(api_key)
-                    .with_base_url("https://llm.artech.cloud/v1/chat/completions")
-                    .with_strip_model_prefix("ap/"),
-            ))
+    let api_key = match config.api_key_from_env() {
+        Some(k) => k,
+        // Gateway overlay active for this provider: the gateway holds
+        // the real upstream credential and the native key is never
+        // sent, so its absence must not block the build. Hosted
+        // runners provisioned before the placeholder-env expansion
+        // (pre-v0.45.8) carry no per-provider placeholders at all —
+        // without this carve-out every compat provider on them dies
+        // here with "no API key" before the overlay is consulted.
+        None if crate::providers::thclaws_gateway::for_kind(config, kind).is_some() => {
+            String::from("gateway-placeholder")
         }
+        None => {
+            let envar = kind.api_key_env().unwrap_or("<none>");
+            return Err(Error::Config(format!(
+                "no API key found for provider '{}' — set {envar}",
+                kind.name()
+            )));
+        }
+    };
+    match kind {
         ProviderKind::OpenRouter => {
             // OpenAI-compatible; models use openrouter/<vendor>/<model> form
             // (e.g. openrouter/anthropic/claude-sonnet-4-6). Strip the
@@ -3202,10 +3849,40 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
                     "https://openrouter.ai/api/v1/chat/completions".to_string(),
                 ),
             };
+            let mut provider = OpenAIProvider::new(key)
+                .with_base_url(base)
+                .with_strip_model_prefix("openrouter/");
+            // `openrouter/fusion+` is a thClaws pseudo-model: call the
+            // configured outer model with the `openrouter:fusion` tool
+            // attached so the user's panel / judge / limits take effect.
+            if config.model == crate::config::FUSION_PLUS_MODEL {
+                let f = &config.openrouter_fusion;
+                provider = provider
+                    .with_model_override(f.outer_model.clone())
+                    .with_injected_tool(f.tool_json());
+                if let Some(tc) = f.tool_choice_value() {
+                    provider = provider.with_tool_choice(tc);
+                }
+            }
+            Ok(Arc::new(provider))
+        }
+        ProviderKind::TokenRouter => {
+            // TokenRouter (tokenrouter.com) — OpenAI-compatible unified
+            // gateway to 300+ models. Models use the
+            // `tokenrouter/<vendor>/<model>` form; the prefix is stripped
+            // before the request reaches the upstream. Override the base
+            // via TOKENROUTER_BASE_URL.
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "TOKENROUTER_BASE_URL",
+                "https://api.tokenrouter.com/v1",
+                api_key,
+            );
             Ok(Arc::new(
                 OpenAIProvider::new(key)
-                    .with_base_url(base)
-                    .with_strip_model_prefix("openrouter/"),
+                    .with_base_url(url)
+                    .with_strip_model_prefix("tokenrouter/"),
             ))
         }
         ProviderKind::Anthropic => {
@@ -3243,15 +3920,27 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             Ok(Arc::new(provider))
         }
         ProviderKind::DashScope => {
-            let base = std::env::var("DASHSCOPE_BASE_URL").unwrap_or_else(|_| {
-                "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()
-            });
-            let url = if base.ends_with("/chat/completions") {
-                base
-            } else {
-                format!("{}/chat/completions", base.trim_end_matches('/'))
-            };
-            Ok(Arc::new(OpenAIProvider::new(api_key).with_base_url(url)))
+            // Mainland Alibaba DashScope (`dashscope.aliyuncs.com`).
+            // Catalogue rows are stored with a `dashscope/` routing
+            // prefix (e.g. `dashscope/qwen-max`, `dashscope/deepseek-v3.2`)
+            // so heterogeneous Alibaba-hosted families (qwen, deepseek,
+            // glm, kimi, …) all route through one provider regardless of
+            // whether the bare id would have been disambiguating. The
+            // prefix is stripped here before the request reaches the
+            // OpenAI-compat upstream so it sees the bare id it expects.
+            // Bare `qwen-*` ids (legacy settings) flow through unchanged.
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "DASHSCOPE_BASE_URL",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                api_key,
+            );
+            Ok(Arc::new(
+                OpenAIProvider::new(key)
+                    .with_base_url(url)
+                    .with_strip_model_prefix("dashscope/"),
+            ))
         }
         ProviderKind::QwenCloud => {
             // Singapore-region DashScope (`dashscope-intl.aliyuncs.com`).
@@ -3260,16 +3949,15 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             // short `qc/` prefix in our catalogue; the prefix is
             // stripped before the request reaches Alibaba's upstream
             // so it sees the bare `qwen-*` id it expects.
-            let base = std::env::var("QWENCLOUD_BASE_URL").unwrap_or_else(|_| {
-                "https://dashscope-intl.aliyuncs.com/compatible-mode/v1".to_string()
-            });
-            let url = if base.ends_with("/chat/completions") {
-                base
-            } else {
-                format!("{}/chat/completions", base.trim_end_matches('/'))
-            };
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "QWENCLOUD_BASE_URL",
+                "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+                api_key,
+            );
             Ok(Arc::new(
-                OpenAIProvider::new(api_key)
+                OpenAIProvider::new(key)
                     .with_base_url(url)
                     .with_strip_model_prefix("qc/"),
             ))
@@ -3280,17 +3968,50 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             // the OpenAI-compatible upstream. Power users with the
             // general BigModel SKU (https://open.bigmodel.cn/api/paas/v4)
             // can override via ZAI_BASE_URL.
-            let base = std::env::var("ZAI_BASE_URL")
-                .unwrap_or_else(|_| "https://api.z.ai/api/coding/paas/v4".to_string());
-            let url = if base.ends_with("/chat/completions") {
-                base
-            } else {
-                format!("{}/chat/completions", base.trim_end_matches('/'))
-            };
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "ZAI_BASE_URL",
+                "https://api.z.ai/api/coding/paas/v4",
+                api_key,
+            );
             Ok(Arc::new(
-                OpenAIProvider::new(api_key)
+                OpenAIProvider::new(key)
                     .with_base_url(url)
                     .with_strip_model_prefix("zai/"),
+            ))
+        }
+        ProviderKind::Moonshot => {
+            // Moonshot AI (Kimi family). OpenAI-compatible /chat/completions.
+            // Models use `moonshot/<id>` form (e.g. moonshot/kimi-k2.6);
+            // strip the prefix before forwarding to the upstream. Defaults
+            // to the international endpoint; mainland users override to
+            // https://api.moonshot.cn/v1 via MOONSHOT_BASE_URL.
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "MOONSHOT_BASE_URL",
+                "https://api.moonshot.ai/v1",
+                api_key,
+            );
+            Ok(Arc::new(
+                OpenAIProvider::new(key)
+                    .with_base_url(url)
+                    .with_strip_model_prefix("moonshot/"),
+            ))
+        }
+        ProviderKind::XAi => {
+            // xAI (Grok). OpenAI-compatible /chat/completions at
+            // api.x.ai/v1. Canonical ids use `xai/<id>` form
+            // (e.g. xai/grok-4.3); strip the prefix before forwarding.
+            // Bare `grok-*` ids have no prefix and pass through as-is.
+            // Override the base via XAI_BASE_URL.
+            let (key, url) =
+                compat_endpoint(config, kind, "XAI_BASE_URL", "https://api.x.ai/v1", api_key);
+            Ok(Arc::new(
+                OpenAIProvider::new(key)
+                    .with_base_url(url)
+                    .with_strip_model_prefix("xai/"),
             ))
         }
         ProviderKind::AzureAIFoundry => {
@@ -3301,10 +4022,30 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
                 )
             })?;
             let base = endpoint.trim_end_matches('/');
-            let messages_url = format!("{base}/anthropic/v1/messages");
-            Ok(Arc::new(
-                AnthropicProvider::new(api_key).with_base_url(messages_url),
-            ))
+            // Foundry exposes two distinct surfaces:
+            //   /anthropic/v1/messages         → Claude deployments
+            //   /openai/v1/chat/completions    → GPT and OpenAI-protocol deployments
+            // Pick by inspecting the model id after stripping the
+            // `azure/` prefix — keeps a single user-facing provider
+            // prefix while routing each call to the right protocol.
+            let azure_model = config
+                .model
+                .strip_prefix("azure/")
+                .unwrap_or(&config.model)
+                .to_lowercase();
+            if azure_model.contains("claude") {
+                let messages_url = format!("{base}/anthropic/v1/messages");
+                Ok(Arc::new(
+                    AnthropicProvider::new(api_key).with_base_url(messages_url),
+                ))
+            } else {
+                let chat_url = format!("{base}/openai/v1/chat/completions");
+                Ok(Arc::new(
+                    OpenAIProvider::new(api_key)
+                        .with_base_url(chat_url)
+                        .with_strip_model_prefix("azure/"),
+                ))
+            }
         }
         ProviderKind::OpenAICompat => {
             // Generic OpenAI-compatible endpoint (SML Gateway, LiteLLM,
@@ -3330,14 +4071,14 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             // (deepseek-chat, deepseek-reasoner) are bare — no prefix to
             // strip. Override via DEEPSEEK_BASE_URL for proxies / self-
             // hosted deployments.
-            let base = std::env::var("DEEPSEEK_BASE_URL")
-                .unwrap_or_else(|_| "https://api.deepseek.com/v1".to_string());
-            let url = if base.ends_with("/chat/completions") {
-                base
-            } else {
-                format!("{}/chat/completions", base.trim_end_matches('/'))
-            };
-            Ok(Arc::new(OpenAIProvider::new(api_key).with_base_url(url)))
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "DEEPSEEK_BASE_URL",
+                "https://api.deepseek.com/v1",
+                api_key,
+            );
+            Ok(Arc::new(OpenAIProvider::new(key).with_base_url(url)))
         }
         ProviderKind::ThaiLLM => {
             // NSTDA / สวทช Thai LLM aggregator (thaillm.or.th). OpenAI-
@@ -3345,15 +4086,15 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             // Pathumma, and THaLLE. Models use the `thaillm/<id>` form;
             // the prefix is stripped before the request reaches the
             // upstream. Override via THAILLM_BASE_URL for testing.
-            let base = std::env::var("THAILLM_BASE_URL")
-                .unwrap_or_else(|_| "http://thaillm.or.th/api/v1".to_string());
-            let url = if base.ends_with("/chat/completions") {
-                base
-            } else {
-                format!("{}/chat/completions", base.trim_end_matches('/'))
-            };
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "THAILLM_BASE_URL",
+                "http://thaillm.or.th/api/v1",
+                api_key,
+            );
             Ok(Arc::new(
-                OpenAIProvider::new(api_key)
+                OpenAIProvider::new(key)
                     .with_base_url(url)
                     .with_strip_model_prefix("thaillm/"),
             ))
@@ -3365,15 +4106,15 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             // prefix is stripped before the request reaches the
             // upstream. Override via MINIMAX_BASE_URL for the China
             // endpoint (api.minimax.chat) or self-hosted proxies.
-            let base = std::env::var("MINIMAX_BASE_URL")
-                .unwrap_or_else(|_| "https://api.minimax.io/v1".to_string());
-            let url = if base.ends_with("/chat/completions") {
-                base
-            } else {
-                format!("{}/chat/completions", base.trim_end_matches('/'))
-            };
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "MINIMAX_BASE_URL",
+                "https://api.minimax.io/v1",
+                api_key,
+            );
             Ok(Arc::new(
-                OpenAIProvider::new(api_key)
+                OpenAIProvider::new(key)
                     .with_base_url(url)
                     .with_strip_model_prefix("minimax/"),
             ))
@@ -3390,15 +4131,15 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             // and third-party-owned models like `nvidia/meta/<name>` go
             // out as `meta/<name>`. Override via NVIDIA_BASE_URL for
             // on-prem NIM deployments.
-            let base = std::env::var("NVIDIA_BASE_URL")
-                .unwrap_or_else(|_| "https://integrate.api.nvidia.com/v1".to_string());
-            let url = if base.ends_with("/chat/completions") {
-                base
-            } else {
-                format!("{}/chat/completions", base.trim_end_matches('/'))
-            };
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "NVIDIA_BASE_URL",
+                "https://integrate.api.nvidia.com/v1",
+                api_key,
+            );
             Ok(Arc::new(
-                OpenAIProvider::new(api_key)
+                OpenAIProvider::new(key)
                     .with_base_url(url)
                     .with_strip_model_prefix("nvidia/"),
             ))
@@ -3410,11 +4151,18 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             // (/messages), or Alibaba-compatible (/chat/completions).
             // Models use the `opencode-go/<id>` prefix. The base URL can
             // be overridden via OPENCODE_GO_BASE_URL for self-hosted proxies.
-            let base = std::env::var("OPENCODE_GO_BASE_URL")
-                .unwrap_or_else(|_| "https://opencode.ai/zen/go/v1".to_string());
-            Ok(Arc::new(
-                OpencodeGoProvider::new(api_key).with_base_url(base),
-            ))
+            // Gateway overlay swaps base + key; the provider appends its
+            // own per-protocol path, which the gateway forwards verbatim.
+            let overlay = crate::providers::thclaws_gateway::for_kind(config, kind);
+            let (key, base) = match overlay {
+                Some(o) => (o.access_key, o.base_url),
+                None => (
+                    api_key,
+                    std::env::var("OPENCODE_GO_BASE_URL")
+                        .unwrap_or_else(|_| "https://opencode.ai/zen/go/v1".to_string()),
+                ),
+            };
+            Ok(Arc::new(OpencodeGoProvider::new(key).with_base_url(base)))
         }
 
         ProviderKind::Ollama
@@ -3424,7 +4172,14 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
         | ProviderKind::ChatGptCodex => {
             unreachable!("handled above")
         }
-        ProviderKind::OllamaCloud => Ok(Arc::new(OllamaCloudProvider::new(api_key))),
+        ProviderKind::OllamaCloud => {
+            let overlay = crate::providers::thclaws_gateway::for_kind(config, kind);
+            let provider = match overlay {
+                Some(o) => OllamaCloudProvider::new(o.access_key).with_base_url(o.base_url),
+                None => OllamaCloudProvider::new(api_key),
+            };
+            Ok(Arc::new(provider))
+        }
     }
 }
 
@@ -3466,23 +4221,15 @@ pub async fn build_provider_with_fallback(
     }
     let original = config.model.clone();
 
-    // 2. Walk a preference list. Cloud providers only succeed when a
-    //    matching key exists (shell export > keychain > .env). Ollama
-    //    variants always *build* successfully, so we probe the endpoint
-    //    before offering them as a fallback — otherwise a user with no
-    //    keys AND no local Ollama gets a noisy "model not found" loop
-    //    on the first prompt.
+    // 2. Walk a free-fallback list ONLY. Paid providers are
+    //    deliberately excluded: silently swapping a user's
+    //    openrouter (or other) configuration to Anthropic when a
+    //    transient build failure happens has caused real bill
+    //    surprises. Ollama variants always *build* successfully so
+    //    we probe the daemon before offering them — otherwise a
+    //    user with no key AND no local Ollama gets a noisy
+    //    "model not found" loop on the first prompt.
     let fallback_order: &[ProviderKind] = &[
-        ProviderKind::Anthropic,
-        ProviderKind::OpenAI,
-        ProviderKind::AgenticPress,
-        ProviderKind::OpenRouter,
-        ProviderKind::Gemini,
-        ProviderKind::DashScope,
-        ProviderKind::QwenCloud,
-        ProviderKind::ZAi,
-        ProviderKind::ThaiLLM,
-        ProviderKind::OpenCodeGo,
         ProviderKind::Ollama,
         ProviderKind::OllamaAnthropic,
         ProviderKind::OllamaCloud,
@@ -3496,7 +4243,7 @@ pub async fn build_provider_with_fallback(
         config.model = kind.default_model().to_string();
         if let Ok(p) = build_provider(config) {
             let warning = format!(
-                "no API key for {} — falling back to {} (model: {})",
+                "{} couldn't be built — falling back to local {} (model: {}). Fix the credential or run `/model <provider>/<model>` to switch.",
                 ProviderKind::detect(&original)
                     .map(|k| k.name())
                     .unwrap_or("<unknown>"),
@@ -3507,12 +4254,15 @@ pub async fn build_provider_with_fallback(
         }
     }
 
-    // 3. Nothing works — restore the original model so the rest of the
-    //    REPL still shows what the user had configured, and let the
-    //    caller degrade gracefully.
+    // 3. Nothing free works — restore the original model so the
+    //    user's settings.json is untouched and let the caller
+    //    degrade gracefully. No silent swap to a paid provider.
     config.model = original;
     (None, Some(
-        "no usable LLM provider — set an API key via Settings → Provider API keys, or start Ollama (see Chapter 2)".into(),
+        format!(
+            "no usable LLM provider for `{}` and no local fallback (Ollama / LMStudio) reachable. Set an API key via Settings → Provider API keys, run `/model <provider>/<model>` to switch, or start a local runtime (see Chapter 2).",
+            config.model
+        ),
     ))
 }
 
@@ -3603,30 +4353,36 @@ async fn load_mcp_servers(
 
 /// Non-interactive mode: run a single prompt and print the result to stdout.
 /// Matches the Python `--print` flag behavior.
+/// Persist a CLI `/permissions <mode>` choice to `.thclaws/settings.json`
+/// so it survives the session — matching the GUI/serve behavior
+/// (`shell_dispatch::persist_permission_mode`). Before this, a CLI
+/// `/permissions auto` only changed the in-memory mode, so the
+/// documented "set auto in CLI, then run `--telegram`" flow silently
+/// reverted on restart (issue #160). Returns a short status note.
+fn persist_permission_mode_cli(mode: &str) -> &'static str {
+    let mut project = crate::config::ProjectConfig::load().unwrap_or_default();
+    project.set_permissions_mode(mode);
+    match project.save() {
+        Ok(()) => "saved to .thclaws/settings.json",
+        Err(_) => "warning: could not save to .thclaws/settings.json",
+    }
+}
+
 pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let ctx = ProjectContext::discover(&cwd)?;
-    let memory_store = MemoryStore::default_path().map(MemoryStore::new);
-    let system_fallback = if config.system_prompt.is_empty() {
-        crate::prompts::defaults::SYSTEM
-    } else {
-        config.system_prompt.as_str()
-    };
-    let base_prompt = crate::prompts::load("system", system_fallback);
-    let mut system = ctx.build_system_prompt(&base_prompt);
-    if let Some(store) = &memory_store {
-        if let Some(mem_section) = store.system_prompt_section() {
-            system.push_str("\n\n# Memory\n");
-            system.push_str(&mem_section);
-        }
-    }
-    let kms_section = crate::kms::system_prompt_section(&config.kms_active);
-    if !kms_section.is_empty() {
-        system.push_str("\n\n");
-        system.push_str(&kms_section);
-    }
 
     let mut tool_registry = ToolRegistry::with_builtins();
+    // Opt-in native Gemini image tools — same gating as the
+    // GUI/serve + HTTP-API registrations (settings flag; env-key
+    // presence is enforced by the tools' requires_env).
+    if config.image_tools_enabled {
+        tool_registry.register(Arc::new(crate::tools::TextToImageTool));
+        tool_registry.register(Arc::new(crate::tools::ImageToImageTool));
+        tool_registry.register(Arc::new(crate::tools::TextToVideoTool));
+        tool_registry.register(Arc::new(crate::tools::ImageToVideoTool));
+        tool_registry.register(Arc::new(crate::tools::MediaJobStatusTool));
+    }
+
     // KMS tools always-on (pre-fix this was gated by
     // `!kms_active.is_empty()`, but /dream's side-channel agent
     // inherits this registry and needs KmsCreate/KmsWrite to
@@ -3649,8 +4405,103 @@ pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> R
     // because tool filtering happens via per-agent allow-lists, not
     // here.
     tool_registry.register(Arc::new(crate::tools::SessionRenameTool));
-    let (_mcp_clients, _mcp_summary) =
-        load_mcp_servers(&config.mcp_servers, &mut tool_registry).await;
+
+    // Tool-parity audit fix: print mode now respects the configured
+    // search engine override (REPL had this since day one; print
+    // silently fell back to "auto" / DuckDuckGo regardless of
+    // settings.json::searchEngine). HashMap::insert in `register`
+    // overwrites the default "auto" WebSearchTool from
+    // ToolRegistry::with_builtins by name.
+    if config.search_engine != "auto" {
+        tool_registry.register(Arc::new(crate::tools::WebSearchTool::new(
+            &config.search_engine,
+        )));
+    }
+
+    // Tool-parity audit fix: Task tools (TodoWrite + the subagent
+    // task queue) — REPL + GUI register these; print mode used to
+    // omit them, so `thclaws -p "do multi-step thing"` couldn't use
+    // the TodoWrite scaffolding the default system prompt explicitly
+    // tells it to use. `register_task_tools` returns a TaskStore
+    // handle; print mode has no subagent factory wiring (single-shot,
+    // no /spawn slash commands) so the returned handle is dropped.
+    let _task_store = crate::tools::tasks::register_task_tools(&mut tool_registry);
+
+    // Tool-parity audit fix: Team tools (`TeamCreate` / `SpawnTeammate`
+    // / `SendMessage` / `CheckInbox` / `TeamStatus` / `TeamTask*` /
+    // `TeamMerge`) — gated on the same `team_enabled` config flag
+    // REPL + GUI use. agent_runtime HTTP intentionally skips this
+    // (daemon safety — clients shouldn't spawn subprocesses); print
+    // mode is single-user-on-their-own-machine, same security
+    // posture as REPL, so we mirror REPL.
+    let team_agent_name = std::env::var("THCLAWS_TEAM_AGENT").ok();
+    let team_role = team_agent_name.as_deref().unwrap_or("lead");
+    let team_enabled = team_agent_name.is_some()
+        || crate::config::ProjectConfig::load()
+            .and_then(|c| c.team_enabled)
+            .unwrap_or(false);
+    if team_enabled {
+        let _team_mailbox = crate::team::register_team_tools(&mut tool_registry, team_role);
+    }
+
+    // dev-plan/35 followup #2: print mode picks up skills too so
+    // one-shot prompts (`thclaws -p "make a PDF of …"`) reach for
+    // the matching skill the same way the REPL / GUI / --serve
+    // surfaces do. Pre-fix print mode silently skipped skill
+    // discovery — the model never saw the catalog, never called
+    // `Skill(...)`. ~10ms startup cost for the discover() walk,
+    // worth the parity. Same plugin-skill-dir fan-in as the REPL.
+    let plugin_skill_dirs = crate::plugins::plugin_skill_dirs();
+    let skill_store = crate::skills::SkillStore::discover_with_extra(&plugin_skill_dirs);
+    // Tool-parity audit fix: Skill family registers unconditionally
+    // across all 4 surfaces (GUI/serve was already always-on; REPL +
+    // print + HTTP gated on `!is_empty()` and diverged). The tool
+    // returns "skill 'X' not found" when called against an empty
+    // store — graceful enough that the model can recover, and far
+    // simpler than threading a re-registration hook through every
+    // mid-session catalog change. The system prompt's
+    // `# Available skills` section still correctly skips when the
+    // catalog is empty (see `prompts::build_full_system_prompt`).
+    let skill_tool = crate::skills::SkillTool::new(skill_store.clone());
+    let store_handle = skill_tool.store_handle();
+    tool_registry.register(Arc::new(skill_tool));
+    tool_registry.register(Arc::new(crate::skills::SkillListTool::new_from_handle(
+        store_handle.clone(),
+    )));
+    tool_registry.register(Arc::new(crate::skills::SkillSearchTool::new_from_handle(
+        store_handle,
+    )));
+    let store_ref = if skill_store.skills.is_empty() {
+        None
+    } else {
+        Some(&skill_store)
+    };
+
+    // Load MCPs BEFORE building the system prompt so their
+    // `InitializeResult.instructions` make it into the
+    // `# MCP server instructions` section on the very first turn.
+    // Print mode is single-shot — no later rebuild opportunity.
+    //
+    // Tool-parity audit fix: merge plugin-contributed MCPs (same
+    // shape as repl.rs:~4189 + agent_runtime.rs:~123). Without
+    // this, a plugin-installed MCP server was invisible in print
+    // mode unless the user manually duplicated it into mcp.json.
+    let mut merged_mcp = config.mcp_servers.clone();
+    for p_mcp in crate::plugins::plugin_mcp_servers() {
+        if !merged_mcp.iter().any(|s| s.name == p_mcp.name) {
+            merged_mcp.push(p_mcp);
+        }
+    }
+    let (mcp_clients, _mcp_summary) = load_mcp_servers(&merged_mcp, &mut tool_registry).await;
+    let mcp_instructions = crate::mcp::collect_mcp_instructions(&mcp_clients);
+
+    let system = crate::prompts::build_full_system_prompt(
+        &config,
+        &cwd,
+        store_ref,
+        &mcp_instructions,
+        crate::prompts::SurfaceHints::Headless,
+    );
 
     let provider = build_provider(&config)?;
     let perm_mode = if config.permissions == "auto" {
@@ -3658,6 +4509,18 @@ pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> R
     } else {
         PermissionMode::Ask
     };
+
+    // WorkflowRun: model-callable wrapper around `/workflow run`. Print
+    // mode doesn't register Subagent, so scripts that call
+    // `thclaws.subagent(...)` will error — fine, the model authors
+    // around it. Registered for surface-parity with REPL / GUI; rarely
+    // exercised in one-shot `-p` mode but it works when asked.
+    tool_registry.register(Arc::new(crate::tools::WorkflowRunTool::new(
+        provider.clone(),
+        config.model.clone(),
+        None,
+    )));
+
     let agent = Agent::new(provider, tool_registry, config.model.clone(), system)
         .with_max_iterations(config.max_iterations)
         .with_max_tokens(config.max_tokens)
@@ -3726,6 +4589,64 @@ pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> R
     Ok(())
 }
 
+/// Recompose the REPL agent's system prompt from current project
+/// state. Mirrors what `shared_session::rebuild_system_prompt` does
+/// for the GUI worker — pre-fix the CLI captured `self.system` once
+/// at startup (line ~4396) and never refreshed it, so mid-session
+/// `/mcp add` / `/skill install` / `/kms use` etc. left their
+/// contributions stranded in the live registries but absent from the
+/// model's system prompt until `/reload` (full re-exec). The handle
+/// (not the local snapshot) is the live skill catalog — `/skill
+/// install` and `/plugin install` write through it, so reading from
+/// it here picks up the additions automatically.
+fn refresh_repl_system_prompt(
+    agent: &mut Agent,
+    system: &mut String,
+    factory_snapshot: &std::sync::Arc<std::sync::RwLock<crate::subagent::FactorySnapshot>>,
+    tool_registry: &crate::tools::ToolRegistry,
+    config: &AppConfig,
+    cwd: &std::path::Path,
+    skill_store_handle: &Option<std::sync::Arc<std::sync::Mutex<crate::skills::SkillStore>>>,
+    mcp_clients: &[std::sync::Arc<crate::mcp::McpClient>],
+    addendum: &str,
+) {
+    let mcp_instructions = crate::mcp::collect_mcp_instructions(mcp_clients);
+    let store_guard = skill_store_handle.as_ref().and_then(|h| h.lock().ok());
+    let mut new_system = crate::prompts::build_full_system_prompt(
+        config,
+        cwd,
+        store_guard.as_deref(),
+        &mcp_instructions,
+        crate::prompts::SurfaceHints::Repl,
+    );
+    // Re-apply the lead/teammate addendum that the team-agent setup
+    // pushed onto `system` / `agent.system` before the slash loop
+    // started. Without this, `/mcp add` / `/skill install` / `/kms
+    // use` / `/reload-prompt` would silently drop the lead
+    // delegation rules (lead mode) or the agent role + team
+    // coordination rules (teammate mode) — set_system replaces
+    // wholesale, and build_full_system_prompt has no knowledge of
+    // those addenda.
+    if !addendum.is_empty() {
+        new_system.push_str(addendum);
+    }
+    agent.set_system(new_system.clone());
+    *system = new_system.clone();
+    // Propagate to the subagent factory's live snapshot. Pre-fix the
+    // factory captured system + base_tools at construction and never
+    // refreshed — subagents spawned after /mcp add etc. saw the
+    // startup-time prompt with no new MCP tools. Now the factory
+    // shares this Arc<RwLock<FactorySnapshot>> with us, so writing
+    // here is the only update needed for both system AND tools.
+    {
+        let mut snap = factory_snapshot
+            .write()
+            .expect("factory snapshot write lock");
+        snap.system = new_system;
+        snap.tools = tool_registry.clone();
+    }
+}
+
 /// Interactive REPL. Reads from stdin via `rustyline`, streams assistant
 /// output live, handles slash commands. Runs until `/quit`, EOF, or Ctrl-C.
 pub async fn run_repl(mut config: AppConfig) -> Result<()> {
@@ -3736,8 +4657,12 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     crate::providers::set_stream_chunk_timeout_secs(config.stream_chunk_timeout_secs);
 
     let cwd = std::env::current_dir()?;
-    let ctx = ProjectContext::discover(&cwd)?;
-    let memory_store = MemoryStore::default_path().map(MemoryStore::new);
+    // Keep `memory_store` around for the `/memory list/show/dump/...`
+    // slash-command handlers further down (line ~5744 onward). The
+    // system-prompt builder loads memory independently — this binding
+    // is purely for the interactive commands the REPL exposes.
+    let memory_store =
+        crate::memory::MemoryStore::default_path().map(crate::memory::MemoryStore::new);
 
     // M6.11 (H1): daily auto-refresh of the marketplace catalog so
     // CLI users get fresh entries without having to remember
@@ -3745,29 +4670,29 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     // no-op when the cache is < 24h old.
     crate::marketplace::spawn_daily_auto_refresh();
 
-    // Append memory section to the project system prompt, if any memory exists.
-    let system_fallback = if config.system_prompt.is_empty() {
-        crate::prompts::defaults::SYSTEM
-    } else {
-        config.system_prompt.as_str()
-    };
-    let base_prompt = crate::prompts::load("system", system_fallback);
-    let mut system = ctx.build_system_prompt(&base_prompt);
-    if let Some(store) = &memory_store {
-        if let Some(mem_section) = store.system_prompt_section() {
-            system.push_str("\n\n# Memory\n");
-            system.push_str(&mem_section);
-        }
-    }
-    let kms_section = crate::kms::system_prompt_section(&config.kms_active);
-    if !kms_section.is_empty() {
-        system.push_str("\n\n");
-        system.push_str(&kms_section);
-    }
+    // dev-plan/35 followup: defer system-prompt assembly until AFTER
+    // skill discovery (line ~4177) so the unified builder gets the
+    // populated SkillStore in one shot. Pre-fix, REPL inlined four
+    // assembly steps here, then appended the skills section separately
+    // at line ~4193, with the GUI/serve worker doing things in a
+    // different order — every drift fix had to be applied twice.
+    // `mut` because the lead-role addendum is appended later (~4342).
+    let mut system: String;
 
     // Build the tool registry once, with built-ins + task tools + MCP tools.
     // Override WebSearch with the configured engine (with_builtins uses "auto").
     let mut tool_registry = ToolRegistry::with_builtins();
+    // Opt-in native Gemini image tools — same gating as the
+    // GUI/serve + HTTP-API registrations (settings flag; env-key
+    // presence is enforced by the tools' requires_env).
+    if config.image_tools_enabled {
+        tool_registry.register(Arc::new(crate::tools::TextToImageTool));
+        tool_registry.register(Arc::new(crate::tools::ImageToImageTool));
+        tool_registry.register(Arc::new(crate::tools::TextToVideoTool));
+        tool_registry.register(Arc::new(crate::tools::ImageToVideoTool));
+        tool_registry.register(Arc::new(crate::tools::MediaJobStatusTool));
+    }
+
     // KMS tools always-on (pre-fix this was gated by
     // `!kms_active.is_empty()`, but /dream's side-channel agent
     // inherits this registry and needs KmsCreate/KmsWrite to
@@ -3793,6 +4718,14 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         )));
     }
     let task_store = crate::tools::tasks::register_task_tools(&mut tool_registry);
+    // Accumulates everything that gets pushed onto `system` (or fed via
+    // `agent.append_system(...)`) AFTER the initial build — currently the
+    // lead-mode `lead` template (line ~4602) and the teammate-mode role +
+    // team_rules (lines ~4695, ~4762). `refresh_repl_system_prompt`
+    // re-appends this to the freshly-built base on every refresh so
+    // mid-session `/mcp add` / `/skill install` / `/kms use` / etc.
+    // don't silently wipe the team-role context.
+    let mut system_addendum = String::new();
     let team_agent_name = std::env::var("THCLAWS_TEAM_AGENT").ok();
     let team_role = team_agent_name.as_deref().unwrap_or("lead");
     // Team feature is opt-in (teamEnabled: true in settings.json). Teammate
@@ -3879,71 +4812,47 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     // SkillTool's shared store via `skill_store_handle` below.
     let mut skill_names: std::collections::HashSet<String> =
         skill_store.skills.keys().cloned().collect();
-    let mut skill_store_handle: Option<
-        std::sync::Arc<std::sync::Mutex<crate::skills::SkillStore>>,
-    > = None;
     if !skill_store.skills.is_empty() {
         let count = skill_store.skills.len();
         println!("{COLOR_DIM}[skills] {} skill(s) loaded{COLOR_RESET}", count);
-        // Surface the skill catalog in the system prompt so the model knows
-        // what's available without having to read the Skill tool's input
-        // schema. For each skill list name + description + whenToUse — the
-        // same fields Claude Code uses to decide when to reach for a skill.
-        system.push_str("\n\n# Available skills (MANDATORY usage)\n");
-        system.push_str(
-            "The `Skill` tool loads expert instructions for a bundled workflow. \
-             If a user request matches the trigger criteria of any skill below, \
-             you MUST:\n\
-             1. Call `Skill(name: \"<skill-name>\")` FIRST — before any Bash, \
-                Write, Edit, or other tool calls for that task.\n\
-             2. Follow the instructions returned by that skill for the rest of \
-                the task. They override your default approach.\n\
-             3. Announce the skill at the start of your reply, e.g. \
-                \"Using the `pdf` skill to …\".\n\
-             Do NOT implement the task yourself when a matching skill exists — \
-             the skill encodes conventions and scripts you don't have built in.\n\n",
-        );
-        let mut entries: Vec<&crate::skills::SkillDef> = skill_store.skills.values().collect();
-        entries.sort_by(|a, b| a.name.cmp(&b.name));
-        for skill in entries {
-            // Keep each entry compact: name + short trigger only. Full
-            // description is available via `Skill(name)` call. This helps
-            // small-context models (Ollama/Gemma) where 18 multi-line
-            // descriptions push the catalog out of the attention window.
-            if !skill.when_to_use.is_empty() {
-                system.push_str(&format!("- **{}**: {}\n", skill.name, skill.when_to_use));
-            } else {
-                system.push_str(&format!("- **{}**: {}\n", skill.name, skill.description));
-            }
-        }
-        // Re-anchor the rule close to where the model's attention is
-        // strongest (end of system prompt gets more weight than middle).
-        system.push_str(
-            "\nReminder: if the user's request matches ANY skill trigger above, \
-             call `Skill(name: \"...\")` FIRST.\n\n\
-             Slash-command shortcut: if a user message begins with \
-             `/<skill-name>` (matching one of the skills above), that IS \
-             an explicit request to run that skill. Call \
-             `Skill(name: \"<skill-name>\")` immediately, then follow its \
-             instructions using any args that appeared after the name.\n",
-        );
-        let skill_tool = crate::skills::SkillTool::new(skill_store);
-        let store_handle = skill_tool.store_handle();
-        skill_store_handle = Some(store_handle.clone());
-        tool_registry.register(Arc::new(skill_tool));
-        // dev-plan/06 P2: discovery tools register alongside Skill so
-        // the "names-only" / "discover-tool-only" strategies have
-        // something to point at. Always-registered for symmetry with
-        // the GUI worker.
-        tool_registry.register(Arc::new(crate::skills::SkillListTool::new_from_handle(
-            store_handle.clone(),
-        )));
-        tool_registry.register(Arc::new(crate::skills::SkillSearchTool::new_from_handle(
-            store_handle,
-        )));
     }
+    // Tool-parity audit fix: Skill family registers unconditionally
+    // across all 4 surfaces (see run_print_mode for the rationale).
+    let skill_tool = crate::skills::SkillTool::new(skill_store.clone());
+    let store_handle = skill_tool.store_handle();
+    let skill_store_handle: Option<std::sync::Arc<std::sync::Mutex<crate::skills::SkillStore>>> =
+        Some(store_handle.clone());
+    tool_registry.register(Arc::new(skill_tool));
+    // dev-plan/06 P2: discovery tools register alongside Skill so
+    // the "names-only" / "discover-tool-only" strategies have
+    // something to point at. Always-registered for symmetry with
+    // the GUI worker.
+    tool_registry.register(Arc::new(crate::skills::SkillListTool::new_from_handle(
+        store_handle.clone(),
+    )));
+    tool_registry.register(Arc::new(crate::skills::SkillSearchTool::new_from_handle(
+        store_handle,
+    )));
+    // run_repl already pre-merges plugin MCPs into `config.mcp_servers`
+    // at line ~4245 (the "Merge plugin MCP servers into config" loop),
+    // so `&config.mcp_servers` already contains the plugin contributions.
+    // No second merge needed here.
     let (mut mcp_clients, mut mcp_summary) =
         load_mcp_servers(&config.mcp_servers, &mut tool_registry).await;
+
+    // Now that the skill_store + MCP clients are both populated,
+    // assemble the system prompt. Single source of truth shared
+    // with CLI/GUI/print/agent_runtime via prompts.rs.
+    // SurfaceHints::Repl appends the slash-command-shortcut priming
+    // inside the skills section.
+    let mcp_instructions = crate::mcp::collect_mcp_instructions(&mcp_clients);
+    system = crate::prompts::build_full_system_prompt(
+        &config,
+        &cwd,
+        Some(&skill_store),
+        &mcp_instructions,
+        crate::prompts::SurfaceHints::Repl,
+    );
 
     // Try the configured provider first; on failure (missing key, etc.)
     // fall back to something usable so the REPL still opens. The user
@@ -4042,17 +4951,20 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     // filtering — Task became a privilege-escalation primitive
     // (model spawns subagent → subagent has tools the parent was
     // forbidden from using).
+    let factory_snapshot =
+        std::sync::Arc::new(std::sync::RwLock::new(crate::subagent::FactorySnapshot {
+            system: system.clone(),
+            tools: tool_registry.clone(),
+        }));
     {
         let plugin_agent_dirs = crate::plugins::plugin_agent_dirs();
         let mut agent_defs =
             crate::agent_defs::AgentDefsConfig::load_with_extra(&plugin_agent_dirs);
         agent_defs.apply_builtin_subagent_overrides(&config);
-        let base_tools = tool_registry.clone();
         let factory = Arc::new(ProductionAgentFactory {
             provider: provider.clone(),
-            base_tools,
+            snapshot: factory_snapshot.clone(),
             model: config.model.clone(),
-            system: system.clone(),
             max_iterations: config.max_iterations,
             max_depth: crate::subagent::DEFAULT_MAX_DEPTH,
             max_tokens: config.max_tokens,
@@ -4064,11 +4976,23 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
             cancel: None,
             hooks: Some(hooks_arc.clone()),
         });
-        tool_registry.register(Arc::new(
+        let subagent_arc: Arc<dyn crate::tools::Tool> = Arc::new(
             SubAgentTool::new(factory)
                 .with_depth(0)
                 .with_agent_defs(agent_defs),
-        ));
+        );
+        tool_registry.register(subagent_arc.clone());
+        // WorkflowRun: model-callable wrapper around the `/workflow
+        // run` slash command. Captures the live provider + current
+        // model so the workflow author sees the same engine as the
+        // calling agent. `subagent_arc` is threaded in so scripts'
+        // `thclaws.subagent(...)` calls dispatch to the Task tool the
+        // REPL just registered.
+        tool_registry.register(Arc::new(crate::tools::WorkflowRunTool::new(
+            provider.clone(),
+            config.model.clone(),
+            Some(subagent_arc),
+        )));
     }
 
     // If a team exists, inject lead coordination rules into the system prompt.
@@ -4088,11 +5012,15 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         }
                     })
                     .collect();
-                system.push_str(&crate::prompts::render_named(
+                let lead_text = crate::prompts::render_named(
                     "lead",
                     crate::prompts::defaults::LEAD,
                     &[("members", &members.join(", "))],
-                ));
+                );
+                system.push_str(&lead_text);
+                // Track so refresh_repl_system_prompt re-applies the
+                // lead rules after any mid-session rebuild.
+                system_addendum.push_str(&lead_text);
             }
         }
     }
@@ -4181,10 +5109,18 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         agent_defs.apply_builtin_subagent_overrides(&config);
         if let Some(def) = agent_defs.get(agent_name) {
             if !def.instructions.is_empty() {
-                agent.append_system(&format!(
+                let role_text = format!(
                     "\n\n# Agent Role: {}\n{}\n",
                     def.description, def.instructions
-                ));
+                );
+                agent.append_system(&role_text);
+                // Keep local `system` in sync with agent.system so a
+                // model swap (line ~5713) preserves the role on its
+                // `Agent::new(... system.clone())`. Also track in
+                // system_addendum so refresh_repl_system_prompt
+                // re-applies after rebuilding.
+                system.push_str(&role_text);
+                system_addendum.push_str(&role_text);
             }
         }
 
@@ -4249,6 +5185,11 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
             ],
         );
         agent.append_system(&team_rules);
+        // Mirror role-text comment above: keep local `system` and
+        // system_addendum in sync with agent.system so model swap +
+        // refresh both preserve the team coordination rules.
+        system.push_str(&team_rules);
+        system_addendum.push_str(&team_rules);
         let team_dir = std::env::var("THCLAWS_TEAM_DIR")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| crate::team::Mailbox::default_dir());
@@ -4386,10 +5327,16 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 let _ = mailbox.write_status(agent_name, "working", Some(&msg.id));
                 let mut last_heartbeat = std::time::Instant::now();
                 let turn_start = std::time::Instant::now();
+                let mut team_active_tools: std::collections::HashMap<
+                    String,
+                    crate::tool_display::ActiveToolDisplay,
+                > = std::collections::HashMap::new();
 
                 // Run the agent turn.
                 let mut stream = Box::pin(agent.run_turn(prompt));
                 loop {
+                    let heartbeat_delay =
+                        crate::tool_display::next_heartbeat_delay(&team_active_tools);
                     let ev = tokio::select! {
                         ev = stream.next() => ev,
                         _ = tokio::signal::ctrl_c() => {
@@ -4397,23 +5344,48 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             drop(stream);
                             break;
                         }
+                        _ = tokio::time::sleep(heartbeat_delay) => {
+                            if let Some(id) = crate::tool_display::oldest_due_heartbeat(&team_active_tools).map(|(k, _)| k.clone()) {
+                                if let Some(td) = team_active_tools.get_mut(&id) {
+                                    team_println!("\n{}", crate::tool_display::format_tool_heartbeat(&td.label, td.elapsed()));
+                                    td.last_heartbeat_at = std::time::Instant::now();
+                                }
+                            }
+                            continue;
+                        }
                     };
                     let Some(ev) = ev else { break };
                     match ev {
                         Ok(AgentEvent::Text(s)) => {
                             team_print!("{s}");
-                            // Throttled heartbeat — update every 30s on any output.
                             if last_heartbeat.elapsed().as_secs() >= 30 {
                                 let _ = mailbox.write_status(agent_name, "working", None);
                                 last_heartbeat = std::time::Instant::now();
                             }
                         }
-                        Ok(AgentEvent::ToolCallStart { name, .. }) => {
-                            team_print!("\n[tool: {name}]");
+                        Ok(AgentEvent::ToolCallStart {
+                            id, name, input, ..
+                        }) => {
+                            let label = crate::tool_display::tool_label(&name, &input);
+                            team_active_tools.insert(
+                                id,
+                                crate::tool_display::ActiveToolDisplay::new(label.clone()),
+                            );
+                            team_print!("\n[tool: {label}]");
                         }
-                        Ok(AgentEvent::ToolCallResult { output, .. }) => {
-                            team_println!("{}", if output.is_ok() { " ✓" } else { " ✗" });
-                            // Update heartbeat on tool completion.
+                        Ok(AgentEvent::ToolCallResult { id, output, .. }) => {
+                            let dur = team_active_tools.remove(&id).map(|t| t.elapsed());
+                            let dur_str = dur
+                                .map(|d| format!(" {}", crate::tool_display::format_duration(d)))
+                                .unwrap_or_default();
+                            team_println!(
+                                "{}",
+                                if output.is_ok() {
+                                    format!(" ✓{dur_str}")
+                                } else {
+                                    format!(" ✗{dur_str}")
+                                }
+                            );
                             let _ = mailbox.write_status(agent_name, "working", None);
                             last_heartbeat = std::time::Instant::now();
                         }
@@ -4530,6 +5502,13 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     > = rustyline::Editor::with_config(readline_config())
         .map_err(|e| Error::Agent(format!("readline init: {e}")))?;
     rl.set_helper(Some(crate::cli_completer::SlashCompleter));
+    // Grapheme-aware Backspace: one press deletes a whole cluster, so
+    // Thai/Lao/Hindi/Arabic combining marks (and emoji ZWJ runs) aren't
+    // orphaned a codepoint at a time. thClaws#126.
+    rl.bind_sequence(
+        rustyline::KeyEvent(rustyline::KeyCode::Backspace, rustyline::Modifiers::NONE),
+        rustyline::EventHandler::Conditional(Box::new(GraphemeBackspace)),
+    );
     let rl_mutex = std::sync::Arc::new(std::sync::Mutex::new(rl));
 
     // M6.39.2: track which research jobs we've already announced as
@@ -4537,6 +5516,20 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     // exactly once per job. Cleared only by process restart — terminal
     // jobs stay in the manager until pruned, but each is announced once.
     let mut notified_research: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Accumulated USD cost for this REPL session. Computed via the
+    // model catalogue after every AgentEvent::Done and shown alongside
+    // the per-turn token counts. `/cost reset` zeroes it.
+    let mut session_cost_usd: f64 = 0.0;
+
+    // Cardputer cost-display bridge — best-effort BLE central that
+    // streams `session_cost_usd` to a `thClaws-Cost-*` peripheral and
+    // takes reset notifications back when the user hits Backspace on
+    // the device. Feature-gated so headless CI / GUI-only builds don't
+    // pull in btleplug. The handle stays alive for the REPL's lifetime;
+    // dropping it on Ctrl-C / quit terminates the background task.
+    #[cfg(feature = "cost_bridge")]
+    let mut cost_bridge = crate::cost_bridge::spawn();
 
     // Helper: process team inbox messages and run agent turn.
     macro_rules! process_team_messages {
@@ -4605,7 +5598,10 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 let _ = std::io::stdout().flush();
                 let mut stream = Box::pin(agent.run_turn(team_prompt));
                 let mut last_was_thinking = false;
+                let mut active_tools: std::collections::HashMap<String, crate::tool_display::ActiveToolDisplay> =
+                    std::collections::HashMap::new();
                 loop {
+                    let heartbeat_delay = crate::tool_display::next_heartbeat_delay(&active_tools);
                     let ev = tokio::select! {
                         ev = stream.next() => ev,
                         _ = tokio::signal::ctrl_c() => {
@@ -4613,6 +5609,18 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             lead_log!("{COLOR_RESET}\n{COLOR_YELLOW}[cancelled]{COLOR_RESET}\n");
                             drop(stream);
                             break;
+                        }
+                        _ = tokio::time::sleep(heartbeat_delay) => {
+                            if let Some(id) = crate::tool_display::oldest_due_heartbeat(&active_tools).map(|(k, _)| k.clone()) {
+                                if let Some(td) = active_tools.get_mut(&id) {
+                                    let hb = crate::tool_display::format_tool_heartbeat(&td.label, td.elapsed());
+                                    println!("{COLOR_DIM}{hb}{COLOR_RESET}");
+                                    lead_log!("{COLOR_DIM}{hb}{COLOR_RESET}\n");
+                                    let _ = std::io::stdout().flush();
+                                    td.last_heartbeat_at = std::time::Instant::now();
+                                }
+                            }
+                            continue;
                         }
                     };
                     let Some(ev) = ev else { break };
@@ -4627,33 +5635,37 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             let _ = std::io::stdout().flush();
                         }
                         Ok(AgentEvent::Thinking(s)) => {
-                            // Dim-italic so reasoning is visibly distinct from
-                            // the final answer (DeepSeek v4/r1, glm4.7, etc.).
                             print!("\x1b[2;3m{s}\x1b[0m");
                             last_was_thinking = true;
                             let _ = std::io::stdout().flush();
                         }
-                        Ok(AgentEvent::ToolCallStart { name, .. }) => {
-                            // Tool-call line already starts with \n, so any
-                            // prior thinking is naturally separated; clear
-                            // the flag so we don't double-line.
+                        Ok(AgentEvent::ToolCallStart { id, name, input, .. }) => {
                             last_was_thinking = false;
+                            let label = crate::tool_display::tool_label(&name, &input);
+                            active_tools.insert(id, crate::tool_display::ActiveToolDisplay::new(label.clone()));
                             print!(
-                                "{COLOR_RESET}\n{COLOR_DIM}[tool: {name}]{COLOR_RESET}{COLOR_GREEN}"
+                                "{COLOR_RESET}\n{COLOR_DIM}[tool: {label}]{COLOR_RESET}{COLOR_GREEN}"
                             );
-                            lead_log!("{COLOR_RESET}\n{COLOR_DIM}[tool: {name}]{COLOR_RESET}");
+                            lead_log!("{COLOR_RESET}\n{COLOR_DIM}[tool: {label}]{COLOR_RESET}");
                         }
-                        Ok(AgentEvent::ToolCallResult { output, .. }) => {
+                        Ok(AgentEvent::ToolCallResult { id, output, .. }) => {
+                            let dur = active_tools.remove(&id).map(|t| t.elapsed());
+                            let dur_str = dur
+                                .map(|d| format!(" {}", crate::tool_display::format_duration(d)))
+                                .unwrap_or_default();
                             let mark = if output.is_ok() { "✓" } else { "✗" };
                             let color = if output.is_ok() { COLOR_DIM } else { COLOR_YELLOW };
-                            print!("{color} {mark}{COLOR_RESET}{COLOR_GREEN}");
-                            lead_log!(" {color}{mark}{COLOR_RESET}\n{COLOR_GREEN}");
+                            print!("{color} {mark}{dur_str}{COLOR_RESET}{COLOR_GREEN}");
+                            lead_log!(" {color}{mark}{dur_str}{COLOR_RESET}\n{COLOR_GREEN}");
                         }
-                        Ok(AgentEvent::ToolCallDenied { name, .. }) => {
+                        Ok(AgentEvent::ToolCallDenied { id, name, .. }) => {
+                            let dur_str = active_tools.remove(&id)
+                                .map(|t| format!(" {}", crate::tool_display::format_duration(t.elapsed())))
+                                .unwrap_or_default();
                             print!(
-                                "{COLOR_RESET}\n{COLOR_YELLOW}[denied: {name}]{COLOR_RESET}{COLOR_GREEN}"
+                                "{COLOR_RESET}\n{COLOR_YELLOW}[denied: {name}{dur_str}]{COLOR_RESET}{COLOR_GREEN}"
                             );
-                            lead_log!("{COLOR_RESET}\n{COLOR_YELLOW}[denied: {name}]{COLOR_RESET}\n{COLOR_GREEN}");
+                            lead_log!("{COLOR_RESET}\n{COLOR_YELLOW}[denied: {name}{dur_str}]{COLOR_RESET}\n{COLOR_GREEN}");
                         }
                         Ok(AgentEvent::Done { stop_reason, .. }) => {
                             print!("{COLOR_RESET}");
@@ -4695,6 +5707,16 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     // Uses select! to race user input against team inbox messages so the
     // lead can respond to teammates without the user needing to press Enter.
     loop {
+        // Drain Cardputer reset notifications quietly — when the user
+        // hits Backspace on the device we zero the session counter so
+        // both displays stay in sync. Silent on purpose; the device
+        // already shows the $0.0000 result and a CLI println here would
+        // garble whatever the user is mid-typing into readline.
+        #[cfg(feature = "cost_bridge")]
+        while cost_bridge.rx_reset.try_recv().is_ok() {
+            session_cost_usd = 0.0;
+        }
+
         // M6.39.2: announce any research jobs that finished since the
         // last prompt (Done / Cancelled / Failed). Each id announced
         // once; subsequent prompts skip already-notified jobs.
@@ -4791,11 +5813,29 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
             continue;
         }
 
+        // Immediate feedback: show spinner right after Enter. Gate on
+        // TTY so piped / headless invocations don't accumulate ANSI
+        // control bytes in their stdout (logs, redirected output, …).
+        use std::io::IsTerminal as _;
+        let early_spinner_shown = if std::io::stdout().is_terminal() {
+            print!(
+                "{}",
+                crate::tool_display::format_thinking_spinner(std::time::Duration::ZERO, 0)
+            );
+            let _ = std::io::stdout().flush();
+            true
+        } else {
+            false
+        };
+
         // `!<cmd>` shell escape — user-initiated shell command, runs
         // through BashTool (sandbox cwd, non-interactive env, etc.)
         // and prints the output. Doesn't touch agent history. Mirrors
         // the GUI handle_line path in shared_session.rs.
         if let Some(cmd) = crate::shell_bang::parse_bang(&line) {
+            if early_spinner_shown {
+                print!("{}", crate::tool_display::clear_thinking_line());
+            }
             println!("{COLOR_DIM}[!] {cmd}{COLOR_RESET}");
             match crate::shell_bang::run_bang_command(cmd).await {
                 Ok(output) => {
@@ -4824,15 +5864,15 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 let args = body.strip_prefix(&word).unwrap_or("").trim();
 
                 if skill_names.contains(&word) {
-                    let args_note = if args.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" The user's task for this skill: {args}")
-                    };
+                    // dev-plan/35 followup: shared rewrite-text helper
+                    // so CLI and GUI / --serve speak the exact same
+                    // skill-invocation prompt. CLI keeps its own
+                    // `skill_names` snapshot for the lookup (kept in
+                    // sync with `/skill install` handlers below); GUI
+                    // queries `state.skill_store` live. Only the
+                    // rewrite text is centralised.
                     println!("{COLOR_DIM}(/{word} → Skill(name: \"{word}\")){COLOR_RESET}");
-                    line = format!(
-                        "The user ran the `/{word}` slash command. Call `Skill(name: \"{word}\")` right away and follow the instructions it returns.{args_note}"
-                    );
+                    line = make_skill_rewrite_prompt(&word, args);
                 } else if let Some(cmd) = command_store.get(&word).cloned() {
                     println!(
                         "{COLOR_DIM}(/{word} → prompt from {}){COLOR_RESET}",
@@ -4997,18 +6037,39 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         }
 
         if let Some(cmd) = parse_slash(&line) {
+            if early_spinner_shown {
+                print!("{}", crate::tool_display::clear_thinking_line());
+                let _ = std::io::stdout().flush();
+            }
             match cmd {
                 SlashCommand::Help => println!("{}", render_help()),
                 SlashCommand::Quit => break,
                 SlashCommand::Clear => {
                     agent.clear_history();
+                    // Rotate to a fresh session file — old conversation
+                    // stays on disk under its previous id. Mirrors what
+                    // GUI /clear (shell_dispatch.rs) and model-swap already
+                    // do; without it the next sync() would clamp
+                    // `last_saved_count` and silently skip the first
+                    // post-clear turn from disk.
+                    session = Session::new(&config.model, session.cwd.clone());
+                    // Reset session-scoped trust state too — the previous
+                    // conversation's "allow for this session" yolo flag
+                    // and any persisted plan-mode state shouldn't leak
+                    // into the cleared session. Pre-fix only model-swap
+                    // reset these; plain /clear silently kept them.
+                    crate::permissions::ApprovalSink::reset_session_flag(approver.as_ref());
+                    crate::tools::plan_state::clear();
                     // ANSI: scrollback erase (\x1b[3J) + screen erase (\x1b[2J)
                     // + cursor home (\x1b[H). Matches what most terminals do
                     // for Cmd+K / `clear`. Makes the visible scrollback match
                     // the model's now-empty history.
                     print!("\x1b[3J\x1b[2J\x1b[H");
                     let _ = std::io::Write::flush(&mut std::io::stdout());
-                    println!("{COLOR_DIM}history cleared{COLOR_RESET}");
+                    println!(
+                        "{COLOR_DIM}history cleared (new session {}){COLOR_RESET}",
+                        session.id
+                    );
                 }
                 SlashCommand::History => {
                     let h = agent.history_snapshot();
@@ -5055,7 +6116,13 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     };
                     match new_provider.list_models().await {
                         Ok(models) if !models.is_empty() => {
-                            let ok = models.iter().any(|m| m.id == resolved);
+                            // `openrouter/fusion+` is a thClaws pseudo-model
+                            // (build_provider maps it to the configured outer
+                            // model + injected fusion tool). It never appears
+                            // in OpenRouter's live /models list, so accept it
+                            // explicitly instead of rejecting as "unknown".
+                            let ok = resolved == crate::config::FUSION_PLUS_MODEL
+                                || models.iter().any(|m| m.id == resolved);
                             if !ok {
                                 println!(
                                     "{COLOR_YELLOW}unknown model '{resolved}' — try /models to see what's available{COLOR_RESET}"
@@ -5069,14 +6136,20 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         // implement listing.
                         _ => {}
                     }
-                    // Flush any pending messages in the outgoing session
-                    // before we swap providers. Mid-turn history built
-                    // against provider A's message/tool schema can't always
-                    // be re-fed to provider B — keep the old turns in their
-                    // own file and start provider B with a clean slate, like
-                    // a fresh app launch with the new model.
+                    // Snapshot the existing conversation BEFORE rebuilding the
+                    // agent — we feed it back into the new agent so the user
+                    // stays in the same chat thread across the provider swap.
+                    // The JSONL log is the canonical history; whichever
+                    // provider serves the next turn translates ContentBlocks
+                    // to its own wire format (anthropic.rs serializes blocks
+                    // directly; openai.rs maps ToolUse → tool_calls; etc.).
+                    // Provider-specific blocks that don't map (e.g. Anthropic
+                    // Thinking on a non-reasoning OpenAI model) are silently
+                    // dropped per-provider — accepted tradeoff for the
+                    // continuity. See thClaws/thClaws#142.
+                    let history = agent.history_snapshot();
                     if let Some(store) = &session_store {
-                        session.sync(agent.history_snapshot());
+                        session.sync(history.clone());
                         if !session.messages.is_empty() {
                             if let Err(e) = store.save(&mut session) {
                                 println!(
@@ -5097,16 +6170,13 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     .with_permission_mode(perm_mode)
                     .with_approver(approver.clone())
                     .with_hooks(std::sync::Arc::new(config.hooks.clone()));
-                    agent.clear_history();
-                    session = Session::new(&config.model, session.cwd.clone());
-                    // M6.20 BUG M2 + M3: model swap mints a fresh
-                    // session; reset yolo flag and permission mode.
-                    crate::permissions::ApprovalSink::reset_session_flag(approver.as_ref());
-                    let _ = crate::permissions::take_pre_plan_mode();
-                    crate::permissions::set_current_mode_and_broadcast(perm_mode);
+                    agent.set_history(history);
+                    // Keep the same session id + JSONL file; just update the
+                    // model label so the header reflects the active provider.
+                    session.model = config.model.clone();
                     save_project_model(&config.model);
                     println!(
-                        "{COLOR_DIM}model → {} (saved to .thclaws/settings.json; new session {}){COLOR_RESET}",
+                        "{COLOR_DIM}model → {} (saved to .thclaws/settings.json; conversation preserved in session {}){COLOR_RESET}",
                         config.model, session.id
                     );
                 }
@@ -5114,9 +6184,20 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     println!("{COLOR_DIM}(session-only) {key} = {value}{COLOR_RESET}");
                 }
                 SlashCommand::Providers => {
+                    use crate::providers::ProviderTier;
                     let current = config.detect_provider_kind().ok();
-                    for kind in ProviderKind::ALL {
-                        let marker = if Some(*kind) == current { "*" } else { " " };
+                    let mut last_tier: Option<ProviderTier> = None;
+                    for kind in ProviderKind::display_ordered() {
+                        let tier = kind.tier();
+                        if Some(tier) != last_tier {
+                            let header = match tier {
+                                ProviderTier::Featured => "Featured (gateway-routable):",
+                                ProviderTier::Additional => "Additional (bring your own key):",
+                            };
+                            println!("{COLOR_BOLD}{header}{COLOR_RESET}");
+                            last_tier = Some(tier);
+                        }
+                        let marker = if Some(kind) == current { "*" } else { " " };
                         println!(
                             "{COLOR_DIM}  {marker} {:<10} → {}{COLOR_RESET}",
                             kind.name(),
@@ -5212,6 +6293,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         verified_at: None,
                         free: None,
                         chat: None,
+                        ..Default::default()
                     };
                     // Compare against catalogue value before saving so we
                     // can warn when the override exceeds it (trust + warn).
@@ -5251,27 +6333,60 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     }
                 }
                 SlashCommand::Models => {
-                    // Build a fresh provider from current config and query it.
-                    match build_provider(&config) {
-                        Ok(p) => match p.list_models().await {
-                            Ok(models) if models.is_empty() => {
-                                println!("{COLOR_DIM}no models returned{COLOR_RESET}")
-                            }
-                            Ok(models) => {
-                                for m in models {
-                                    match m.display_name {
-                                        Some(dn) => {
-                                            println!("{COLOR_DIM}  {} — {}{COLOR_RESET}", m.id, dn)
+                    // Gateway-routed providers: the live `/models`
+                    // endpoint can't pass the metered proxy (no model
+                    // id to price), and strict metering 400s unpriced
+                    // models anyway — render the priced catalogue rows
+                    // instead, mirroring the GUI picker filter.
+                    let gw_provider = config
+                        .detect_provider_kind()
+                        .ok()
+                        .and_then(|k| {
+                            crate::providers::thclaws_gateway::for_kind(&config, k)
+                                .map(|_| crate::model_catalogue::provider_kind_name(k))
+                        });
+                    if let Some(provider_name) = gw_provider {
+                        let cat = crate::model_catalogue::EffectiveCatalogue::load();
+                        let mut rows = cat.list_models_for_provider(provider_name);
+                        rows.retain(|(_, e)| {
+                            e.chat != Some(false)
+                                && e.input_per_mtok.is_some()
+                                && e.output_per_mtok.is_some()
+                        });
+                        if rows.is_empty() {
+                            println!("{COLOR_DIM}no priced models in catalogue for {provider_name}{COLOR_RESET}");
+                        }
+                        for (id, _) in rows {
+                            let canonical =
+                                crate::model_catalogue::canonical_model_id(provider_name, &id);
+                            println!("{COLOR_DIM}  {canonical}{COLOR_RESET}");
+                        }
+                    } else {
+                        // Build a fresh provider from current config and query it.
+                        match build_provider(&config) {
+                            Ok(p) => match p.list_models().await {
+                                Ok(models) if models.is_empty() => {
+                                    println!("{COLOR_DIM}no models returned{COLOR_RESET}")
+                                }
+                                Ok(models) => {
+                                    for m in models {
+                                        match m.display_name {
+                                            Some(dn) => {
+                                                println!(
+                                                    "{COLOR_DIM}  {} — {}{COLOR_RESET}",
+                                                    m.id, dn
+                                                )
+                                            }
+                                            None => println!("{COLOR_DIM}  {}{COLOR_RESET}", m.id),
                                         }
-                                        None => println!("{COLOR_DIM}  {}{COLOR_RESET}", m.id),
                                     }
                                 }
-                            }
-                            Err(e) => {
-                                println!("{COLOR_YELLOW}list models failed: {e}{COLOR_RESET}")
-                            }
-                        },
-                        Err(e) => println!("{COLOR_YELLOW}{e}{COLOR_RESET}"),
+                                Err(e) => {
+                                    println!("{COLOR_YELLOW}list models failed: {e}{COLOR_RESET}")
+                                }
+                            },
+                            Err(e) => println!("{COLOR_YELLOW}{e}{COLOR_RESET}"),
+                        }
                     }
                 }
                 SlashCommand::Save => {
@@ -5850,6 +6965,21 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                     *store = refreshed;
                                 }
                             }
+                            // Refresh system prompt so the plugin's contributed
+                            // skills land in the catalogue section immediately.
+                            // MCP servers still need /reload (live tool registry
+                            // doesn't track per-plugin server lifecycle).
+                            refresh_repl_system_prompt(
+                                &mut agent,
+                                &mut system,
+                                &factory_snapshot,
+                                &tool_registry,
+                                &config,
+                                &cwd,
+                                &skill_store_handle,
+                                &mcp_clients,
+                                &system_addendum,
+                            );
                             // Skills + commands are live (skill store
                             // refreshed above; commands re-discover per
                             // /-resolution call). MCP servers are the
@@ -6092,7 +7222,12 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         }
                     }
                 }
-                SlashCommand::McpAdd { name, url, user } => {
+                SlashCommand::McpAdd {
+                    name,
+                    url,
+                    user,
+                    headers,
+                } => {
                     let scope = if user { "user" } else { "project" };
                     // /mcp add is hand-add — untrusted by default. To
                     // enable widget rendering on a self-added server,
@@ -6105,8 +7240,13 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         args: Vec::new(),
                         env: Default::default(),
                         url: url.clone(),
-                        headers: Default::default(),
+                        // Stored verbatim — `${VAR}` is resolved from the
+                        // environment at connect time (mcp::connect_http),
+                        // so a `${API_KEY}` placeholder keeps the literal
+                        // secret out of mcp.json.
+                        headers: headers.iter().cloned().collect(),
                         trusted: false,
+                        engine_managed: false,
                     };
                     // 1. Persist to disk.
                     let saved_to = match crate::config::save_mcp_server(&cfg, user) {
@@ -6116,8 +7256,12 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             continue;
                         }
                     };
-                    // 2. Connect and list tools.
-                    match crate::mcp::McpClient::spawn(cfg.clone()).await {
+                    // 2. Connect and list tools. Non-interactive: if the
+                    //    server requires OAuth we don't block the REPL on a
+                    //    browser callback — the error tells the user to run
+                    //    `/mcp reauth <name>` (issue #114). CLI has no GUI
+                    //    approver (stdio falls back to stdin).
+                    match crate::mcp::McpClient::spawn_noninteractive(cfg.clone(), None).await {
                         Ok(client) => match client.list_tools().await {
                             Ok(tools) => {
                                 let names: Vec<String> =
@@ -6128,7 +7272,23 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 }
                                 mcp_summary.push((name.clone(), names.clone()));
                                 mcp_clients.push(client);
-                                // 3. Rebuild agent so it picks up the new tools.
+                                // 3. Refresh system prompt so the new server's
+                                //    InitializeResult.instructions land in the
+                                //    `# MCP server instructions` section. Must
+                                //    happen BEFORE the Agent::new below — that
+                                //    constructor captures `system` by value.
+                                refresh_repl_system_prompt(
+                                    &mut agent,
+                                    &mut system,
+                                    &factory_snapshot,
+                                    &tool_registry,
+                                    &config,
+                                    &cwd,
+                                    &skill_store_handle,
+                                    &mcp_clients,
+                                    &system_addendum,
+                                );
+                                // 4. Rebuild agent so it picks up the new tools.
                                 //    Preserve history so the conversation keeps going.
                                 let prev_history = agent.history_snapshot();
                                 agent = Agent::new(
@@ -6185,6 +7345,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         url: String::new(),
                         headers: Default::default(),
                         trusted: false,
+                        engine_managed: false,
                     };
                     let saved_to = match crate::config::save_mcp_server(&cfg, user) {
                         Ok(p) => p,
@@ -6204,6 +7365,17 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 }
                                 mcp_summary.push((name.clone(), names.clone()));
                                 mcp_clients.push(client);
+                                refresh_repl_system_prompt(
+                                    &mut agent,
+                                    &mut system,
+                                    &factory_snapshot,
+                                    &tool_registry,
+                                    &config,
+                                    &cwd,
+                                    &skill_store_handle,
+                                    &mcp_clients,
+                                    &system_addendum,
+                                );
                                 let prev_history = agent.history_snapshot();
                                 agent = Agent::new(
                                     build_provider(&config)?,
@@ -6241,13 +7413,26 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 }
                 SlashCommand::McpRemove { name, user } => {
                     match crate::config::remove_mcp_server(&name, user) {
-                        Ok((true, path)) => {
+                        Ok((true, path, removed_url)) => {
+                            let token_msg = if let Some(url) = removed_url {
+                                let mut store = crate::oauth::TokenStore::load();
+                                let had_token = store.get(&url).is_some();
+                                store.remove(&url);
+                                store.save();
+                                if had_token {
+                                    " + cached OAuth token cleared"
+                                } else {
+                                    ""
+                                }
+                            } else {
+                                ""
+                            };
                             println!(
-                                "{COLOR_DIM}mcp '{name}' removed from {} (restart to drop active tools){COLOR_RESET}",
+                                "{COLOR_DIM}mcp '{name}' removed from {}{token_msg} (restart to drop active tools){COLOR_RESET}",
                                 path.display()
                             );
                         }
-                        Ok((false, path)) => {
+                        Ok((false, path, _)) => {
                             println!(
                                 "{COLOR_YELLOW}no server named '{name}' in {}{COLOR_RESET}",
                                 path.display()
@@ -6255,6 +7440,24 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         }
                         Err(e) => {
                             println!("{COLOR_YELLOW}remove failed: {e}{COLOR_RESET}");
+                        }
+                    }
+                }
+                SlashCommand::McpReauth { name } => {
+                    match crate::mcp::reauth_server(&name, None).await {
+                        Ok(crate::mcp::ReauthOutcome::Completed(msg)) => {
+                            println!("{COLOR_DIM}{msg}{COLOR_RESET}");
+                        }
+                        Ok(crate::mcp::ReauthOutcome::Pending { auth_url, server_name }) => {
+                            println!(
+                                "{COLOR_DIM}[mcp] click to authorize '{server_name}':{COLOR_RESET}\n{auth_url}"
+                            );
+                            println!(
+                                "{COLOR_DIM}[mcp] complete the flow in your browser; the pod's /v1/oauth/callback handles the redirect.{COLOR_RESET}"
+                            );
+                        }
+                        Err(e) => {
+                            println!("{COLOR_YELLOW}[mcp] reauth failed: {e}{COLOR_RESET}");
                         }
                     }
                 }
@@ -6279,6 +7482,23 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         }
                     }
                 }
+                SlashCommand::Cost { reset } => {
+                    if reset {
+                        session_cost_usd = 0.0;
+                        #[cfg(feature = "cost_bridge")]
+                        let _ = cost_bridge.tx_cost.send(0.0);
+                        println!("{COLOR_DIM}session cost reset{COLOR_RESET}");
+                    } else if session_cost_usd > 0.0 {
+                        println!(
+                            "{COLOR_DIM}session cost: ${:.4}{COLOR_RESET}",
+                            session_cost_usd
+                        );
+                    } else {
+                        println!(
+                            "{COLOR_DIM}session cost: $0.0000 (no priced turns yet){COLOR_RESET}"
+                        );
+                    }
+                }
                 SlashCommand::Compact => {
                     let history = agent.history_snapshot();
                     let compacted = crate::compaction::compact(&history, agent.budget_tokens / 2);
@@ -6297,6 +7517,34 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         "{COLOR_DIM}compacted: {} → {} messages{persist_note}{COLOR_RESET}",
                         history.len(),
                         compacted.len()
+                    );
+                }
+                SlashCommand::Reload => {
+                    println!(
+                        "{COLOR_DIM}[reload] re-executing thclaws — in-memory state will be reset, on-disk sessions survive…{COLOR_RESET}"
+                    );
+                    // Best-effort flush of stdout before exec() vanishes the
+                    // process. On Unix exec() only returns on failure.
+                    use std::io::Write;
+                    let _ = std::io::stdout().flush();
+                    let err = crate::util::reexec_self();
+                    println!("{COLOR_YELLOW}[reload] re-exec failed: {err}{COLOR_RESET}");
+                }
+                SlashCommand::ReloadPrompt => {
+                    refresh_repl_system_prompt(
+                        &mut agent,
+                        &mut system,
+                        &factory_snapshot,
+                        &tool_registry,
+                        &config,
+                        &cwd,
+                        &skill_store_handle,
+                        &mcp_clients,
+                        &system_addendum,
+                    );
+                    println!(
+                        "{COLOR_DIM}[reload-prompt] system prompt rebuilt from current state ({} bytes){COLOR_RESET}",
+                        system.len()
                     );
                 }
                 SlashCommand::Fork => {
@@ -6440,9 +7688,11 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             PermissionMode::Ask => "ask",
                             PermissionMode::Plan => "plan",
                             PermissionMode::LineGated => "linegated",
+                            PermissionMode::TelegramGated => "telegramgated",
+                            PermissionMode::MessengerGated => "messengergated",
                         };
                         println!(
-                            "{COLOR_DIM}permissions: {label} (auto = never prompt, ask = prompt on mutating tools, plan = read-only exploration, linegated = prompt routed to LINE chat){COLOR_RESET}"
+                            "{COLOR_DIM}permissions: {label} (auto = never prompt, ask = prompt on mutating tools, plan = read-only exploration; mutating tools blocked, linegated = approval routed to LINE chat — auto-active while LINE is paired, see chapter 21){COLOR_RESET}"
                         );
                     } else {
                         match mode.as_str() {
@@ -6451,17 +7701,30 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 crate::permissions::set_current_mode_and_broadcast(
                                     PermissionMode::Auto,
                                 );
-                                println!("{COLOR_DIM}permissions → auto (no prompts){COLOR_RESET}");
+                                let note = persist_permission_mode_cli("auto");
+                                println!("{COLOR_DIM}permissions → auto (no prompts) ({note}){COLOR_RESET}");
                             }
                             "ask" | "default" => {
                                 agent.permission_mode = PermissionMode::Ask;
                                 crate::permissions::set_current_mode_and_broadcast(
                                     PermissionMode::Ask,
                                 );
-                                println!("{COLOR_DIM}permissions → ask{COLOR_RESET}");
+                                let note = persist_permission_mode_cli("ask");
+                                println!("{COLOR_DIM}permissions → ask ({note}){COLOR_RESET}");
+                            }
+                            "linegated" | "line" => {
+                                // LINE bridge state lives in the
+                                // shared_session worker (GUI / --serve);
+                                // the CLI REPL doesn't host one. Tell the
+                                // user where to go instead of leaving them
+                                // wondering whether the command silently
+                                // worked.
+                                println!(
+                                    "{COLOR_YELLOW}linegated is only available in GUI / --serve mode (CLI REPL doesn't host the LINE bridge — see chapter 21){COLOR_RESET}"
+                                );
                             }
                             _ => {
-                                println!("{COLOR_YELLOW}usage: /permissions auto|ask{COLOR_RESET}");
+                                println!("{COLOR_YELLOW}usage: /permissions auto|ask|linegated{COLOR_RESET}");
                             }
                         }
                     }
@@ -6688,6 +7951,20 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                         *store = refreshed;
                                     }
                                 }
+                                // Refresh the system prompt's skill catalogue
+                                // section so the model sees the newly-installed
+                                // skill on the very next turn (not just `/reload`).
+                                refresh_repl_system_prompt(
+                                    &mut agent,
+                                    &mut system,
+                                    &factory_snapshot,
+                                    &tool_registry,
+                                    &config,
+                                    &cwd,
+                                    &skill_store_handle,
+                                    &mcp_clients,
+                                    &system_addendum,
+                                );
                             }
                             Err(e) => {
                                 println!("{COLOR_YELLOW}skill install failed: {e}{COLOR_RESET}");
@@ -7144,8 +8421,24 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         if let Err(e) = ProjectConfig::set_active_kms(config.kms_active.clone()) {
                             println!("{COLOR_YELLOW}save failed: {e}{COLOR_RESET}");
                         } else {
+                            // Refresh system prompt so the newly-attached KMS
+                            // appears in the # KMS section on the next turn —
+                            // pre-fix this used to print "restart chat or start
+                            // a new turn to pick it up" because self.system was
+                            // captured at REPL startup and never refreshed.
+                            refresh_repl_system_prompt(
+                                &mut agent,
+                                &mut system,
+                                &factory_snapshot,
+                                &tool_registry,
+                                &config,
+                                &cwd,
+                                &skill_store_handle,
+                                &mcp_clients,
+                                &system_addendum,
+                            );
                             println!(
-                                "{COLOR_DIM}KMS '{name}' attached (restart chat or start a new turn to pick it up){COLOR_RESET}"
+                                "{COLOR_DIM}KMS '{name}' attached{COLOR_RESET}"
                             );
                         }
                     }
@@ -7159,8 +8452,19 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     {
                         println!("{COLOR_YELLOW}save failed: {e}{COLOR_RESET}");
                     } else {
+                        refresh_repl_system_prompt(
+                            &mut agent,
+                            &mut system,
+                            &factory_snapshot,
+                            &tool_registry,
+                            &config,
+                            &cwd,
+                            &skill_store_handle,
+                            &mcp_clients,
+                            &system_addendum,
+                        );
                         println!(
-                            "{COLOR_DIM}KMS '{name}' detached (restart chat or start a new turn to apply){COLOR_RESET}"
+                            "{COLOR_DIM}KMS '{name}' detached{COLOR_RESET}"
                         );
                     }
                 }
@@ -7311,6 +8615,51 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                          (thclaws or thclaws --serve). It dispatches the built-in \
                          kms-reconcile agent as a side channel.{COLOR_RESET}"
                     );
+                }
+                // dev-plan/36 follow-up: `/kms search <name|*> <query>`
+                // — operator-facing one-shot search. Routes through
+                // the shared `run_slash_search` helper so format +
+                // fallback behaviour matches what the model sees.
+                SlashCommand::KmsSearch {
+                    name,
+                    query,
+                    is_pattern,
+                } => {
+                    let out = crate::tools::kms::run_slash_search(&name, &query, is_pattern);
+                    println!("{out}");
+                }
+                // dev-plan/36 Tier 3.B: rebuild the BM25 index from
+                // pages/ on disk. No-op stub when the feature is off
+                // (clear message; user can `cargo install --features
+                // kms_search_index` or use the release binary).
+                SlashCommand::KmsReindex(name) => {
+                    let Some(k) = crate::kms::resolve(&name) else {
+                        println!("{COLOR_YELLOW}no KMS named '{name}'{COLOR_RESET}");
+                        continue;
+                    };
+                    #[cfg(feature = "kms_search_index")]
+                    {
+                        println!("{COLOR_DIM}/kms reindex {name} — rebuilding…{COLOR_RESET}");
+                        match crate::kms_search_index::full_rebuild(&k.root) {
+                            Ok(n) => println!(
+                                "{COLOR_GREEN}/kms reindex {name} — indexed {n} page(s){COLOR_RESET}"
+                            ),
+                            Err(e) => println!(
+                                "{COLOR_YELLOW}/kms reindex {name} failed: {e}{COLOR_RESET}"
+                            ),
+                        }
+                    }
+                    #[cfg(not(feature = "kms_search_index"))]
+                    {
+                        let _ = k;
+                        println!(
+                            "{COLOR_YELLOW}/kms reindex requires the kms_search_index \
+                             feature; this binary was built without it. The released \
+                             thClaws binaries include it — `cargo install thclaws-core \
+                             --features kms_search_index` or use the official \
+                             release.{COLOR_RESET}"
+                        );
+                    }
                 }
                 // M6.25 BUG #3: lint (CLI).
                 SlashCommand::KmsLint(name) => {
@@ -7555,6 +8904,49 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         }
                         Err(e) => {
                             println!("{COLOR_YELLOW}/kms merge failed: {e}{COLOR_RESET}");
+                        }
+                    }
+                }
+                SlashCommand::KmsExportOkf { name, output_dir } => {
+                    let out = output_dir.unwrap_or_else(|| format!("{name}-okf"));
+                    match crate::kms::export_okf(&name, std::path::Path::new(&out)) {
+                        Ok(report) => {
+                            println!(
+                                "{COLOR_DIM}exported '{name}' as OKF bundle → {} ({} page(s), {} reference(s)).{COLOR_RESET}",
+                                report.out_dir.display(),
+                                report.pages,
+                                report.sources,
+                            );
+                        }
+                        Err(e) => {
+                            println!("{COLOR_YELLOW}/kms export-okf failed: {e}{COLOR_RESET}");
+                        }
+                    }
+                }
+                SlashCommand::KmsImportOkf {
+                    bundle,
+                    name,
+                    scope,
+                } => {
+                    match crate::kms::import_okf(
+                        std::path::Path::new(&bundle),
+                        &name,
+                        scope,
+                    ) {
+                        Ok(report) => {
+                            println!(
+                                "{COLOR_DIM}imported OKF bundle '{bundle}' → KMS '{name}' ({} scope): \
+                                 {} page(s), {} source(s).{COLOR_RESET}",
+                                scope.as_str(),
+                                report.pages,
+                                report.sources,
+                            );
+                            println!(
+                                "{COLOR_DIM}  attach it with `/kms use {name}`.{COLOR_RESET}"
+                            );
+                        }
+                        Err(e) => {
+                            println!("{COLOR_YELLOW}/kms import-okf failed: {e}{COLOR_RESET}");
                         }
                     }
                 }
@@ -8002,7 +9394,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         for s in &store.schedules {
                             let status = if s.enabled { "on " } else { "off" };
                             let watch = if s.watch_workspace { "+watch" } else { "      " };
-                            let last = s.last_run.as_deref().unwrap_or("never");
+                            let last = crate::schedule::display_last_run(s.last_run.as_deref());
                             let exit = match s.last_exit {
                                 Some(0) => "ok ",
                                 Some(_) => "err",
@@ -8353,6 +9745,666 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         );
                     }
                 }
+                SlashCommand::Deploy {
+                    pod,
+                    token,
+                    dry_run,
+                    full,
+                    include_memory,
+                    allow_stdio_mcp,
+                    restart,
+                } => {
+                    let resolved_pod = pod.or_else(crate::remote_agent::url);
+                    let resolved_token = token.or_else(crate::remote_agent::token);
+                    let Some(pod_url) = resolved_pod else {
+                        println!(
+                            "{COLOR_YELLOW}[deploy] REMOTE_AGENT_URL not set — \
+                             open Settings → Provider API keys → Deploy target, \
+                             or pass --pod <URL>{COLOR_RESET}"
+                        );
+                        continue;
+                    };
+                    let Some(token_val) = resolved_token else {
+                        println!(
+                            "{COLOR_YELLOW}[deploy] REMOTE_AGENT_TOKEN not set — \
+                             open Settings → Provider API keys → Deploy target, \
+                             or pass --token <T>{COLOR_RESET}"
+                        );
+                        continue;
+                    };
+                    let args = crate::deploy_client::DeployArgs {
+                        pod: pod_url,
+                        token: Some(token_val),
+                        include_memory,
+                        allow_stdio_mcp,
+                        dry_run,
+                        full,
+                        restart,
+                    };
+                    let _ = crate::deploy_client::run(args).await;
+                }
+                SlashCommand::Cloud(sub) => {
+                    let cloud_cfg = crate::config::ProjectConfig::load()
+                        .and_then(|c| c.cloud.clone());
+                    match sub {
+                        CloudSlash::Status => {
+                            for line in crate::cloud::cmd::status_lines(None, cloud_cfg.as_ref()) {
+                                println!("{line}");
+                            }
+                        }
+                        CloudSlash::List { mine } => {
+                            for line in
+                                crate::cloud::cmd::list_lines(mine, None, cloud_cfg.as_ref()).await
+                            {
+                                println!("{line}");
+                            }
+                        }
+                        CloudSlash::Get { slug } => {
+                            for line in crate::cloud::cmd::get_into_cwd_lines(
+                                slug,
+                                None,
+                                cloud_cfg.as_ref(),
+                            )
+                            .await
+                            {
+                                println!("{line}");
+                            }
+                        }
+                        CloudSlash::Publish => {
+                            for line in crate::cloud::cmd::publish_cwd_lines(
+                                None,
+                                cloud_cfg.as_ref(),
+                            )
+                            .await
+                            {
+                                println!("{line}");
+                            }
+                        }
+                        CloudSlash::Unbind => {
+                            for line in crate::cloud::cmd::unbind_lines() {
+                                println!("{line}");
+                            }
+                        }
+                    }
+                }
+                SlashCommand::WorkflowRun(prompt) => {
+                    let prompt = prompt.trim();
+                    if prompt.is_empty() {
+                        println!("{COLOR_YELLOW}/workflow run: missing goal{COLOR_RESET}");
+                        continue;
+                    }
+                    let provider = match crate::repl::build_provider(&config) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            println!(
+                                "{COLOR_YELLOW}/workflow run: can't build provider: {e}{COLOR_RESET}"
+                            );
+                            continue;
+                        }
+                    };
+                    let mut revision_note: Option<String> = None;
+                    let approved_script: Option<String> = loop {
+                        println!(
+                            "{COLOR_DIM}/workflow run: authoring script (model={})…{COLOR_RESET}",
+                            config.model
+                        );
+                        let script = match crate::workflow::author(
+                            provider.as_ref(),
+                            &config.model,
+                            prompt,
+                            revision_note.as_deref(),
+                        )
+                        .await
+                        {
+                            Ok(s) => s,
+                            Err(e) => {
+                                println!(
+                                    "{COLOR_YELLOW}/workflow run: author failed: {e}{COLOR_RESET}"
+                                );
+                                break None;
+                            }
+                        };
+                        println!("{COLOR_DIM}────────── script ──────────{COLOR_RESET}");
+                        for (i, src_line) in script.lines().enumerate() {
+                            println!(
+                                "{COLOR_DIM}{:>3}{COLOR_RESET}  {src_line}",
+                                i + 1
+                            );
+                        }
+                        println!("{COLOR_DIM}────────────────────────────{COLOR_RESET}");
+                        print!(
+                            "{COLOR_DIM}[a]pprove · [c]ancel · [r]e-author: {COLOR_RESET}"
+                        );
+                        use std::io::{BufRead as _, Write as _};
+                        let _ = std::io::stdout().flush();
+                        let mut input = String::new();
+                        if std::io::stdin().lock().read_line(&mut input).is_err() {
+                            break None;
+                        }
+                        match input.trim().chars().next() {
+                            Some('c') | Some('C') => {
+                                println!("{COLOR_DIM}/workflow run: cancelled{COLOR_RESET}");
+                                break None;
+                            }
+                            Some('r') | Some('R') => {
+                                print!(
+                                    "{COLOR_DIM}revision note (one line): {COLOR_RESET}"
+                                );
+                                let _ = std::io::stdout().flush();
+                                let mut note = String::new();
+                                if std::io::stdin().lock().read_line(&mut note).is_err() {
+                                    break None;
+                                }
+                                revision_note = Some(note.trim().to_string());
+                                continue;
+                            }
+                            _ => break Some(script),
+                        }
+                    };
+
+                    if let Some(script) = approved_script {
+                        // Stage D: open a state.jsonl logger for this
+                        // run. Failure to create one is non-fatal — we
+                        // print a warning and proceed without
+                        // checkpointing, so a read-only / undeployable
+                        // .thclaws/ dir doesn't block /workflow run.
+                        let workflow_id = crate::workflow::generate_workflow_id();
+                        let cwd_for_persist = std::env::current_dir().ok();
+                        let logger_handle: Option<crate::workflow::LoggerHandle> = match cwd_for_persist
+                            .as_ref()
+                            .and_then(|cwd| {
+                                crate::workflow::WorkflowLogger::new(workflow_id.clone(), cwd).ok()
+                            }) {
+                            Some(mut l) => {
+                                let _ = l.start(prompt, &script);
+                                // Stage K: persist the approved script
+                                // next to state.jsonl so /workflow
+                                // resume can replay against the same
+                                // source on restart.
+                                if let Some(cwd) = cwd_for_persist.as_ref() {
+                                    let _ = crate::workflow::write_workflow_script(
+                                        cwd,
+                                        &workflow_id,
+                                        &script,
+                                    );
+                                }
+                                Some(std::sync::Arc::new(std::sync::Mutex::new(l)))
+                            }
+                            None => {
+                                println!(
+                                    "{COLOR_DIM}/workflow run: state.jsonl unavailable — proceeding without checkpoint{COLOR_RESET}"
+                                );
+                                None
+                            }
+                        };
+                        println!("{COLOR_DIM}/workflow run: id={workflow_id}{COLOR_RESET}");
+
+                        let wf_started = std::time::Instant::now();
+                        // Route thclaws.subagent through the parent's
+                        // Task tool. `None` is acceptable — the sandbox
+                        // falls back to a stub that echoes prompts,
+                        // useful if the registry doesn't have the tool
+                        // (e.g. a minimal config). spawn_blocking lets
+                        // the JS host functions use
+                        // `Handle::block_on` without nesting runtimes.
+                        let task_tool = tool_registry.get(crate::subagent::TOOL_NAME);
+                        let logger_for_thread = logger_handle.clone();
+                        let include_base_for_thread = cwd_for_persist.clone();
+                        // Boa's JsError contains Rc<> types and isn't
+                        // Send — stringify before crossing the
+                        // spawn_blocking boundary. Stage I: also drain
+                        // the usage sink so the closing summary can
+                        // roll up tokens + cost from the same thread.
+                        type WfBlockingOut = (
+                            std::result::Result<String, String>,
+                            Vec<crate::providers::Usage>,
+                        );
+                        let outcome: std::result::Result<
+                            WfBlockingOut,
+                            tokio::task::JoinError,
+                        > = tokio::task::spawn_blocking(move || {
+                            crate::workflow::set_task_tool(task_tool);
+                            crate::workflow::set_logger(logger_for_thread);
+                            crate::workflow::set_usage_sink(true);
+                            crate::workflow::set_include_base(include_base_for_thread);
+                            let res = (|| -> std::result::Result<String, String> {
+                                let mut sandbox = crate::workflow::WorkflowSandbox::new()
+                                    .map_err(|e| e.to_string())?;
+                                sandbox.run(&script).map_err(|e| e.to_string())
+                            })();
+                            let usages = crate::workflow::take_all_usages();
+                            crate::workflow::set_task_tool(None);
+                            crate::workflow::set_logger(None);
+                            crate::workflow::set_usage_sink(false);
+                            crate::workflow::set_include_base(None);
+                            (res, usages)
+                        })
+                        .await;
+
+                        // Unwrap join + split usages from the inner
+                        // Result so the existing match arms below see
+                        // the same shape as before.
+                        let (result, all_usages): (
+                            std::result::Result<
+                                std::result::Result<String, String>,
+                                tokio::task::JoinError,
+                            >,
+                            Vec<crate::providers::Usage>,
+                        ) = match outcome {
+                            Ok((res, usages)) => (Ok(res), usages),
+                            Err(e) => (Err(e), Vec::new()),
+                        };
+
+                        let mut workers_count: u32 = 0;
+                        if let Some(handle) = &logger_handle {
+                            if let Ok(mut l) = handle.lock() {
+                                let _ = match &result {
+                                    Ok(Ok(text)) => l.done(text),
+                                    Ok(Err(e)) => l.error(e),
+                                    Err(e) => l.error(&e.to_string()),
+                                };
+                                workers_count = l.worker_count();
+                            }
+                        }
+                        let total = crate::tool_display::format_duration(wf_started.elapsed());
+
+                        // Stage I: roll up per-worker usage into the
+                        // closing summary. Cost via the model_catalogue
+                        // pricing path; tier-billed / unknown models
+                        // show "cost unknown" instead of a number.
+                        let total_in: u64 = all_usages
+                            .iter()
+                            .map(|u| u.input_tokens as u64)
+                            .sum();
+                        let total_out: u64 = all_usages
+                            .iter()
+                            .map(|u| u.output_tokens as u64)
+                            .sum();
+                        let cost_suffix = if all_usages.is_empty() {
+                            String::new()
+                        } else {
+                            let token_usage = crate::model_catalogue::TokenUsage {
+                                prompt_tokens: total_in.min(u32::MAX as u64) as u32,
+                                completion_tokens: total_out.min(u32::MAX as u64) as u32,
+                                cached_input_tokens: 0,
+                                cache_creation_tokens: 0,
+                                reasoning_tokens: 0,
+                            };
+                            let catalogue = crate::model_catalogue::EffectiveCatalogue::load();
+                            let cost = catalogue.compute_cost_usd(&config.model, &token_usage);
+                            let token_str = format!(
+                                "{} in / {} out",
+                                format_token_count(total_in),
+                                format_token_count(total_out),
+                            );
+                            match cost {
+                                Some(c) if c > 0.0 => {
+                                    format!(", {token_str} (≈${c:.4})")
+                                }
+                                Some(_) => format!(", {token_str} (free)"),
+                                None => format!(", {token_str} (cost unknown)"),
+                            }
+                        };
+                        println!(
+                            "{COLOR_DIM}workflow done — {workers_count} workers, total {total}{cost_suffix}{COLOR_RESET}"
+                        );
+
+                        match result {
+                            Ok(Ok(text)) => println!("{COLOR_GREEN}{text}{COLOR_RESET}"),
+                            Ok(Err(e)) => println!(
+                                "{COLOR_YELLOW}/workflow run: script failed: {e}{COLOR_RESET}"
+                            ),
+                            Err(e) => println!(
+                                "{COLOR_YELLOW}/workflow run: worker thread panicked: {e}{COLOR_RESET}"
+                            ),
+                        }
+                    }
+                }
+                SlashCommand::WorkflowList => match std::env::current_dir() {
+                    Ok(cwd) => match crate::workflow::list_workflows(&cwd) {
+                        Ok(workflows) if workflows.is_empty() => {
+                            println!(
+                                "{COLOR_DIM}no workflows under .thclaws/workflows/{COLOR_RESET}"
+                            );
+                        }
+                        Ok(workflows) => {
+                            for wf in &workflows {
+                                let preview = if wf.prompt.chars().count() > 50 {
+                                    let head: String = wf.prompt.chars().take(50).collect();
+                                    format!("{head}…")
+                                } else {
+                                    wf.prompt.clone()
+                                };
+                                let id_short: String = wf.id.chars().take(20).collect();
+                                let err_suffix = if wf.workers_error > 0 {
+                                    format!(" ({} err)", wf.workers_error)
+                                } else {
+                                    String::new()
+                                };
+                                println!(
+                                    "  {id_short}  {icon} {done}/{started}w{err_suffix}  {preview}",
+                                    icon = wf.status.icon(),
+                                    done = wf.workers_done,
+                                    started = wf.workers_started,
+                                );
+                            }
+                        }
+                        Err(e) => println!(
+                            "{COLOR_YELLOW}/workflow list: {e}{COLOR_RESET}"
+                        ),
+                    },
+                    Err(e) => println!(
+                        "{COLOR_YELLOW}/workflow list: can't read cwd: {e}{COLOR_RESET}"
+                    ),
+                },
+                SlashCommand::WorkflowInspect(prefix) => {
+                    let cwd = match std::env::current_dir() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            println!(
+                                "{COLOR_YELLOW}/workflow inspect: can't read cwd: {e}{COLOR_RESET}"
+                            );
+                            continue;
+                        }
+                    };
+                    let id = match crate::workflow::resolve_id_prefix(&cwd, &prefix) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            println!("{COLOR_YELLOW}/workflow inspect: {e}{COLOR_RESET}");
+                            continue;
+                        }
+                    };
+                    let events = match crate::workflow::read_events(&cwd, &id) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            println!("{COLOR_YELLOW}/workflow inspect: {e}{COLOR_RESET}");
+                            continue;
+                        }
+                    };
+                    println!("{COLOR_DIM}workflow {id}{COLOR_RESET}");
+                    for ev in &events {
+                        let kind = ev.get("kind").and_then(|k| k.as_str()).unwrap_or("?");
+                        let ts = ev.get("ts").and_then(|t| t.as_str()).unwrap_or("?");
+                        let take_preview = |s: &str, cap: usize| -> String {
+                            if s.chars().count() > cap {
+                                let head: String = s.chars().take(cap).collect();
+                                format!("{head}…")
+                            } else {
+                                s.to_string()
+                            }
+                        };
+                        match kind {
+                            "start" => {
+                                let prompt = ev
+                                    .get("prompt")
+                                    .and_then(|p| p.as_str())
+                                    .unwrap_or("");
+                                println!("  {ts}  start    {prompt}");
+                            }
+                            "worker_start" => {
+                                let worker =
+                                    ev.get("worker").and_then(|w| w.as_str()).unwrap_or("?");
+                                let prompt = ev
+                                    .get("prompt")
+                                    .and_then(|p| p.as_str())
+                                    .unwrap_or("");
+                                println!(
+                                    "  {ts}  {worker} →   {}",
+                                    take_preview(prompt, 80)
+                                );
+                            }
+                            "worker_done" => {
+                                let worker =
+                                    ev.get("worker").and_then(|w| w.as_str()).unwrap_or("?");
+                                let output = ev
+                                    .get("output")
+                                    .and_then(|o| o.as_str())
+                                    .unwrap_or("");
+                                println!(
+                                    "  {ts}  {worker} ✓   {}",
+                                    take_preview(output, 80)
+                                );
+                            }
+                            "worker_error" => {
+                                let worker =
+                                    ev.get("worker").and_then(|w| w.as_str()).unwrap_or("?");
+                                let err =
+                                    ev.get("error").and_then(|e| e.as_str()).unwrap_or("");
+                                println!(
+                                    "  {ts}  {worker} ✗   {}",
+                                    take_preview(err, 80)
+                                );
+                            }
+                            "done" => {
+                                let result = ev
+                                    .get("result")
+                                    .and_then(|r| r.as_str())
+                                    .unwrap_or("");
+                                println!(
+                                    "  {ts}  done     {}",
+                                    take_preview(result, 80)
+                                );
+                            }
+                            "error" => {
+                                let err =
+                                    ev.get("error").and_then(|e| e.as_str()).unwrap_or("");
+                                println!("  {ts}  error    {err}");
+                            }
+                            other => {
+                                println!("  {ts}  {other}");
+                            }
+                        }
+                    }
+                }
+                SlashCommand::WorkflowRm(prefix) => {
+                    let cwd = match std::env::current_dir() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            println!(
+                                "{COLOR_YELLOW}/workflow rm: can't read cwd: {e}{COLOR_RESET}"
+                            );
+                            continue;
+                        }
+                    };
+                    let id = match crate::workflow::resolve_id_prefix(&cwd, &prefix) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            println!("{COLOR_YELLOW}/workflow rm: {e}{COLOR_RESET}");
+                            continue;
+                        }
+                    };
+                    use std::io::{BufRead as _, Write as _};
+                    print!("{COLOR_DIM}remove workflow {id}? [y/N]: {COLOR_RESET}");
+                    let _ = std::io::stdout().flush();
+                    let mut answer = String::new();
+                    if std::io::stdin().lock().read_line(&mut answer).is_err() {
+                        continue;
+                    }
+                    let answer = answer.trim().to_lowercase();
+                    if answer != "y" && answer != "yes" {
+                        println!("{COLOR_DIM}/workflow rm: cancelled{COLOR_RESET}");
+                        continue;
+                    }
+                    match crate::workflow::delete_workflow(&cwd, &id) {
+                        Ok(()) => {
+                            println!("{COLOR_DIM}removed {id}{COLOR_RESET}")
+                        }
+                        Err(e) => println!(
+                            "{COLOR_YELLOW}/workflow rm: {e}{COLOR_RESET}"
+                        ),
+                    }
+                }
+                SlashCommand::WorkflowResume(prefix) => {
+                    let cwd = match std::env::current_dir() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            println!(
+                                "{COLOR_YELLOW}/workflow resume: can't read cwd: {e}{COLOR_RESET}"
+                            );
+                            continue;
+                        }
+                    };
+                    let id = match crate::workflow::resolve_id_prefix(&cwd, &prefix) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            println!("{COLOR_YELLOW}/workflow resume: {e}{COLOR_RESET}");
+                            continue;
+                        }
+                    };
+                    let script = match crate::workflow::read_workflow_script(&cwd, &id) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            println!(
+                                "{COLOR_YELLOW}/workflow resume: can't read script.js for {id}: {e}{COLOR_RESET}"
+                            );
+                            continue;
+                        }
+                    };
+                    let cache = match crate::workflow::read_completed_workers(&cwd, &id) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            println!(
+                                "{COLOR_YELLOW}/workflow resume: can't read state.jsonl for {id}: {e}{COLOR_RESET}"
+                            );
+                            continue;
+                        }
+                    };
+                    let cache_len = cache.len();
+                    println!(
+                        "{COLOR_DIM}/workflow resume: id={id} — {cache_len} cached worker(s){COLOR_RESET}"
+                    );
+
+                    // Open the logger in append mode and seed the
+                    // worker counter so newly-spawned workers
+                    // continue numbering past the cache.
+                    let logger_handle: Option<crate::workflow::LoggerHandle> =
+                        match crate::workflow::WorkflowLogger::new(id.clone(), &cwd) {
+                            Ok(mut l) => {
+                                l.set_next_worker_id(cache_len as u32);
+                                Some(std::sync::Arc::new(std::sync::Mutex::new(l)))
+                            }
+                            Err(e) => {
+                                println!(
+                                    "{COLOR_YELLOW}/workflow resume: can't open state.jsonl: {e}{COLOR_RESET}"
+                                );
+                                continue;
+                            }
+                        };
+
+                    let wf_started = std::time::Instant::now();
+                    let task_tool = tool_registry.get(crate::subagent::TOOL_NAME);
+                    let logger_for_thread = logger_handle.clone();
+                    let cache_for_thread = Some(cache);
+                    let script_for_thread = script.clone();
+                    let include_base_for_thread = Some(cwd.clone());
+
+                    type WfBlockingOut = (
+                        std::result::Result<String, String>,
+                        Vec<crate::providers::Usage>,
+                        usize,
+                    );
+                    let outcome: std::result::Result<
+                        WfBlockingOut,
+                        tokio::task::JoinError,
+                    > = tokio::task::spawn_blocking(move || {
+                        crate::workflow::set_task_tool(task_tool);
+                        crate::workflow::set_logger(logger_for_thread);
+                        crate::workflow::set_usage_sink(true);
+                        crate::workflow::set_replay_cache(cache_for_thread);
+                        crate::workflow::set_include_base(include_base_for_thread);
+                        let res = (|| -> std::result::Result<String, String> {
+                            let mut sandbox = crate::workflow::WorkflowSandbox::new()
+                                .map_err(|e| e.to_string())?;
+                            sandbox.run(&script_for_thread).map_err(|e| e.to_string())
+                        })();
+                        let usages = crate::workflow::take_all_usages();
+                        let remaining = crate::workflow::replay_remaining();
+                        crate::workflow::set_task_tool(None);
+                        crate::workflow::set_logger(None);
+                        crate::workflow::set_usage_sink(false);
+                        crate::workflow::set_replay_cache(None);
+                        crate::workflow::set_include_base(None);
+                        (res, usages, remaining)
+                    })
+                    .await;
+
+                    let (result, all_usages, remaining) = match outcome {
+                        Ok((res, usages, rem)) => (Ok(res), usages, rem),
+                        Err(e) => (Err(e), Vec::new(), 0),
+                    };
+
+                    if remaining > 0 {
+                        println!(
+                            "{COLOR_YELLOW}/workflow resume: {remaining} cached worker(s) left unused — script may have diverged{COLOR_RESET}"
+                        );
+                    }
+
+                    if let Some(handle) = &logger_handle {
+                        if let Ok(mut l) = handle.lock() {
+                            let _ = match &result {
+                                Ok(Ok(text)) => l.done(text),
+                                Ok(Err(e)) => l.error(e),
+                                Err(e) => l.error(&e.to_string()),
+                            };
+                        }
+                    }
+
+                    let total =
+                        crate::tool_display::format_duration(wf_started.elapsed());
+                    let total_in: u64 = all_usages
+                        .iter()
+                        .map(|u| u.input_tokens as u64)
+                        .sum();
+                    let total_out: u64 = all_usages
+                        .iter()
+                        .map(|u| u.output_tokens as u64)
+                        .sum();
+                    println!(
+                        "{COLOR_DIM}workflow resume done — {cache_len} replayed + {fresh} fresh, total {total}, {} in / {} out{COLOR_RESET}",
+                        format_token_count(total_in),
+                        format_token_count(total_out),
+                        fresh = all_usages.len(),
+                    );
+
+                    match result {
+                        Ok(Ok(text)) => println!("{COLOR_GREEN}{text}{COLOR_RESET}"),
+                        Ok(Err(e)) => println!(
+                            "{COLOR_YELLOW}/workflow resume: script failed: {e}{COLOR_RESET}"
+                        ),
+                        Err(e) => println!(
+                            "{COLOR_YELLOW}/workflow resume: worker thread panicked: {e}{COLOR_RESET}"
+                        ),
+                    }
+                }
+                SlashCommand::WorkflowExec(path) => {
+                    // Mid-session equivalent of `thclaws --workflow <path>`:
+                    // skip author/review, just execute the script from disk.
+                    // Delegates to `workflow::headless::run` so the wiring
+                    // (logger, sandbox, factory) stays in one place — the
+                    // headless runner's println/eprintln land directly in
+                    // the REPL terminal, which is already the user's view.
+                    let trimmed = path.trim();
+                    if trimmed.is_empty() {
+                        println!("{COLOR_YELLOW}/workflow exec: missing path{COLOR_RESET}");
+                        continue;
+                    }
+                    let script_path = std::path::PathBuf::from(trimmed);
+                    println!(
+                        "{COLOR_DIM}/workflow exec: running {}…{COLOR_RESET}",
+                        script_path.display()
+                    );
+                    match crate::workflow::headless::run(config.clone(), script_path, None)
+                        .await
+                    {
+                        Ok(0) => {}
+                        Ok(code) => println!(
+                            "{COLOR_YELLOW}/workflow exec: exited with code {code}{COLOR_RESET}"
+                        ),
+                        Err(e) => {
+                            println!("{COLOR_YELLOW}/workflow exec: {e}{COLOR_RESET}")
+                        }
+                    }
+                }
                 SlashCommand::Unknown(what) => {
                     println!("{COLOR_YELLOW}unknown command: {what}{COLOR_RESET}");
                 }
@@ -8396,27 +10448,84 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         let mut stream = Box::pin(agent.run_turn(line.to_string()));
         let mut _cancelled = false;
         let mut last_was_thinking = false;
+        let mut active_tools: std::collections::HashMap<
+            String,
+            crate::tool_display::ActiveToolDisplay,
+        > = std::collections::HashMap::new();
+        let mut spinner_tick: u32 = 0;
+        let mut is_connecting = true;
+        let mut is_thinking_after_tool = false;
         loop {
+            let anim_delay = if is_connecting || is_thinking_after_tool || !active_tools.is_empty()
+            {
+                crate::tool_display::SPINNER_INTERVAL
+            } else {
+                std::time::Duration::from_secs(300)
+            };
             let ev = tokio::select! {
                 ev = stream.next() => ev,
                 _ = tokio::signal::ctrl_c() => {
+                    print!("{}", crate::tool_display::clear_thinking_line());
                     _cancelled = true;
                     println!("{COLOR_RESET}\n{COLOR_YELLOW}[cancelled by Ctrl-C]{COLOR_RESET}");
                     drop(stream);
                     break;
                 }
+                _ = tokio::time::sleep(anim_delay) => {
+                    spinner_tick += 1;
+                    if is_connecting {
+                        let elapsed = turn_start.elapsed();
+                        print!("{}", crate::tool_display::format_thinking_spinner(elapsed, spinner_tick));
+                        let _ = std::io::stdout().flush();
+                    } else if !active_tools.is_empty() {
+                        if let Some(id) = active_tools.iter().min_by_key(|(_, td)| td.started_at).map(|(k, _)| k.clone()) {
+                            if let Some(td) = active_tools.get_mut(&id) {
+                                print!("{}", crate::tool_display::format_tool_spinner(&td.label, td.elapsed(), spinner_tick));
+                                let _ = std::io::stdout().flush();
+                                td.last_heartbeat_at = std::time::Instant::now();
+                            }
+                        }
+                    } else if is_thinking_after_tool {
+                        let elapsed = turn_start.elapsed();
+                        print!("{}", crate::tool_display::format_thinking_spinner(elapsed, spinner_tick));
+                        let _ = std::io::stdout().flush();
+                    }
+                    continue;
+                }
             };
             let Some(ev) = ev else { break };
+            let is_content_event = matches!(
+                &ev,
+                Ok(AgentEvent::Text(_))
+                    | Ok(AgentEvent::Thinking(_))
+                    | Ok(AgentEvent::ToolCallStart { .. })
+                    | Ok(AgentEvent::ToolCallResult { .. })
+                    | Err(_)
+            );
+            if (is_connecting || is_thinking_after_tool) && is_content_event {
+                if !matches!(&ev, Ok(AgentEvent::ToolCallStart { .. })) {
+                    print!("{}", crate::tool_display::clear_thinking_line());
+                    print!("{COLOR_RESET}");
+                    let _ = std::io::stdout().flush();
+                }
+                is_connecting = false;
+                is_thinking_after_tool = false;
+                spinner_tick = 0;
+            }
             match ev {
                 Ok(AgentEvent::IterationStart { .. }) => {}
+                Ok(AgentEvent::UserMessageInjected { text }) => {
+                    println!("\n{COLOR_DIM}[injected mid-turn]{COLOR_RESET} {text}");
+                    let _ = std::io::stdout().flush();
+                }
                 Ok(AgentEvent::Text(s)) => {
                     if last_was_thinking {
                         println!();
                         last_was_thinking = false;
                     }
                     print!("{s}");
-                    lead_log!("{s}");
                     let _ = std::io::stdout().flush();
+                    lead_log!("{s}");
                 }
                 Ok(AgentEvent::Thinking(s)) => {
                     // Dim-italic so reasoning is visibly distinct from
@@ -8425,75 +10534,62 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     last_was_thinking = true;
                     let _ = std::io::stdout().flush();
                 }
-                Ok(AgentEvent::ToolCallStart { name, input, .. }) => {
-                    // Tool-call line already starts with \n, so any prior
-                    // thinking is naturally separated; clear the flag.
+                Ok(AgentEvent::ToolCallStart {
+                    id, name, input, ..
+                }) => {
                     last_was_thinking = false;
-                    let detail = match name.as_str() {
-                        "Bash" => input
-                            .get("command")
-                            .and_then(|v| v.as_str())
-                            .map(|c| format!(": {}", c.chars().take(80).collect::<String>())),
-                        "Read" | "Write" | "Edit" => input
-                            .get("path")
-                            .and_then(|v| v.as_str())
-                            .map(|p| format!(": {p}")),
-                        "Glob" => input
-                            .get("pattern")
-                            .and_then(|v| v.as_str())
-                            .map(|p| format!(": {p}")),
-                        "Grep" => input
-                            .get("pattern")
-                            .and_then(|v| v.as_str())
-                            .map(|p| format!(": {p}")),
-                        "WebFetch" => input
-                            .get("url")
-                            .and_then(|v| v.as_str())
-                            .map(|u| format!(": {}", u.chars().take(60).collect::<String>())),
-                        "WebSearch" => input
-                            .get("query")
-                            .and_then(|v| v.as_str())
-                            .map(|q| format!(": {q}")),
-                        "Skill" => input
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .map(|n| format!(": {n}")),
-                        "Task" => input
-                            .get("agent")
-                            .and_then(|v| v.as_str())
-                            .map(|a| format!(": agent={a}")),
-                        _ => None,
-                    }
-                    .unwrap_or_default();
-                    print!("{COLOR_RESET}\n{COLOR_DIM}[tool: {name}{detail}]{COLOR_RESET}");
-                    lead_log!("{COLOR_RESET}\n{COLOR_DIM}[tool: {name}{detail}]{COLOR_RESET}");
+                    let label = crate::tool_display::tool_label(&name, &input);
+                    active_tools.insert(
+                        id,
+                        crate::tool_display::ActiveToolDisplay::new(label.clone()),
+                    );
+                    print!(
+                        "{}",
+                        crate::tool_display::format_tool_spinner(
+                            &label,
+                            std::time::Duration::ZERO,
+                            0
+                        )
+                    );
+                    lead_log!("{COLOR_RESET}\n{COLOR_DIM}[tool: {label}]{COLOR_RESET}");
                     let _ = std::io::stdout().flush();
                 }
-                Ok(AgentEvent::ToolCallResult { name, output, .. }) => {
+                Ok(AgentEvent::ToolCallResult {
+                    id, name, output, ..
+                }) => {
+                    let td = active_tools.remove(&id);
+                    if td.is_none() {
+                        eprintln!("{COLOR_DIM}[tool-display] result for '{name}' (id={id}) has no matching start{COLOR_RESET}");
+                    }
+                    let dur_val = td.as_ref().map(|t| t.elapsed()).unwrap_or_default();
                     match output {
                         Ok(ref body) => {
-                            // M6.38.9: surface the upstream source
-                            // next to the ✓ when the tool emits a
-                            // `Source: <engine>` line. The model can
-                            // drop it from its summary; the indicator
-                            // shows it regardless.
                             let src_suffix = crate::tools::extract_tool_source(body)
+                                .map(|s| crate::tool_display::sanitize_label_field(s))
                                 .map(|s| format!(" {COLOR_DIM}(via {s}){COLOR_RESET}"))
                                 .unwrap_or_default();
-                            print!(" {COLOR_DIM}✓{COLOR_RESET}{src_suffix}");
-                            lead_log!(" {COLOR_DIM}✓{COLOR_RESET}{src_suffix}\n{COLOR_GREEN}");
+                            let label = td.as_ref().map(|t| t.label.as_str()).unwrap_or(&name);
+                            print!(
+                                "{}{src_suffix}",
+                                crate::tool_display::format_tool_done(label, dur_val, false)
+                            );
+                            lead_log!(
+                                " {COLOR_DIM}✓ {}{COLOR_RESET}{src_suffix}\n{COLOR_GREEN}",
+                                crate::tool_display::format_duration(dur_val)
+                            );
                         }
                         Err(ref e) => {
-                            print!(" {COLOR_YELLOW}✗ {e}{COLOR_RESET}");
-                            lead_log!(" {COLOR_YELLOW}✗ {e}{COLOR_RESET}\n{COLOR_GREEN}");
+                            let label = td.as_ref().map(|t| t.label.as_str()).unwrap_or(&name);
+                            print!(
+                                "{}",
+                                crate::tool_display::format_tool_done(label, dur_val, true)
+                            );
+                            lead_log!(
+                                " {COLOR_YELLOW}✗ {} {e}{COLOR_RESET}\n{COLOR_GREEN}",
+                                crate::tool_display::format_duration(dur_val)
+                            );
                         }
                     }
-                    // CLI parity for plan-mode (M5). When a plan tool
-                    // mutates state, render the current plan as a
-                    // coloured ANSI block — analogue of the GUI
-                    // sidebar's live update. Only fires for the four
-                    // plan tools so we don't print a plan block
-                    // after every Read / Bash / Edit.
                     if PLAN_TOOL_NAMES.contains(&name.as_str()) {
                         if let Some(plan) = crate::tools::plan_state::get() {
                             let block = format_plan_for_cli(&plan);
@@ -8501,18 +10597,104 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             lead_log!("{block}");
                         }
                     }
-                    print!("{COLOR_RESET}\n{COLOR_GREEN}");
-                    let _ = std::io::stdout().flush();
-                }
-                Ok(AgentEvent::ToolCallDenied { name, .. }) => {
-                    println!("{COLOR_RESET}\n{COLOR_YELLOW}[denied: {name}]{COLOR_RESET}");
-                    lead_log!(
-                        "{COLOR_RESET}\n{COLOR_YELLOW}[denied: {name}]{COLOR_RESET}\n{COLOR_GREEN}"
-                    );
+                    if active_tools.is_empty() {
+                        is_thinking_after_tool = true;
+                        spinner_tick = 0;
+                        print!(
+                            "{}",
+                            crate::tool_display::format_thinking_spinner(turn_start.elapsed(), 0)
+                        );
+                    }
                     print!("{COLOR_GREEN}");
                     let _ = std::io::stdout().flush();
                 }
+                Ok(AgentEvent::ToolCallDenied { id, name, .. }) => {
+                    let td = active_tools.remove(&id);
+                    let dur_str = td
+                        .as_ref()
+                        .map(|t| format!(" {}", crate::tool_display::format_duration(t.elapsed())))
+                        .unwrap_or_default();
+                    print!("{}", crate::tool_display::clear_thinking_line());
+                    println!("{COLOR_RESET}\n{COLOR_YELLOW}[denied: {name}{dur_str}]{COLOR_RESET}");
+                    lead_log!(
+                        "{COLOR_RESET}\n{COLOR_YELLOW}[denied: {name}{dur_str}]{COLOR_RESET}\n{COLOR_GREEN}"
+                    );
+                    if active_tools.is_empty() {
+                        is_thinking_after_tool = true;
+                        spinner_tick = 0;
+                        print!(
+                            "{}",
+                            crate::tool_display::format_thinking_spinner(turn_start.elapsed(), 0)
+                        );
+                    }
+                    print!("{COLOR_GREEN}");
+                    let _ = std::io::stdout().flush();
+                }
+                Ok(AgentEvent::Progress(kind)) => {
+                    use crate::providers::ProgressKind;
+                    match kind {
+                        ProgressKind::Thinking => {}
+                        ProgressKind::ToolStart { id, label } => {
+                            if is_connecting || is_thinking_after_tool {
+                                is_connecting = false;
+                                is_thinking_after_tool = false;
+                                spinner_tick = 0;
+                            }
+                            active_tools.insert(
+                                id,
+                                crate::tool_display::ActiveToolDisplay::new(label.clone()),
+                            );
+                            print!(
+                                "{}",
+                                crate::tool_display::format_tool_spinner(
+                                    &label,
+                                    std::time::Duration::ZERO,
+                                    0
+                                )
+                            );
+                            lead_log!("{COLOR_RESET}\n{COLOR_DIM}[tool: {label}]{COLOR_RESET}");
+                            let _ = std::io::stdout().flush();
+                        }
+                        ProgressKind::ToolDone {
+                            id,
+                            label,
+                            is_error,
+                        } => {
+                            let td = active_tools.remove(&id);
+                            let dur = td.as_ref().map(|t| t.elapsed()).unwrap_or_default();
+                            print!(
+                                "{}",
+                                crate::tool_display::format_tool_done(&label, dur, is_error)
+                            );
+                            lead_log!(
+                                " {COLOR_DIM}{} {}{COLOR_RESET}\n{COLOR_GREEN}",
+                                if is_error { "✗" } else { "✓" },
+                                crate::tool_display::format_duration(dur)
+                            );
+                            let _ = std::io::stdout().flush();
+                            if active_tools.is_empty() {
+                                is_thinking_after_tool = true;
+                                spinner_tick = 0;
+                                print!(
+                                    "{}",
+                                    crate::tool_display::format_thinking_spinner(
+                                        turn_start.elapsed(),
+                                        0
+                                    )
+                                );
+                                let _ = std::io::stdout().flush();
+                            }
+                            print!("{COLOR_GREEN}");
+                            let _ = std::io::stdout().flush();
+                        }
+                    }
+                }
                 Ok(AgentEvent::Done { stop_reason, usage }) => {
+                    if is_thinking_after_tool || is_connecting {
+                        print!("{}", crate::tool_display::clear_thinking_line());
+                        is_thinking_after_tool = false;
+                        is_connecting = false;
+                    }
                     print!("{COLOR_RESET}");
                     if let Some(reason) = stop_reason {
                         if reason == "max_iterations" {
@@ -8531,16 +10713,42 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         _ => String::new(),
                     };
                     let elapsed = format_duration(turn_start.elapsed());
+                    // Cost: convert provider Usage → catalogue TokenUsage
+                    // (different field names, same numbers), then look up
+                    // the active model's pricing. Unknown / tier-billed
+                    // models return None — we just skip the cost suffix.
+                    let token_usage = crate::model_catalogue::TokenUsage {
+                        prompt_tokens: usage.input_tokens,
+                        completion_tokens: usage.output_tokens,
+                        cached_input_tokens: usage.cache_read_input_tokens.unwrap_or(0),
+                        cache_creation_tokens: usage.cache_creation_input_tokens.unwrap_or(0),
+                        reasoning_tokens: usage.reasoning_output_tokens.unwrap_or(0),
+                    };
+                    let catalogue = crate::model_catalogue::EffectiveCatalogue::load();
+                    if let Some(c) = catalogue.compute_cost_usd(&config.model, &token_usage) {
+                        session_cost_usd += c;
+                    }
+                    // Push the running total to the Cardputer display.
+                    // Send fails silently when no device is paired —
+                    // we don't want a missing buddy to disrupt the REPL.
+                    #[cfg(feature = "cost_bridge")]
+                    let _ = cost_bridge.tx_cost.send(session_cost_usd);
+                    let cost_str = if session_cost_usd > 0.0 {
+                        format!(" · ${:.4} session", session_cost_usd)
+                    } else {
+                        String::new()
+                    };
                     println!(
-                        "\n{COLOR_DIM}[tokens: {}in/{}out{} · {}]{COLOR_RESET}",
-                        usage.input_tokens, usage.output_tokens, cache_info, elapsed
+                        "\n{COLOR_DIM}[tokens: {}in/{}out{} · {}{}]{COLOR_RESET}",
+                        usage.input_tokens, usage.output_tokens, cache_info, elapsed, cost_str
                     );
                     lead_log!(
-                        "\n{COLOR_DIM}[tokens: {}in/{}out{} · {}]{COLOR_RESET}\n",
+                        "\n{COLOR_DIM}[tokens: {}in/{}out{} · {}{}]{COLOR_RESET}\n",
                         usage.input_tokens,
                         usage.output_tokens,
                         cache_info,
-                        elapsed
+                        elapsed,
+                        cost_str
                     );
                     let _ = std::io::stdout().flush();
 
@@ -8608,6 +10816,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn format_token_count_thresholds() {
+        assert_eq!(format_token_count(0), "0");
+        assert_eq!(format_token_count(999), "999");
+        assert_eq!(format_token_count(1_000), "1.0k");
+        assert_eq!(format_token_count(1_234), "1.2k");
+        assert_eq!(format_token_count(9_950), "9.9k");
+        assert_eq!(format_token_count(10_000), "10k");
+        assert_eq!(format_token_count(312_500), "312k");
+        assert_eq!(format_token_count(1_000_000), "1.0M");
+        assert_eq!(format_token_count(2_300_000), "2.3M");
+    }
+
+    #[test]
     fn readline_config_matches_platform() {
         #[cfg(windows)]
         assert_eq!(
@@ -8616,6 +10837,22 @@ mod tests {
         );
         #[cfg(not(windows))]
         assert_eq!(readline_config().behavior(), rustyline::Behavior::Stdio);
+    }
+
+    #[test]
+    fn grapheme_backspace_deletes_whole_cluster() {
+        // ASCII: one codepoint per grapheme.
+        assert_eq!(grapheme_backspace_chars("abc", 1), 1);
+        // Combining acute: "e" + U+0301 = one grapheme, two codepoints.
+        assert_eq!(grapheme_backspace_chars("abe\u{301}", 1), 2);
+        // Thai consonant + tone mark (U+0E48) = one cluster, two codepoints.
+        assert_eq!(grapheme_backspace_chars("ก\u{0E48}", 1), 2);
+        // Emoji ZWJ family = one grapheme, five codepoints.
+        assert_eq!(grapheme_backspace_chars("👨\u{200d}👩\u{200d}👧", 1), 5);
+        // Beginning-of-line: nothing to delete (handler defers to default).
+        assert_eq!(grapheme_backspace_chars("", 1), 0);
+        // Repeat count spans multiple clusters: last 2 of [a, b, é] = 1 + 2.
+        assert_eq!(grapheme_backspace_chars("abe\u{301}", 2), 3);
     }
 
     #[test]
@@ -8672,6 +10909,26 @@ mod tests {
             Some(SlashCommand::Unknown(msg)) => assert!(msg.contains("key=value")),
             other => panic!("expected Unknown, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_slash_cost() {
+        assert_eq!(
+            parse_slash("/cost"),
+            Some(SlashCommand::Cost { reset: false })
+        );
+        assert_eq!(
+            parse_slash("/cost reset"),
+            Some(SlashCommand::Cost { reset: true })
+        );
+        assert_eq!(
+            parse_slash("/cost clear"),
+            Some(SlashCommand::Cost { reset: true })
+        );
+        assert!(matches!(
+            parse_slash("/cost bogus"),
+            Some(SlashCommand::Unknown(_))
+        ));
     }
 
     #[test]
@@ -8761,6 +11018,7 @@ mod tests {
                 name: "weather".into(),
                 url: "https://example.com/mcp".into(),
                 user: false,
+                headers: vec![],
             })
         );
         assert_eq!(
@@ -8769,8 +11027,68 @@ mod tests {
                 name: "weather".into(),
                 url: "https://example.com/mcp".into(),
                 user: true,
+                headers: vec![],
             })
         );
+        // --header "K: V" (quoted, space after colon) → one header pair.
+        assert_eq!(
+            parse_slash(
+                "/mcp add fd https://mcp.financialdatasets.ai/api --header \"X-API-KEY: abc123\""
+            ),
+            Some(SlashCommand::McpAdd {
+                name: "fd".into(),
+                url: "https://mcp.financialdatasets.ai/api".into(),
+                user: false,
+                headers: vec![("X-API-KEY".into(), "abc123".into())],
+            })
+        );
+        // Repeatable; -H alias; flags before positionals; ${VAR} preserved
+        // verbatim (resolved later at connect time).
+        assert_eq!(
+            parse_slash(
+                "/mcp add --user fd https://x.test/api -H \"X-API-KEY: ${FD_KEY}\" --header \"X-Trace: on\""
+            ),
+            Some(SlashCommand::McpAdd {
+                name: "fd".into(),
+                url: "https://x.test/api".into(),
+                user: true,
+                headers: vec![
+                    ("X-API-KEY".into(), "${FD_KEY}".into()),
+                    ("X-Trace".into(), "on".into()),
+                ],
+            })
+        );
+        // After a stdio (non-URL) command, --header is just a passed-through
+        // arg, not one of our flags.
+        assert_eq!(
+            parse_slash("/mcp add foo some-cmd --header bar"),
+            Some(SlashCommand::McpAddStdio {
+                name: "foo".into(),
+                command: "some-cmd".into(),
+                args: vec!["--header".into(), "bar".into()],
+                user: false,
+            })
+        );
+        // After a URL, only --header is accepted — a bare positional is rejected.
+        assert!(matches!(
+            parse_slash("/mcp add fd https://x.test/api bogus"),
+            Some(SlashCommand::Unknown(_))
+        ));
+        // Malformed --header (no colon) → Unknown.
+        assert!(matches!(
+            parse_slash("/mcp add fd https://x.test/api --header nocolon"),
+            Some(SlashCommand::Unknown(_))
+        ));
+        // Empty header key → Unknown.
+        assert!(matches!(
+            parse_slash("/mcp add fd https://x.test/api --header \": value\""),
+            Some(SlashCommand::Unknown(_))
+        ));
+        // --header with no following value → Unknown.
+        assert!(matches!(
+            parse_slash("/mcp add fd https://x.test/api --header"),
+            Some(SlashCommand::Unknown(_))
+        ));
         assert_eq!(
             parse_slash("/mcp remove weather"),
             Some(SlashCommand::McpRemove {
@@ -8788,6 +11106,22 @@ mod tests {
         // Missing url → Unknown with usage hint.
         assert!(matches!(
             parse_slash("/mcp add weather"),
+            Some(SlashCommand::Unknown(_))
+        ));
+        assert_eq!(
+            parse_slash("/mcp reauth weather"),
+            Some(SlashCommand::McpReauth {
+                name: "weather".into(),
+            })
+        );
+        assert_eq!(
+            parse_slash("/mcp login weather"),
+            Some(SlashCommand::McpReauth {
+                name: "weather".into(),
+            })
+        );
+        assert!(matches!(
+            parse_slash("/mcp reauth"),
             Some(SlashCommand::Unknown(_))
         ));
     }
@@ -9595,6 +11929,51 @@ mod tests {
     }
 
     #[test]
+    fn parse_slash_kms_export_okf() {
+        match parse_slash("/kms export-okf notes") {
+            Some(SlashCommand::KmsExportOkf { name, output_dir }) => {
+                assert_eq!(name, "notes");
+                assert!(output_dir.is_none());
+            }
+            other => panic!("expected KmsExportOkf, got {other:?}"),
+        }
+        match parse_slash("/kms export-okf notes ./bundle") {
+            Some(SlashCommand::KmsExportOkf { name, output_dir }) => {
+                assert_eq!(name, "notes");
+                assert_eq!(output_dir, Some("./bundle".into()));
+            }
+            other => panic!("expected KmsExportOkf with dir, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_slash_kms_import_okf() {
+        match parse_slash("/kms import-okf ./bundle notes") {
+            Some(SlashCommand::KmsImportOkf {
+                bundle,
+                name,
+                scope,
+            }) => {
+                assert_eq!(bundle, "./bundle");
+                assert_eq!(name, "notes");
+                assert_eq!(scope, crate::kms::KmsScope::User);
+            }
+            other => panic!("expected KmsImportOkf, got {other:?}"),
+        }
+        match parse_slash("/kms import-okf ./bundle notes --project") {
+            Some(SlashCommand::KmsImportOkf { scope, .. }) => {
+                assert_eq!(scope, crate::kms::KmsScope::Project);
+            }
+            other => panic!("expected KmsImportOkf project, got {other:?}"),
+        }
+        // Missing the name positional → usage error.
+        assert!(matches!(
+            parse_slash("/kms import-okf ./bundle"),
+            Some(SlashCommand::Unknown(_))
+        ));
+    }
+
+    #[test]
     fn build_kms_html_prompt_substitutes_placeholders() {
         let p = build_kms_html_prompt("llm-wiki", "/Users/x/site");
         assert!(p.contains("llm-wiki"));
@@ -10266,10 +12645,10 @@ mod tests {
             default_model_for_provider("anthropic"),
             Some("claude-sonnet-4-6")
         );
-        assert_eq!(default_model_for_provider("openai"), Some("gpt-4o"));
+        assert_eq!(default_model_for_provider("openai"), Some("gpt-4.1"));
         assert_eq!(
             default_model_for_provider("gemini"),
-            Some("gemini-2.5-flash")
+            Some("gemini-3.5-flash")
         );
         assert_eq!(
             default_model_for_provider("ollama"),
@@ -10370,14 +12749,13 @@ mod tests {
         assert_eq!(parse_slash("/memory list"), Some(SlashCommand::MemoryList));
     }
 
-    // Env-var tests live in a single serialized block because they mutate
-    // process-wide state and would race under cargo test's parallel runner.
-    // Holds a Mutex that serializes access across all env-var-touching tests.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Env-var tests use the crate-wide env lock (`kms::test_env_lock`)
+    // so they serialise against every other env-mutating test in the
+    // crate, not just siblings inside this module.
 
     #[test]
     fn build_provider_honors_env_keys() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::kms::test_env_lock();
 
         let saved_a = std::env::var("ANTHROPIC_API_KEY").ok();
         let saved_o = std::env::var("OPENAI_API_KEY").ok();
@@ -10412,6 +12790,53 @@ mod tests {
         }
     }
 
+    // Regression: cloud runners ship placeholder provider keys and rely
+    // ENTIRELY on the gateway overlay. A compat provider whose arm
+    // forgets `compat_endpoint` silently calls the upstream with the
+    // placeholder → 401 (dev-plan: the book4 dashscope incident).
+    #[test]
+    fn compat_endpoint_routes_via_gateway_when_enabled() {
+        let _guard = crate::kms::test_env_lock();
+        let saved = std::env::var("THCLAWS_GATEWAY_API_KEY").ok();
+        std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw_v1_test");
+        std::env::remove_var("THCLAWS_GATEWAY_BASE_URL");
+
+        let mut cfg = AppConfig::default();
+        cfg.gateway_use_for = vec!["dashscope".into(), "zai".into()];
+
+        let (key, url) = compat_endpoint(
+            &cfg,
+            ProviderKind::DashScope,
+            "DASHSCOPE_BASE_URL",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "placeholder".into(),
+        );
+        assert_eq!(key, "gw_v1_test");
+        assert_eq!(
+            url,
+            format!(
+                "{}/dashscope/chat/completions",
+                crate::providers::thclaws_gateway::GATEWAY_BASE_URL
+            )
+        );
+
+        // Provider not in gateway_use_for → native upstream + own key.
+        let (key, url) = compat_endpoint(
+            &cfg,
+            ProviderKind::DeepSeek,
+            "DEEPSEEK_BASE_URL",
+            "https://api.deepseek.com/v1",
+            "sk-native".into(),
+        );
+        assert_eq!(key, "sk-native");
+        assert_eq!(url, "https://api.deepseek.com/v1/chat/completions");
+
+        match saved {
+            Some(v) => std::env::set_var("THCLAWS_GATEWAY_API_KEY", v),
+            None => std::env::remove_var("THCLAWS_GATEWAY_API_KEY"),
+        }
+    }
+
     /// Regression: an exported-but-empty env var ("ANTHROPIC_API_KEY=")
     /// must NOT count as configured. Before the fix, it did — and
     /// auto_fallback_model in the GUI refused to switch off Anthropic
@@ -10420,7 +12845,7 @@ mod tests {
     /// Trace: https://github.com/thClaws/thClaws (screenshot in Thai)
     #[test]
     fn empty_env_var_treated_as_unset() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::kms::test_env_lock();
 
         let saved_a = std::env::var("ANTHROPIC_API_KEY").ok();
         let saved_g = std::env::var("GEMINI_API_KEY").ok();
@@ -10492,9 +12917,11 @@ mod tests {
         let approver: Arc<dyn ApprovalSink> = Arc::new(DenyApprover);
         let factory = crate::subagent::ProductionAgentFactory {
             provider: Arc::new(StubProvider),
-            base_tools: ToolRegistry::new(),
+            snapshot: Arc::new(std::sync::RwLock::new(crate::subagent::FactorySnapshot {
+                system: String::new(),
+                tools: ToolRegistry::new(),
+            })),
             model: "test".into(),
-            system: String::new(),
             max_iterations: 1,
             max_depth: 3,
             max_tokens: 8192,
@@ -10522,6 +12949,107 @@ mod tests {
             Arc::strong_count(&approver) >= 2,
             "factory should have cloned the approver Arc, got strong_count={}",
             Arc::strong_count(&approver),
+        );
+    }
+
+    /// Regression: `refresh_repl_system_prompt` must re-append the
+    /// lead/teammate addendum after rebuilding from
+    /// `build_full_system_prompt`. Pre-fix (the v0.26.1 audit found
+    /// this), set_system replaced the entire prompt — silently
+    /// wiping the lead delegation rules in lead-mode REPL and the
+    /// agent role + team coordination rules in teammate-mode REPL
+    /// whenever the user ran any mid-session mutator
+    /// (`/mcp add`, `/skill install`, `/kms use`, `/reload-prompt`).
+    #[tokio::test]
+    async fn refresh_repl_system_prompt_preserves_addendum() {
+        // `build_full_system_prompt` reads `current_dir()` (via
+        // `MemoryStore::default_path`) and `$HOME` (via `home_dir`).
+        // Take the crate-wide env lock so we don't race against
+        // sibling tests in kms/plugins/context/agent/config that flip
+        // cwd / HOME — without it, the two refresh calls in this test
+        // can read different project / memory snapshots and the
+        // empty-addendum length assertion intermittently fails.
+        let _env_lock = crate::kms::test_env_lock();
+
+        use crate::providers::{EventStream, Provider, ProviderEvent, StreamRequest};
+        use async_trait::async_trait;
+        use futures::stream;
+
+        struct StubProvider;
+        #[async_trait]
+        impl Provider for StubProvider {
+            async fn stream(&self, _req: StreamRequest) -> Result<EventStream> {
+                Ok(Box::pin(stream::iter(vec![Ok::<ProviderEvent, _>(
+                    ProviderEvent::MessageStart {
+                        model: "test".into(),
+                    },
+                )])))
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = AppConfig::default();
+        let provider: Arc<dyn Provider> = Arc::new(StubProvider);
+        let tool_registry = ToolRegistry::new();
+        let mut agent = Agent::new(provider, tool_registry.clone(), &cfg.model, "INITIAL_BASE");
+        let mut system = String::from("INITIAL_BASE");
+        let factory_snapshot = Arc::new(std::sync::RwLock::new(crate::subagent::FactorySnapshot {
+            system: system.clone(),
+            tools: tool_registry.clone(),
+        }));
+        let addendum = "\n\n# Agent Role: TEST\nTEST_RULES\n";
+
+        // Refresh — should rebuild base from build_full_system_prompt
+        // (against the tempdir cwd, so no project state) AND append
+        // the addendum at the end.
+        super::refresh_repl_system_prompt(
+            &mut agent,
+            &mut system,
+            &factory_snapshot,
+            &tool_registry,
+            &cfg,
+            tmp.path(),
+            &None,
+            &[],
+            addendum,
+        );
+
+        let agent_sys = agent.system_text();
+        assert!(
+            agent_sys.ends_with(addendum),
+            "agent.system must end with addendum after refresh; got tail: {:?}",
+            &agent_sys[agent_sys.len().saturating_sub(120)..]
+        );
+        assert_eq!(
+            system, agent_sys,
+            "local `system` mirror must stay byte-identical to agent.system"
+        );
+        // Factory snapshot must be byte-identical to the local mirror —
+        // that's the whole point of plumbing it through, so subagents
+        // spawned post-refresh see the same system the parent does.
+        let snap_sys = factory_snapshot.read().unwrap().system.clone();
+        assert_eq!(
+            snap_sys, system,
+            "factory snapshot must mirror agent.system after refresh"
+        );
+
+        // Empty-addendum path: no extra bytes appended.
+        let before_len = system.len();
+        super::refresh_repl_system_prompt(
+            &mut agent,
+            &mut system,
+            &factory_snapshot,
+            &tool_registry,
+            &cfg,
+            tmp.path(),
+            &None,
+            &[],
+            "",
+        );
+        assert_eq!(
+            system.len(),
+            before_len - addendum.len(),
+            "empty addendum must leave just the base"
         );
     }
 

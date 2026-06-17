@@ -1,9 +1,22 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Folder, File, ArrowUp, Pencil, Eye, Save, X } from "lucide-react";
+import {
+  Folder,
+  File,
+  ArrowUp,
+  Pencil,
+  Eye,
+  EyeOff,
+  Save,
+  X,
+  FilePlus,
+  FolderPlus,
+  Download,
+} from "lucide-react";
 import { send, subscribe } from "../hooks/useIPC";
 import { useTheme } from "../hooks/useTheme";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { CodeEditor } from "./CodeEditor";
+import { EpubViewer } from "./EpubViewer";
 
 // Confirmation dialog with two backends.
 //
@@ -98,6 +111,14 @@ function isTextEditable(path: string): boolean {
   return TEXT_EDITABLE.has(extOf(path));
 }
 
+// Compact path for the explorer header — the viewer navbar already
+// shows the full path. Root stays "."; nested dirs show "../<last>".
+function shortPath(p: string): string {
+  if (p === "." || p === "") return ".";
+  const last = p.split("/").filter(Boolean).pop() ?? p;
+  return p.includes("/") ? `../${last}` : last;
+}
+
 function isMarkdownPath(path: string): boolean {
   // Used to gate the iframe's `srcDoc` branch (vs. the asset-URL fetch
   // branch). Backend-rendered HTML previews — Markdown source files
@@ -118,6 +139,30 @@ function isMarkdownPath(path: string): boolean {
   );
 }
 
+// In cloud, every workspace is mounted under `/u/<user>/<ws>/` by
+// Traefik (see infra/k3s/runner/ingressroute.yaml.j2) and the
+// strip-prefix middleware peels that off before forwarding to the
+// runner pod. The pod's --serve also registers the file-asset route
+// PREFIXED with the same path so the Host()+PathPrefix() rule
+// matches. `window.location.origin` is just scheme+host — no path —
+// so `${origin}/file-asset/...` would skip the prefix entirely and
+// 404 at Traefik. Walk the prefix out of `location.pathname` instead.
+// Desktop / single-tenant `--serve` have no prefix; match returns "".
+function workspacePrefix(): string {
+  // Path scheme — thclaws.cloud/u/<handle>/<slug>/… → the 3-segment prefix.
+  const u = location.pathname.match(/^(\/u\/[^/]+\/[^/]+)/);
+  if (u) return u[1];
+  // Subdomain scheme — <handle>.thclaws.cloud/<slug>/… → the slug is the
+  // first path segment (handle is in the hostname). The engine still
+  // serves at root behind Traefik's strip-prefix, so the file-asset URL
+  // just needs this one-segment prefix to route back through Traefik.
+  if (/\.thclaws\.cloud$/i.test(location.hostname)) {
+    const s = location.pathname.match(/^(\/[^/]+)/);
+    if (s) return s[1];
+  }
+  return "";
+}
+
 // Build a same-origin URL for the custom protocol's file-asset handler.
 // Keeping path separators unencoded lets the browser treat the URL as
 // a directory structure, so relative references inside the HTML (e.g.
@@ -126,12 +171,49 @@ function assetUrl(absPath: string): string {
   const normalized = absPath.replace(/\\/g, "/");
   const segments = normalized.split("/").map(encodeURIComponent).join("/");
   const leadingSlash = segments.startsWith("/") ? "" : "/";
-  return `${window.location.origin}/file-asset${leadingSlash}${segments}`;
+  return `${window.location.origin}${workspacePrefix()}/file-asset${leadingSlash}${segments}`;
+}
+
+// Inject a <base href> pointing at the markdown file's parent directory
+// via the file-asset handler so relative refs in srcDoc'd HTML (e.g.
+// `<img src="img/foo.png">` from `![alt](img/foo.png)`) resolve to the
+// .md file's sibling assets. Without this the srcDoc iframe has an
+// opaque base URL and relative paths fail silently. The asset handler
+// already enforces the sandbox check, so security is unchanged.
+function injectBaseHref(html: string, filePath: string): string {
+  const normalized = filePath.replace(/\\/g, "/");
+  const lastSlash = normalized.lastIndexOf("/");
+  const dir = lastSlash >= 0 ? normalized.slice(0, lastSlash) : "";
+  const segments = dir.split("/").map(encodeURIComponent).join("/");
+  const leadingSlash = segments.startsWith("/") ? "" : "/";
+  const baseHref = `${window.location.origin}${workspacePrefix()}/file-asset${leadingSlash}${segments}/`;
+  return html.replace(/<head>/i, `<head><base href="${baseHref}">`);
 }
 
 export function FilesView({ active }: Props) {
   const [currentPath, setCurrentPath] = useState(".");
+  // Show dotfile entries (`.thclaws/`, `.claude/`, `.env`, etc.) in
+  // the listing. Off by default — the agent workspace usually has
+  // dozens of dot-prefixed paths the user doesn't need to see. The
+  // toggle persists for the lifetime of the tab (no localStorage —
+  // it's a transient view setting, not a preference).
+  const [showHidden, setShowHidden] = useState(false);
   const [entries, setEntries] = useState<FileEntry[]>([]);
+  // Explorer right-click context menu (null = closed).
+  const [explorerMenu, setExplorerMenu] = useState<{ x: number; y: number } | null>(
+    null,
+  );
+  // Per-entry right-click menu (Download for files, navigate for dirs).
+  // Separate from `explorerMenu` (which is the empty-area "new file
+  // / new folder" menu) so the two don't shadow each other.
+  const [entryMenu, setEntryMenu] = useState<
+    { x: number; y: number; path: string; name: string; isDir: boolean } | null
+  >(null);
+  // New file / folder name modal. null = closed; otherwise which kind.
+  const [createKind, setCreateKind] = useState<"file" | "folder" | null>(null);
+  const [createName, setCreateName] = useState("");
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
   const { resolved: themeMode } = useTheme();
 
   // The file being displayed. `content` is what the backend returned —
@@ -222,7 +304,7 @@ export function FilesView({ active }: Props) {
         setTimeout(() => setSaveToast(null), 2500);
       }
     });
-    send({ type: "file_list", path: "." });
+    send({ type: "file_list", path: ".", show_hidden: showHidden });
     return unsub;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -233,12 +315,12 @@ export function FilesView({ active }: Props) {
   // preview with the fresh palette baked into its iframe HTML.
   useEffect(() => {
     if (!active) return;
-    send({ type: "file_list", path: currentPath });
+    send({ type: "file_list", path: currentPath, show_hidden: showHidden });
     if (preview && mode === "preview") {
       send({ type: "file_read", path: preview.path, mode: "preview", theme: themeMode });
     }
     const interval = setInterval(() => {
-      send({ type: "file_list", path: currentPath });
+      send({ type: "file_list", path: currentPath, show_hidden: showHidden });
       if (preview && mode === "preview") {
         send({ type: "file_read", path: preview.path, mode: "preview", theme: themeMode });
       }
@@ -247,20 +329,104 @@ export function FilesView({ active }: Props) {
   // `preview?.path` is intentional — using the full `preview` object
   // would re-run on every polling cycle (setPreview creates a new
   // reference each time), resetting the interval unnecessarily.
+  // `showHidden` triggers an immediate refresh when toggled so the
+  // listing flips without waiting for the next 2s tick.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, currentPath, preview?.path, mode, themeMode]);
+  }, [active, currentPath, preview?.path, mode, themeMode, showHidden]);
+
+  // One-shot file download — sends `file_download` with a unique
+  // request id, waits for the matching `file_download_result`, then
+  // converts the base64 payload into a Blob and triggers a browser
+  // `<a download>` click. The subscriber unhooks itself once the
+  // matching reply lands so we don't leak handlers across clicks.
+  const downloadFile = useCallback((path: string) => {
+    const reqId = Date.now() + Math.floor(Math.random() * 1000);
+    const unsub = subscribe((msg) => {
+      if (msg.type !== "file_download_result" || msg.id !== reqId) return;
+      unsub();
+      if (!msg.ok) {
+        // Surface as a toast rather than a modal — same channel as
+        // save errors.
+        setSaveToast(`download failed: ${(msg.error as string) || "unknown"}`);
+        setTimeout(() => setSaveToast(null), 4000);
+        return;
+      }
+      const b64 = msg.content as string;
+      const mime = (msg.mime as string) || "application/octet-stream";
+      const filename = (msg.filename as string) || "download";
+      try {
+        const bin = atob(b64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const blob = new Blob([bytes], { type: mime });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        // Revoke after a short delay so Safari doesn't drop the
+        // download mid-flight.
+        setTimeout(() => URL.revokeObjectURL(url), 1500);
+      } catch (e) {
+        setSaveToast(`download decode failed: ${(e as Error).message}`);
+        setTimeout(() => setSaveToast(null), 4000);
+      }
+    });
+    send({ type: "file_download", id: reqId, path });
+  }, []);
 
   const navigate = (name: string) => {
     const path = currentPath === "." ? name : `${currentPath}/${name}`;
-    send({ type: "file_list", path });
+    send({ type: "file_list", path, show_hidden: showHidden });
   };
 
   const goUp = () => {
     const parent = currentPath.includes("/")
       ? currentPath.substring(0, currentPath.lastIndexOf("/"))
       : ".";
-    send({ type: "file_list", path: parent || "." });
+    send({ type: "file_list", path: parent || ".", show_hidden: showHidden });
   };
+
+  // Open the new file / folder modal, creating in the current directory.
+  const startCreate = (kind: "file" | "folder") => {
+    setExplorerMenu(null);
+    setCreateName("");
+    setCreateError(null);
+    setCreateKind(kind);
+  };
+
+  const submitCreate = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (creating || createKind === null) return;
+    const n = createName.trim();
+    if (!n) return setCreateError("name required");
+    if (n.includes("/")) return setCreateError("name can't contain '/'");
+    const path = currentPath === "." ? n : `${currentPath}/${n}`;
+    setCreating(true);
+    setCreateError(null);
+    send({ type: createKind === "folder" ? "file_mkdir" : "file_create", path });
+  };
+
+  // Resolve the create round-trip; refresh the listing on success.
+  useEffect(() => {
+    if (createKind === null) return;
+    const wanted =
+      createKind === "folder" ? "file_mkdir_result" : "file_create_result";
+    const unsub = subscribe((msg) => {
+      if (msg.type !== wanted) return;
+      setCreating(false);
+      if (msg.ok) {
+        setCreateKind(null);
+        setCreateName("");
+        send({ type: "file_list", path: currentPath, show_hidden: showHidden });
+      } else {
+        setCreateError((msg.error as string) ?? "create failed");
+      }
+    });
+    return unsub;
+  }, [createKind, currentPath]);
 
   const openFile = useCallback((path: string) => {
     setMode("preview");
@@ -481,16 +647,23 @@ export function FilesView({ active }: Props) {
   const isHtml = preview?.mime === "text/html";
   const isImage = preview?.mime.startsWith("image/");
   const isPdf = preview?.mime === "application/pdf";
+  const isEpub = preview?.mime === "application/epub+zip";
+  const isAudio = !!preview?.mime.startsWith("audio/");
+  const isVideo = !!preview?.mime.startsWith("video/");
   const canEdit = preview && isTextEditable(preview.path);
   const hasSyntaxPreview =
     preview && SYNTAX_PREVIEW.has(extOf(preview.path));
 
 
   return (
-    <div className="flex h-full" style={{ background: "var(--bg-primary)" }}>
-      {/* Tree panel */}
+    <div
+      className="flex flex-col sm:flex-row h-full"
+      style={{ background: "var(--bg-primary)" }}
+    >
+      {/* Tree panel — full-width strip on top below `sm` (capped height so
+          the editor stays visible), fixed-width left column at `sm:`+. */}
       <div
-        className="w-64 overflow-y-auto border-r shrink-0 flex flex-col"
+        className="w-full sm:w-64 max-sm:max-h-[38%] overflow-y-auto border-b sm:border-b-0 sm:border-r shrink-0 flex flex-col"
         style={{ borderColor: "var(--border)" }}
       >
         <div
@@ -508,32 +681,111 @@ export function FilesView({ active }: Props) {
           >
             <ArrowUp size={12} />
           </button>
-          <span className="truncate">{currentPath}</span>
+          <span className="truncate flex-1" title={currentPath}>
+            {shortPath(currentPath)}
+          </span>
+          <button
+            onClick={() => setShowHidden((v) => !v)}
+            className="p-0.5 rounded hover:bg-white/10 shrink-0"
+            title={
+              showHidden
+                ? "Hide dotfiles (.thclaws, .claude, .env, …)"
+                : "Show dotfiles (.thclaws, .claude, .env, …)"
+            }
+            style={{ color: showHidden ? "var(--accent)" : "var(--text-secondary)" }}
+          >
+            {showHidden ? <Eye size={12} /> : <EyeOff size={12} />}
+          </button>
+          <button
+            onClick={() => startCreate("file")}
+            className="p-0.5 rounded hover:bg-white/10 shrink-0"
+            title={`New file in ${currentPath}`}
+          >
+            <FilePlus size={12} />
+          </button>
+          <button
+            onClick={() => startCreate("folder")}
+            className="p-0.5 rounded hover:bg-white/10 shrink-0"
+            title={`New folder in ${currentPath}`}
+          >
+            <FolderPlus size={12} />
+          </button>
         </div>
 
-        <div className="overflow-y-auto flex-1 p-1">
+        <div
+          className="overflow-y-auto flex-1 p-1"
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setExplorerMenu({ x: e.clientX, y: e.clientY });
+          }}
+        >
           {entries.length === 0 ? (
             <div className="text-xs p-2" style={{ color: "var(--text-secondary)" }}>
               Empty directory
             </div>
           ) : (
-            entries.map((entry) => (
-              <button
-                key={entry.name}
-                className="flex items-center gap-1.5 w-full px-2 py-1 rounded text-xs hover:bg-white/5 text-left"
-                style={{ color: "var(--text-primary)" }}
-                onClick={() =>
-                  entry.is_dir ? navigate(entry.name) : onSidebarClick(entry.name)
-                }
-              >
-                {entry.is_dir ? (
-                  <Folder size={13} style={{ color: "var(--accent)", flexShrink: 0 }} />
-                ) : (
-                  <File size={13} style={{ color: "var(--text-secondary)", flexShrink: 0 }} />
-                )}
-                <span className="truncate">{entry.name}</span>
-              </button>
-            ))
+            entries.map((entry) => {
+              // Same path composition as openFile() so the comparison
+              // matches whatever the preview pane currently points at.
+              // Directories never get the selection mark — they
+              // navigate instead of preview, so highlighting one
+              // would lie about which file is open.
+              const entryPath =
+                currentPath === "." ? entry.name : `${currentPath}/${entry.name}`;
+              const isSelected = !entry.is_dir && preview?.path === entryPath;
+              return (
+                <button
+                  key={entry.name}
+                  aria-current={isSelected ? "true" : undefined}
+                  className="flex items-center gap-1.5 w-full px-2 py-1 rounded text-xs text-left"
+                  style={{
+                    // Text + icon colour stay theme-default for both
+                    // states — readability shouldn't depend on theme
+                    // contrast against an accent fill.
+                    color: "var(--text-primary)",
+                    // Selection mark is just a faint background fill
+                    // — same shape hover uses, slightly darker. Drops
+                    // the left bar / accent text / bold from the
+                    // previous pass; that combo read as a "click me"
+                    // CTA rather than a passive indicator.
+                    background: isSelected
+                      ? "var(--bg-tertiary, rgba(255,255,255,0.06))"
+                      : undefined,
+                    paddingLeft: 8,
+                  }}
+                  onMouseEnter={(e) => {
+                    if (!isSelected) e.currentTarget.style.background = "rgba(255,255,255,0.05)";
+                  }}
+                  onMouseLeave={(e) => {
+                    if (!isSelected) e.currentTarget.style.background = "";
+                  }}
+                  onClick={() =>
+                    entry.is_dir ? navigate(entry.name) : onSidebarClick(entry.name)
+                  }
+                  onContextMenu={(e) => {
+                    // Per-entry menu — close the explorer-level
+                    // "new file/folder" one if it was somehow open.
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setExplorerMenu(null);
+                    setEntryMenu({
+                      x: e.clientX,
+                      y: e.clientY,
+                      path: entryPath,
+                      name: entry.name,
+                      isDir: entry.is_dir,
+                    });
+                  }}
+                >
+                  {entry.is_dir ? (
+                    <Folder size={13} style={{ color: "var(--accent)", flexShrink: 0 }} />
+                  ) : (
+                    <File size={13} style={{ color: "var(--text-secondary)", flexShrink: 0 }} />
+                  )}
+                  <span className="truncate">{entry.name}</span>
+                </button>
+              );
+            })
           )}
         </div>
       </div>
@@ -653,25 +905,83 @@ export function FilesView({ active }: Props) {
                 />
               </div>
             ) : isPdf ? (
+              // Stream off /file-asset/ like audio/video — Chrome
+              // refuses to run its PDF viewer inside a data: iframe
+              // (opaque origin ⇒ implicitly sandboxed; the viewer's
+              // internal about:srcdoc frame logs "Blocked script
+              // execution… 'allow-scripts'"), and a book PDF would
+              // round-trip 5MB+ of base64 through the WS anyway.
               <iframe
-                src={`data:application/pdf;base64,${preview.content}`}
+                key={`pdf-${preview.path}-${previewVersion}`}
+                src={assetUrl(preview.path)}
                 className="w-full flex-1 min-h-0 rounded border"
                 style={{ borderColor: "var(--border)", background: "#fff" }}
                 title={preview.path}
               />
+            ) : isEpub ? (
+              // EPUB renders via epub.js (see EpubViewer): it fetches
+              // the bytes off /file-asset and unzips client-side, since
+              // no browser renders EPUB natively the way it does PDF.
+              <EpubViewer
+                key={`epub-${preview.path}-${previewVersion}`}
+                url={assetUrl(preview.path)}
+                theme={themeMode}
+              />
+            ) : isAudio ? (
+              // Audio + video stream off /file-asset/, not a base64
+              // data URI — keeps a 50 MB clip from round-tripping
+              // through IPC. `key` forces a fresh element when the
+              // selected file changes so the player resets cleanly.
+              <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-4 p-6">
+                <audio
+                  key={`audio-${preview.path}`}
+                  src={assetUrl(preview.path)}
+                  controls
+                  preload="metadata"
+                  className="w-full max-w-2xl"
+                />
+                <div
+                  className="text-xs font-mono"
+                  style={{ color: "var(--text-muted)" }}
+                >
+                  {preview.path.split("/").pop()} · {preview.mime}
+                </div>
+              </div>
+            ) : isVideo ? (
+              <div className="flex-1 min-h-0 overflow-auto flex items-center justify-center p-2">
+                <video
+                  key={`video-${preview.path}`}
+                  src={assetUrl(preview.path)}
+                  controls
+                  preload="metadata"
+                  className="max-w-full max-h-full rounded"
+                  style={{ background: "#000" }}
+                />
+              </div>
             ) : isHtml ? (
               isMarkdownPath(preview.path) ? (
                 // Markdown preview: backend renders MD → HTML and
                 // returns it in `content`. Use `srcDoc` so the iframe
                 // shows that HTML directly; `src={assetUrl}` would
                 // fetch the raw .md via the custom protocol and the
-                // iframe would end up blank.
+                // iframe would end up blank. `injectBaseHref` rewrites
+                // the document so relative `![alt](img/foo.png)` refs
+                // resolve via /file-asset/ instead of failing against
+                // srcDoc's opaque base URL.
+                // sandbox: `allow-same-origin` WITHOUT `allow-scripts`.
+                // The rendered markdown is static HTML — no JS needed —
+                // but its <img> subresources must carry the session
+                // cookie or the cloud ForwardAuth gate 302s them to
+                // login (sandboxed opaque origins send no credentials,
+                // so chapter figures showed as broken images). Without
+                // allow-scripts the same-origin grant is inert: nothing
+                // executes inside the frame.
                 <iframe
                   key={`md-${preview.path}-${previewVersion}`}
-                  srcDoc={preview.content}
+                  srcDoc={injectBaseHref(preview.content, preview.path)}
                   className="w-full flex-1 min-h-0 rounded border"
                   style={{ borderColor: "var(--border)", background: "var(--bg-primary)" }}
-                  sandbox="allow-scripts"
+                  sandbox="allow-same-origin"
                   title={preview.path}
                 />
               ) : (
@@ -712,6 +1022,173 @@ export function FilesView({ active }: Props) {
           </div>
         )}
       </div>
+
+      {entryMenu && (
+        <>
+          <div
+            className="fixed inset-0 z-[55]"
+            onClick={() => setEntryMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setEntryMenu(null);
+            }}
+          />
+          <div
+            className="fixed z-[56] rounded border shadow-lg text-xs py-1"
+            style={{
+              left: entryMenu.x,
+              top: entryMenu.y,
+              minWidth: "160px",
+              background: "var(--bg-primary)",
+              borderColor: "var(--border)",
+              color: "var(--text-primary)",
+            }}
+          >
+            {/* Files-only: Download. Directories navigate; bulk
+                folder download would zip on the backend — not worth
+                the surface area until users ask for it. */}
+            {!entryMenu.isDir && (
+              <button
+                type="button"
+                className="flex items-center gap-2 w-full text-left px-3 py-1.5 hover:bg-white/10"
+                onClick={() => {
+                  downloadFile(entryMenu.path);
+                  setEntryMenu(null);
+                }}
+              >
+                <Download size={13} /> Download
+              </button>
+            )}
+            {entryMenu.isDir && (
+              <div
+                className="px-3 py-1.5"
+                style={{ color: "var(--text-secondary)" }}
+              >
+                No actions for folders yet.
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {explorerMenu && (
+        <>
+          <div
+            className="fixed inset-0 z-[55]"
+            onClick={() => setExplorerMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setExplorerMenu(null);
+            }}
+          />
+          <div
+            className="fixed z-[56] rounded border shadow-lg text-xs py-1"
+            style={{
+              left: explorerMenu.x,
+              top: explorerMenu.y,
+              minWidth: "160px",
+              background: "var(--bg-primary)",
+              borderColor: "var(--border)",
+              color: "var(--text-primary)",
+            }}
+          >
+            <button
+              type="button"
+              className="flex items-center gap-2 w-full text-left px-3 py-1.5 hover:bg-white/10"
+              onClick={() => startCreate("file")}
+            >
+              <FilePlus size={13} /> New file…
+            </button>
+            <button
+              type="button"
+              className="flex items-center gap-2 w-full text-left px-3 py-1.5 hover:bg-white/10"
+              onClick={() => startCreate("folder")}
+            >
+              <FolderPlus size={13} /> New folder…
+            </button>
+          </div>
+        </>
+      )}
+
+      {createKind && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center"
+          style={{ background: "var(--modal-backdrop, rgba(0,0,0,0.55))" }}
+          onClick={() => setCreateKind(null)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setCreateKind(null);
+          }}
+        >
+          <form
+            className="rounded-lg border shadow-xl w-[420px] max-w-[92vw]"
+            style={{
+              background: "var(--bg-primary)",
+              borderColor: "var(--border)",
+              color: "var(--text-primary)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={submitCreate}
+          >
+            <div
+              className="px-4 py-2 border-b text-sm font-semibold flex items-center gap-2"
+              style={{ borderColor: "var(--border)" }}
+            >
+              <span style={{ color: "var(--accent)" }}>●</span>
+              <span>
+                New {createKind} in {currentPath}
+              </span>
+            </div>
+            <div className="px-4 py-3 space-y-2 text-xs">
+              <input
+                autoFocus
+                type="text"
+                value={createName}
+                onChange={(e) => setCreateName(e.target.value)}
+                placeholder={createKind === "folder" ? "src" : "notes.md"}
+                className="w-full px-2 py-1.5 rounded border font-mono text-xs"
+                style={{
+                  background: "var(--bg-secondary)",
+                  borderColor: "var(--border)",
+                  color: "var(--text-primary)",
+                }}
+              />
+              {createError && (
+                <div style={{ color: "var(--danger, #e06c75)" }}>{createError}</div>
+              )}
+            </div>
+            <div
+              className="px-4 py-2.5 border-t flex justify-end gap-2"
+              style={{ borderColor: "var(--border)" }}
+            >
+              <button
+                type="button"
+                onClick={() => setCreateKind(null)}
+                className="px-3 py-1.5 rounded border text-xs"
+                style={{
+                  background: "var(--bg-secondary)",
+                  borderColor: "var(--border)",
+                  color: "var(--text-secondary)",
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={creating}
+                className="px-3 py-1.5 rounded text-xs font-medium"
+                style={{
+                  background: "var(--accent)",
+                  color: "var(--accent-fg, #fff)",
+                  opacity: creating ? 0.6 : 1,
+                  cursor: creating ? "default" : "pointer",
+                }}
+              >
+                {creating ? "Creating…" : "Create"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 }

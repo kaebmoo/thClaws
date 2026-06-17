@@ -33,6 +33,9 @@ use std::path::{Path, PathBuf};
 pub enum KmsScope {
     User,
     Project,
+    /// Read-only KMS mounted from a shared-agent brain
+    /// (`$THCLAWS_SHARED_AGENT_DIR/kms`). See dev-plan/41. Never written.
+    Shared,
 }
 
 impl KmsScope {
@@ -40,6 +43,7 @@ impl KmsScope {
         match self {
             KmsScope::User => "user",
             KmsScope::Project => "project",
+            KmsScope::Shared => "shared",
         }
     }
 }
@@ -71,6 +75,14 @@ impl KmsRef {
 
     pub fn manifest_path(&self) -> PathBuf {
         self.root.join("manifest.json")
+    }
+
+    /// True for a KMS mounted read-only from a shared-agent brain
+    /// (dev-plan/41). Write tools (`KmsWrite`/`KmsAppend`/`KmsDelete`/
+    /// ingest/auto-learn) must refuse when this is set — members fork to
+    /// edit. Reads (`KmsRead`/`KmsSearch`) are unaffected.
+    pub fn read_only(&self) -> bool {
+        self.scope == KmsScope::Shared
     }
 
     /// Read `index.md`. Returns `""` (not an error) when the file is absent,
@@ -193,6 +205,7 @@ fn scope_root(scope: KmsScope) -> Option<PathBuf> {
     match scope {
         KmsScope::User => user_root(),
         KmsScope::Project => Some(project_root()),
+        KmsScope::Shared => crate::shared::shared_kms_root(),
     }
 }
 
@@ -238,16 +251,19 @@ fn list_in(scope: KmsScope) -> Vec<KmsRef> {
 pub fn list_all() -> Vec<KmsRef> {
     let mut out = list_in(KmsScope::Project);
     out.extend(list_in(KmsScope::User));
+    // Read-only shared-agent KMS (dev-plan/41) — only present when shared
+    // mode is active; listed last so a member's own same-named KMS wins.
+    out.extend(list_in(KmsScope::Shared));
     out
 }
 
-/// Find a KMS by name. Project scope wins over user on collision — this
-/// matches how project instructions override user instructions elsewhere
-/// in thClaws. Returns `None` when no KMS by that name exists, or when
-/// the matching directory is a symlink (symlinks are rejected to prevent
-/// `ln -s /etc <kms-name>` style exfiltration).
+/// Find a KMS by name. Project scope wins over user, then the read-only
+/// shared-agent scope last (dev-plan/41) — a member's own same-named KMS
+/// shadows the company one. Returns `None` when no KMS by that name
+/// exists, or when the matching directory is a symlink (symlinks are
+/// rejected to prevent `ln -s /etc <kms-name>` style exfiltration).
 pub fn resolve(name: &str) -> Option<KmsRef> {
-    for scope in [KmsScope::Project, KmsScope::User] {
+    for scope in [KmsScope::Project, KmsScope::User, KmsScope::Shared] {
         if let Some(root) = scope_root(scope) {
             let candidate = root.join(name);
             // symlink_metadata doesn't follow the symlink.
@@ -459,6 +475,7 @@ pub fn ingest(
     alias: Option<&str>,
     force: bool,
 ) -> Result<IngestResult> {
+    ensure_writable(kms)?;
     let meta = std::fs::metadata(source)
         .map_err(|e| Error::Tool(format!("cannot stat source '{}': {e}", source.display())))?;
     if !meta.is_file() {
@@ -1251,7 +1268,50 @@ pub fn writable_page_path(kref: &KmsRef, page_name: &str) -> Result<PathBuf> {
 /// today, preserves existing other frontmatter when the body itself
 /// includes a `---` block. Updates the index.md bullet under the
 /// page's category. Appends a log entry.
+/// dev-plan/36 Tier 1.D: notify the BM25 index that a page changed.
+/// No-op when the `kms_search_index` Cargo feature is off; called
+/// from every successful page mutation in this module
+/// (write_page / append_to_page / delete_page / rename_page /
+/// merge_into / auto_link). Errors inside the indexer are logged
+/// + swallowed there — the underlying KMS write has already
+/// succeeded and shouldn't roll back due to index drift.
+fn fire_index_upsert(kref: &KmsRef, page_stem: &str) {
+    #[cfg(feature = "kms_search_index")]
+    crate::kms_search_index::on_page_mutated(
+        &kref.root,
+        page_stem,
+        crate::kms_search_index::Op::Upsert,
+    );
+    #[cfg(not(feature = "kms_search_index"))]
+    let _ = (kref, page_stem);
+}
+
+fn fire_index_delete(kref: &KmsRef, page_stem: &str) {
+    #[cfg(feature = "kms_search_index")]
+    crate::kms_search_index::on_page_mutated(
+        &kref.root,
+        page_stem,
+        crate::kms_search_index::Op::Delete,
+    );
+    #[cfg(not(feature = "kms_search_index"))]
+    let _ = (kref, page_stem);
+}
+
+/// Reject any mutation of a read-only shared-agent KMS (dev-plan/41).
+/// Guards the core write paths so slash commands, ingest, and merge are
+/// covered uniformly — not just the model-callable tools.
+fn ensure_writable(kref: &KmsRef) -> Result<()> {
+    if kref.read_only() {
+        return Err(Error::Tool(format!(
+            "KMS '{}' is read-only (shared agent) — fork the agent to edit it",
+            kref.name
+        )));
+    }
+    Ok(())
+}
+
 pub fn write_page(kref: &KmsRef, page_name: &str, content: &str) -> Result<PathBuf> {
+    ensure_writable(kref)?;
     let path = writable_page_path(kref, page_name)?;
     let stem = path
         .file_stem()
@@ -1292,6 +1352,7 @@ pub fn write_page(kref: &KmsRef, page_name: &str, content: &str) -> Result<PathB
     let category = fm.get("category").cloned();
     update_index_for_write(kref, &stem, &summary, category.as_deref(), existed)?;
     append_log_header(kref, if existed { "edited" } else { "wrote" }, &stem)?;
+    fire_index_upsert(kref, &stem);
     Ok(path)
 }
 
@@ -1360,6 +1421,7 @@ fn body_has_leading_heading(body: &str) -> bool {
 /// `KmsWrite` to add metadata). Bumps `updated:` if frontmatter
 /// already present.
 pub fn append_to_page(kref: &KmsRef, page_name: &str, chunk: &str) -> Result<PathBuf> {
+    ensure_writable(kref)?;
     use std::io::Write;
     let path = writable_page_path(kref, page_name)?;
     let stem = path
@@ -1404,6 +1466,7 @@ pub fn append_to_page(kref: &KmsRef, page_name: &str, chunk: &str) -> Result<Pat
         update_index_for_write(kref, &stem, &summary, None, false)?;
     }
     append_log_header(kref, "appended", &stem)?;
+    fire_index_upsert(kref, &stem);
     Ok(path)
 }
 
@@ -1412,6 +1475,7 @@ pub fn append_to_page(kref: &KmsRef, page_name: &str, chunk: &str) -> Result<Pat
 /// strips the matching bullet from `index.md`, and appends a
 /// `## [YYYY-MM-DD] deleted | <stem>` entry to `log.md`.
 pub fn delete_page(kref: &KmsRef, page_name: &str) -> Result<PathBuf> {
+    ensure_writable(kref)?;
     let path = writable_page_path(kref, page_name)?;
     if !path.exists() {
         return Err(Error::Tool(format!("page not found: {}", path.display())));
@@ -1425,7 +1489,98 @@ pub fn delete_page(kref: &KmsRef, page_name: &str) -> Result<PathBuf> {
         .map_err(|e| Error::Tool(format!("remove {}: {e}", path.display())))?;
     remove_index_bullet(kref, &stem)?;
     append_log_header(kref, "deleted", &stem)?;
+    fire_index_delete(kref, &stem);
     Ok(path)
+}
+
+/// Rename a KMS page: move `pages/<old>.md` → `pages/<new>.md` and
+/// rewrite every inbound link (`pages/<old>.md`, `[[old]]`,
+/// `[[old|display]]`) across the KMS's pages, sources, and `index.md`
+/// so the vault stays self-consistent — same machinery the `merge`
+/// path uses for collision renames. `new_name` is slugified the same
+/// way new pages are. The page's frontmatter `title:` (its display
+/// heading) is intentionally left alone — this renames the page's
+/// identity/filename, not its title. Refuses to overwrite an existing
+/// page. Returns the new path.
+pub fn rename_page(kref: &KmsRef, old_name: &str, new_name: &str) -> Result<PathBuf> {
+    ensure_writable(kref)?;
+    let old_path = writable_page_path(kref, old_name)?;
+    if !old_path.exists() {
+        return Err(Error::Tool(format!(
+            "page not found: {}",
+            old_path.display()
+        )));
+    }
+    let old_stem = old_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(old_name)
+        .to_string();
+
+    let new_slug = sanitize_alias(new_name);
+    if new_slug.is_empty() {
+        return Err(Error::Tool(
+            "new name has no usable characters for a filename".into(),
+        ));
+    }
+    if new_slug == old_stem {
+        return Ok(old_path); // no-op rename
+    }
+    let new_path = writable_page_path(kref, &new_slug)?;
+    if new_path.exists() {
+        return Err(Error::Tool(format!(
+            "a page named '{new_slug}' already exists"
+        )));
+    }
+
+    std::fs::rename(&old_path, &new_path)
+        .map_err(|e| Error::Tool(format!("rename {}: {e}", old_path.display())))?;
+
+    // Rewrite inbound links across pages/ + sources/ (the renamed file
+    // now lives in pages/, so its own self-links get fixed too).
+    let mut page_renames: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    page_renames.insert(old_stem.clone(), new_slug.clone());
+    let source_renames: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for dir in [kref.pages_dir(), kref.root.join("sources")] {
+        if !dir.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&dir)
+            .map_err(|e| Error::Tool(format!("readdir {}: {e}", dir.display())))?
+        {
+            let entry = entry.map_err(|e| Error::Tool(format!("readdir entry: {e}")))?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Ok(body) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let rewritten = rewrite_merge_links(&body, &page_renames, &source_renames);
+            if rewritten != body {
+                std::fs::write(&path, rewritten.as_bytes())
+                    .map_err(|e| Error::Tool(format!("write {}: {e}", path.display())))?;
+            }
+        }
+    }
+
+    // Fix the index link target (preserves the bullet's summary +
+    // category placement, unlike remove+re-add).
+    let index = kref.read_index();
+    if !index.is_empty() {
+        let rewritten = rewrite_merge_links(&index, &page_renames, &source_renames);
+        if rewritten != index {
+            std::fs::write(kref.index_path(), rewritten.as_bytes())
+                .map_err(|e| Error::Tool(format!("write {}: {e}", kref.index_path().display())))?;
+        }
+    }
+
+    append_log_header(kref, "renamed", &format!("{old_stem} → {new_slug}"))?;
+    fire_index_delete(kref, &old_stem);
+    fire_index_upsert(kref, &new_slug);
+    Ok(new_path)
 }
 
 /// M6.39.9: list every readable `*.md` file inside a KMS, split by
@@ -1928,6 +2083,16 @@ fn combine_aggregator_bodies(dst_full: &str, src_body_only: &str, src_kms: &str)
 /// `src` is read-only during the merge — its pages, sources, index,
 /// and log are left exactly as found. The caller can `/kms drop`
 /// afterwards once they've verified the merged result.
+///
+/// **dev-plan/36 Tier 1.D note:** `merge_into` mutates many pages
+/// in one call (rename-on-collision + body rewrites + cascade);
+/// firing per-page index hooks inline here would require threading
+/// the rename map through every helper. Deferred to Tier 3, which
+/// adds auto-rebuild-on-stale-manifest — after a merge, the next
+/// `KmsSearch(query: …)` against the destination KMS will detect
+/// the manifest staleness and rebuild before serving. Operators can
+/// also run `/kms reindex <dst>` immediately after a merge to
+/// force a fresh build (~1 s per 100 pages).
 pub fn merge_into(src_name: &str, dst_name: &str) -> Result<MergeReport> {
     if src_name == dst_name {
         return Err(Error::Config("cannot merge a KMS into itself".into()));
@@ -1936,6 +2101,7 @@ pub fn merge_into(src_name: &str, dst_name: &str) -> Result<MergeReport> {
         resolve(src_name).ok_or_else(|| Error::Tool(format!("KMS '{src_name}' not found")))?;
     let dst =
         resolve(dst_name).ok_or_else(|| Error::Tool(format!("KMS '{dst_name}' not found")))?;
+    ensure_writable(&dst)?;
 
     let mut report = MergeReport::default();
     // (original_stem → new_stem) for renamed pages, used to rewrite
@@ -2126,6 +2292,690 @@ fn rewrite_merge_links(
     out
 }
 
+// ────────────────────────────────────────────────────────────────────────
+// OKF (Open Knowledge Format) import/export.
+//
+// OKF (Google, v0.1 — `GoogleCloudPlatform/knowledge-catalog`) is the
+// Karpathy "LLM wiki" pattern formalized: a directory of markdown concept
+// files with YAML frontmatter, an `index.md`, a `log.md`, and markdown
+// cross-links. Our KMS is an opinionated superset, so this is a thin
+// frontmatter/layout adapter — not a new store. Field mapping:
+//
+//   KMS                         OKF
+//   ───                         ───
+//   category:                ↔  type:        (OKF's only REQUIRED field)
+//   topic:                   ↔  description:
+//   updated:                 →  timestamp:   (kept; ISO 8601)
+//   tags: a, b               ↔  tags: [a, b]
+//   pages/<stem>.md          ↔  pages/<stem>.md  (a "concept")
+//   sources/<f>              ↔  references/<f>
+//   [[wikilink]]             →  [wikilink](/pages/wikilink.md)
+//   "## [date] verb | x"     ↔  "## date" + "* **Verb**: x"
+//
+// KMS-specific keys with no OKF home (`sources`, `verified`, `created`)
+// ride along verbatim — OKF tolerates arbitrary producer keys, so the
+// round-trip KMS→OKF→KMS is lossless for them. Export is conformant OKF
+// v0.1 (every `.md` carries a `type`); import is permissive per §9 —
+// it tolerates unknown types, missing fields, broken links, and
+// concepts at any directory level, not just `pages/`.
+
+/// `a, b` or `[a, b]` → canonical OKF inline list `[a, b]`. Empty → `[]`.
+fn tags_to_yaml_list(raw: &str) -> String {
+    let s = raw.trim();
+    if s.starts_with('[') {
+        return s.to_string();
+    }
+    let items: Vec<&str> = s
+        .split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .collect();
+    format!("[{}]", items.join(", "))
+}
+
+/// `[a, b]` (or already-CSV `a, b`) → KMS comma string `a, b`.
+fn tags_to_csv(raw: &str) -> String {
+    let mut s = raw.trim();
+    if s.starts_with('[') && s.ends_with(']') {
+        s = &s[1..s.len() - 1];
+    }
+    s.split(',')
+        .map(|t| t.trim().trim_matches('"').trim_matches('\'').trim())
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Convert Obsidian `[[target]]` / `[[target|display]]` wikilinks into
+/// standard bundle-relative OKF markdown links. Existing
+/// `[label](pages/x.md)` links are left alone — relative links are valid
+/// OKF (§5.2). Unterminated or empty `[[…]]` are emitted verbatim.
+fn wikilinks_to_okf(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    loop {
+        let Some(start) = rest.find("[[") else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("]]") else {
+            // No closing — emit the rest literally and stop.
+            out.push_str("[[");
+            rest = after;
+            continue;
+        };
+        let inner = &after[..end];
+        let (target, display) = match inner.split_once('|') {
+            Some((t, d)) => (t.trim(), d.trim()),
+            None => (inner.trim(), inner.trim()),
+        };
+        if target.is_empty() {
+            out.push_str("[[");
+            out.push_str(inner);
+            out.push_str("]]");
+        } else {
+            out.push_str(&format!("[{display}](/pages/{target}.md)"));
+        }
+        rest = &after[end + 2..];
+    }
+    out
+}
+
+/// Rewrite OKF absolute bundle-relative link targets (`/pages/…`,
+/// `/sources/…`, `/references/…`) into KMS-relative form so `lint` /
+/// `auto_link` / the search index recognise them.
+fn okf_links_to_kms(body: &str) -> String {
+    body.replace("](/pages/", "](pages/")
+        .replace("](/sources/", "](sources/")
+        .replace("](/references/", "](sources/")
+        .replace("](references/", "](sources/")
+}
+
+/// Rewrite markdown link targets that point at OKF concepts (by their
+/// bundle-relative path) so they land on the flattened KMS page stem.
+/// Handles the absolute (`/tables/x.md`) and bare (`tables/x.md`) forms.
+fn rewrite_okf_concept_links(
+    body: &str,
+    rel_to_stem: &std::collections::HashMap<String, String>,
+) -> String {
+    let mut out = body.to_string();
+    for (rel, stem) in rel_to_stem {
+        let target = format!("](pages/{stem}.md)");
+        out = out.replace(&format!("](/{rel})"), &target);
+        out = out.replace(&format!("]({rel})"), &target);
+    }
+    out
+}
+
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// KMS `## [date] verb | alias` history → OKF date-grouped log (§7).
+fn kms_log_to_okf(raw: &str) -> String {
+    let mut out = String::from("# Change log\n");
+    let mut cur_date: Option<String> = None;
+    for line in raw.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("## [") {
+            if let Some((date, tail)) = rest.split_once(']') {
+                let date = date.trim();
+                let tail = tail.trim();
+                let (verb, alias) = match tail.split_once('|') {
+                    Some((v, a)) => (v.trim(), a.trim()),
+                    None => (tail, ""),
+                };
+                if cur_date.as_deref() != Some(date) {
+                    out.push_str(&format!("\n## {date}\n"));
+                    cur_date = Some(date.to_string());
+                }
+                let verb = capitalize_first(verb);
+                if alias.is_empty() {
+                    out.push_str(&format!("* **{verb}**\n"));
+                } else {
+                    out.push_str(&format!("* **{verb}**: {alias}\n"));
+                }
+                continue;
+            }
+        }
+        // Already-OKF date heading: re-emit, tracking the current date.
+        if let Some(date) = t.strip_prefix("## ") {
+            let date = date.trim();
+            if cur_date.as_deref() != Some(date) {
+                out.push_str(&format!("\n## {date}\n"));
+                cur_date = Some(date.to_string());
+            }
+            continue;
+        }
+        // Bullets under an existing date heading pass through; other
+        // lines (e.g. the old "# Change log" preamble prose) are dropped.
+        if t.starts_with('*') && cur_date.is_some() {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// OKF date-grouped log → KMS `## [date] verb | alias` history. Best
+/// effort: the bullet's bold word becomes the verb, the remainder the
+/// alias. Lossy for prose entries, but KMS log is a greppable trail,
+/// not structured data.
+fn okf_log_to_kms(raw: &str) -> String {
+    let mut out = String::from("# Change log\n\n");
+    let mut cur_date: Option<String> = None;
+    for line in raw.lines() {
+        let t = line.trim();
+        if let Some(date) = t.strip_prefix("## ") {
+            cur_date = Some(
+                date.trim()
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .to_string(),
+            );
+            continue;
+        }
+        let Some(rest) = t.strip_prefix("* ").or_else(|| t.strip_prefix("- ")) else {
+            continue;
+        };
+        let Some(date) = &cur_date else { continue };
+        let rest = rest.trim();
+        let (verb, alias) = if let Some(after) = rest.strip_prefix("**") {
+            match after.split_once("**") {
+                Some((v, tail)) => (
+                    v.trim().to_string(),
+                    tail.trim_start().trim_start_matches(':').trim().to_string(),
+                ),
+                None => ("update".to_string(), rest.to_string()),
+            }
+        } else {
+            ("update".to_string(), rest.to_string())
+        };
+        let verb = verb.to_lowercase();
+        if alias.is_empty() {
+            out.push_str(&format!("## [{date}] {verb}\n"));
+        } else {
+            out.push_str(&format!("## [{date}] {verb} | {alias}\n"));
+        }
+    }
+    out
+}
+
+/// Map a KMS page's frontmatter to OKF frontmatter. `type` is always
+/// present (OKF's only requirement); KMS-only keys ride along verbatim.
+fn kms_fm_to_okf(
+    fm: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut okf = std::collections::BTreeMap::new();
+    let category = fm
+        .get("category")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    okf.insert("type".into(), category.unwrap_or("Note").to_string());
+    if let Some(t) = fm.get("title") {
+        okf.insert("title".into(), t.clone());
+    }
+    if let Some(d) = fm.get("topic").or_else(|| fm.get("description")) {
+        okf.insert("description".into(), d.clone());
+    }
+    if let Some(u) = fm.get("updated").or_else(|| fm.get("timestamp")) {
+        okf.insert("timestamp".into(), u.clone());
+    }
+    if let Some(tg) = fm.get("tags") {
+        okf.insert("tags".into(), tags_to_yaml_list(tg));
+    }
+    // Preserve remaining KMS keys (category, created, updated, sources,
+    // verified, …) without clobbering the OKF-normalised ones above.
+    for (k, v) in fm {
+        if matches!(k.as_str(), "title" | "topic" | "description" | "tags") {
+            continue;
+        }
+        okf.entry(k.clone()).or_insert_with(|| v.clone());
+    }
+    okf
+}
+
+/// Map an OKF concept's frontmatter back to KMS frontmatter.
+fn okf_fm_to_kms(
+    fm: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut kms = std::collections::BTreeMap::new();
+    let category = fm
+        .get("category")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .or_else(|| fm.get("type").map(|s| s.trim()).filter(|s| !s.is_empty()))
+        .unwrap_or("uncategorized");
+    kms.insert("category".into(), category.to_string());
+    if let Some(t) = fm.get("title") {
+        kms.insert("title".into(), t.clone());
+    }
+    if let Some(d) = fm.get("description").or_else(|| fm.get("topic")) {
+        kms.insert("topic".into(), d.clone());
+    }
+    if let Some(tg) = fm.get("tags") {
+        kms.insert("tags".into(), tags_to_csv(tg));
+    }
+    if let Some(u) = fm.get("updated").or_else(|| fm.get("timestamp")) {
+        // KMS dates are day-granular — take the date part of an ISO 8601 stamp.
+        let date = u.split('T').next().unwrap_or(u).trim().to_string();
+        kms.insert("updated".into(), date);
+    }
+    if let Some(c) = fm.get("created") {
+        kms.insert("created".into(), c.clone());
+    }
+    for (k, v) in fm {
+        if matches!(
+            k.as_str(),
+            "title"
+                | "description"
+                | "topic"
+                | "tags"
+                | "type"
+                | "timestamp"
+                | "category"
+                | "created"
+                | "updated"
+        ) {
+            continue;
+        }
+        kms.entry(k.clone()).or_insert_with(|| v.clone());
+    }
+    kms
+}
+
+/// Result of [`export_okf`].
+#[derive(Debug, Default)]
+pub struct OkfExportReport {
+    pub pages: u32,
+    pub sources: u32,
+    pub out_dir: PathBuf,
+}
+
+/// Export a KMS as a conformant OKF v0.1 bundle into `out_dir`.
+///
+/// Layout produced:
+/// ```text
+/// out_dir/
+///   index.md        — okf_version frontmatter + the KMS index body
+///   log.md          — date-grouped OKF history
+///   SCHEMA.md       — KMS schema, given `type: OKF Schema` frontmatter
+///   manifest.json   — copied verbatim (non-.md; OKF ignores it, aids round-trip)
+///   pages/<stem>.md — concepts, frontmatter normalised, wikilinks → md links
+///   references/<f>  — raw sources (md gets a `type: Source` wrapper)
+/// ```
+pub fn export_okf(name: &str, out_dir: &Path) -> Result<OkfExportReport> {
+    let kref = resolve(name).ok_or_else(|| Error::Tool(format!("KMS '{name}' not found")))?;
+    std::fs::create_dir_all(out_dir)
+        .map_err(|e| Error::Tool(format!("create {}: {e}", out_dir.display())))?;
+    let mut report = OkfExportReport {
+        out_dir: out_dir.to_path_buf(),
+        ..Default::default()
+    };
+
+    // ── pages → pages/ ────────────────────────────────────────────
+    let okf_pages = out_dir.join("pages");
+    std::fs::create_dir_all(&okf_pages)
+        .map_err(|e| Error::Tool(format!("mkdir {}: {e}", okf_pages.display())))?;
+    if let Ok(entries) = std::fs::read_dir(kref.pages_dir()) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let ft = entry.file_type().ok();
+            if ft.map(|f| f.is_symlink() || !f.is_file()).unwrap_or(true) {
+                continue;
+            }
+            let fname = match path.file_name().and_then(|s| s.to_str()) {
+                Some(f) if f.ends_with(".md") => f.to_string(),
+                _ => continue,
+            };
+            let raw = std::fs::read_to_string(&path).unwrap_or_default();
+            let (fm, body) = parse_frontmatter(&raw);
+            let okf = write_frontmatter(&kms_fm_to_okf(&fm), &wikilinks_to_okf(&body));
+            std::fs::write(okf_pages.join(&fname), okf.as_bytes())
+                .map_err(|e| Error::Tool(format!("write page {fname}: {e}")))?;
+            report.pages += 1;
+        }
+    }
+
+    // ── sources → references/ ─────────────────────────────────────
+    let src_dir = kref.root.join("sources");
+    if src_dir.is_dir() {
+        let okf_refs = out_dir.join("references");
+        std::fs::create_dir_all(&okf_refs)
+            .map_err(|e| Error::Tool(format!("mkdir {}: {e}", okf_refs.display())))?;
+        if let Ok(entries) = std::fs::read_dir(&src_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let ft = entry.file_type().ok();
+                if ft.map(|f| f.is_symlink() || !f.is_file()).unwrap_or(true) {
+                    continue;
+                }
+                let Some(fname) = path.file_name().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let is_md = matches!(
+                    path.extension().and_then(|e| e.to_str()),
+                    Some("md") | Some("markdown")
+                );
+                let dst = okf_refs.join(fname);
+                if is_md {
+                    // Make raw markdown sources conformant: ensure a `type`.
+                    let content = std::fs::read_to_string(&path).unwrap_or_default();
+                    let (mut sfm, sbody) = parse_frontmatter(&content);
+                    if !sfm.contains_key("type") {
+                        sfm.insert("type".into(), "Source".into());
+                        let stem = path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or(fname)
+                            .to_string();
+                        sfm.entry("title".into()).or_insert(stem);
+                        std::fs::write(&dst, write_frontmatter(&sfm, &sbody).as_bytes())
+                            .map_err(|e| Error::Tool(format!("write reference {fname}: {e}")))?;
+                    } else {
+                        std::fs::copy(&path, &dst)
+                            .map_err(|e| Error::Tool(format!("copy reference {fname}: {e}")))?;
+                    }
+                } else {
+                    std::fs::copy(&path, &dst)
+                        .map_err(|e| Error::Tool(format!("copy reference {fname}: {e}")))?;
+                }
+                report.sources += 1;
+            }
+        }
+    }
+
+    // ── index.md (root): okf_version frontmatter + KMS index body ──
+    let mut idx_fm = std::collections::BTreeMap::new();
+    idx_fm.insert("okf_version".into(), "0.1".into());
+    let idx_body = kref.read_index();
+    std::fs::write(
+        out_dir.join("index.md"),
+        write_frontmatter(&idx_fm, &idx_body).as_bytes(),
+    )
+    .map_err(|e| Error::Tool(format!("write index.md: {e}")))?;
+
+    // ── log.md ────────────────────────────────────────────────────
+    let log_raw = std::fs::read_to_string(kref.log_path()).unwrap_or_default();
+    std::fs::write(out_dir.join("log.md"), kms_log_to_okf(&log_raw).as_bytes())
+        .map_err(|e| Error::Tool(format!("write log.md: {e}")))?;
+
+    // ── SCHEMA.md (give it a type so it's a conformant concept) ────
+    if let Ok(schema) = std::fs::read_to_string(kref.schema_path()) {
+        let (mut sfm, sbody) = parse_frontmatter(&schema);
+        sfm.insert("type".into(), "OKF Schema".into());
+        sfm.entry("title".into()).or_insert_with(|| "Schema".into());
+        std::fs::write(
+            out_dir.join("SCHEMA.md"),
+            write_frontmatter(&sfm, &sbody).as_bytes(),
+        )
+        .map_err(|e| Error::Tool(format!("write SCHEMA.md: {e}")))?;
+    }
+
+    // ── manifest.json (verbatim; ignored by OKF, restores on import) ─
+    if kref.manifest_path().is_file() {
+        let _ = std::fs::copy(kref.manifest_path(), out_dir.join("manifest.json"));
+    }
+
+    Ok(report)
+}
+
+/// Result of [`import_okf`].
+#[derive(Debug, Default)]
+pub struct OkfImportReport {
+    pub pages: u32,
+    pub sources: u32,
+    pub root: PathBuf,
+}
+
+/// Derive a flat KMS page stem from a concept's bundle-relative path,
+/// dropping a leading `pages/` and joining nested components with `-`.
+fn okf_concept_stem(rel: &Path) -> String {
+    let mut parts: Vec<String> = rel
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => s.to_str().map(|s| s.to_string()),
+            _ => None,
+        })
+        .collect();
+    if let Some(last) = parts.last_mut() {
+        *last = last
+            .trim_end_matches(".md")
+            .trim_end_matches(".markdown")
+            .to_string();
+    }
+    if parts.first().map(|p| p == "pages").unwrap_or(false) {
+        parts.remove(0);
+    }
+    let joined = parts.join("-");
+    let stem = sanitize_alias(&joined);
+    if stem.is_empty() {
+        "page".to_string()
+    } else {
+        stem
+    }
+}
+
+/// Recursively collect `.md` concept files under `dir`, skipping
+/// symlinks, reserved files (index.md/log.md/SCHEMA.md at any level),
+/// and the `references/` subtree (handled as sources).
+fn collect_okf_concepts(bundle: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if ft.is_dir() {
+            if path.file_name().and_then(|s| s.to_str()) == Some("references") {
+                continue;
+            }
+            collect_okf_concepts(bundle, &path, out);
+            continue;
+        }
+        if !ft.is_file() {
+            continue;
+        }
+        let Some(fname) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !(fname.ends_with(".md") || fname.ends_with(".markdown")) {
+            continue;
+        }
+        if matches!(fname, "index.md" | "log.md" | "SCHEMA.md") {
+            continue;
+        }
+        out.push(path);
+    }
+}
+
+/// Import an OKF bundle as a new KMS named `name` at `scope`.
+///
+/// Permissive per OKF §9: concepts may live anywhere in the tree (not
+/// just `pages/`), unknown types / missing fields / broken links are
+/// tolerated. The KMS `index.md` is rebuilt fresh from the imported
+/// pages rather than translated, so the result is always KMS-native.
+/// Errors if a KMS by that name already exists at the target scope.
+pub fn import_okf(bundle: &Path, name: &str, scope: KmsScope) -> Result<OkfImportReport> {
+    if !bundle.is_dir() {
+        return Err(Error::Tool(format!(
+            "'{}' is not a directory",
+            bundle.display()
+        )));
+    }
+    let target_root = scope_root(scope)
+        .ok_or_else(|| Error::Config("cannot locate user home directory".into()))?
+        .join(name);
+    if target_root.exists() {
+        return Err(Error::Tool(format!(
+            "KMS '{name}' already exists at {} scope — drop it or pick another name",
+            scope.as_str()
+        )));
+    }
+    let kref = create(name, scope)?;
+    let mut report = OkfImportReport {
+        root: kref.root.clone(),
+        ..Default::default()
+    };
+
+    // ── concepts → pages/ ─────────────────────────────────────────
+    // Two passes: first assign every concept a flat stem and build a
+    // bundle-path → stem map, then write each page rewriting its links
+    // to follow the flattening (a concept at `/tables/x.md` becomes
+    // `pages/tables-x.md`, so links to it must too).
+    let mut concepts = Vec::new();
+    collect_okf_concepts(bundle, bundle, &mut concepts);
+    concepts.sort();
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut stem_for: Vec<String> = Vec::with_capacity(concepts.len());
+    let mut rel_to_stem: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for path in &concepts {
+        let rel = path.strip_prefix(bundle).unwrap_or(path);
+        let base = okf_concept_stem(rel);
+        let mut stem = base.clone();
+        let mut n = 2;
+        while used.contains(&stem) {
+            stem = format!("{base}-{n}");
+            n += 1;
+        }
+        used.insert(stem.clone());
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        rel_to_stem.insert(rel_str, stem.clone());
+        stem_for.push(stem);
+    }
+    for (path, stem) in concepts.iter().zip(stem_for.iter()) {
+        let raw = std::fs::read_to_string(path).unwrap_or_default();
+        let (fm, body) = parse_frontmatter(&raw);
+        let body = rewrite_okf_concept_links(&body, &rel_to_stem);
+        let page = write_frontmatter(&okf_fm_to_kms(&fm), &okf_links_to_kms(&body));
+        std::fs::write(kref.pages_dir().join(format!("{stem}.md")), page.as_bytes())
+            .map_err(|e| Error::Tool(format!("write page {stem}: {e}")))?;
+        report.pages += 1;
+    }
+
+    // ── references/ → sources/ ────────────────────────────────────
+    let refs_dir = bundle.join("references");
+    if refs_dir.is_dir() {
+        let sources_dir = kref.root.join("sources");
+        std::fs::create_dir_all(&sources_dir)
+            .map_err(|e| Error::Tool(format!("mkdir sources: {e}")))?;
+        if let Ok(entries) = std::fs::read_dir(&refs_dir) {
+            for entry in entries.flatten() {
+                let Ok(ft) = entry.file_type() else { continue };
+                if ft.is_symlink() || !ft.is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                let Some(fname) = path.file_name().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let dst = sources_dir.join(fname);
+                let is_md = matches!(
+                    path.extension().and_then(|e| e.to_str()),
+                    Some("md") | Some("markdown")
+                );
+                if is_md {
+                    let content = std::fs::read_to_string(&path).unwrap_or_default();
+                    let (sfm, sbody) = parse_frontmatter(&content);
+                    // Unwrap the `type: Source` shim we add on export.
+                    let restored = if sfm.get("type").map(|t| t == "Source").unwrap_or(false) {
+                        sbody
+                    } else {
+                        content
+                    };
+                    std::fs::write(&dst, restored.as_bytes())
+                        .map_err(|e| Error::Tool(format!("write source {fname}: {e}")))?;
+                } else {
+                    std::fs::copy(&path, &dst)
+                        .map_err(|e| Error::Tool(format!("copy source {fname}: {e}")))?;
+                }
+                report.sources += 1;
+            }
+        }
+    }
+
+    // ── log.md (OKF → KMS form), if present ───────────────────────
+    if let Ok(log_raw) = std::fs::read_to_string(bundle.join("log.md")) {
+        std::fs::write(kref.log_path(), okf_log_to_kms(&log_raw).as_bytes())
+            .map_err(|e| Error::Tool(format!("write log.md: {e}")))?;
+    }
+
+    // ── SCHEMA.md (strip the type shim), if present ───────────────
+    if let Ok(schema) = std::fs::read_to_string(bundle.join("SCHEMA.md")) {
+        let (sfm, sbody) = parse_frontmatter(&schema);
+        let restored = if sfm.get("type").map(|t| t == "OKF Schema").unwrap_or(false) {
+            sbody
+        } else {
+            schema
+        };
+        std::fs::write(kref.schema_path(), restored.as_bytes())
+            .map_err(|e| Error::Tool(format!("write SCHEMA.md: {e}")))?;
+    }
+
+    // ── manifest.json (verbatim), if present ──────────────────────
+    if bundle.join("manifest.json").is_file() {
+        let _ = std::fs::copy(bundle.join("manifest.json"), kref.manifest_path());
+    }
+
+    // ── Rebuild the KMS index from the imported pages ─────────────
+    rebuild_index_from_pages(&kref)?;
+
+    Ok(report)
+}
+
+/// Rebuild `index.md` from the current `pages/` contents — one bullet
+/// per page, summary taken from the page's `topic`/`description`
+/// frontmatter, falling back to its first body line.
+fn rebuild_index_from_pages(kref: &KmsRef) -> Result<()> {
+    let mut stems: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(kref.pages_dir()) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                stems.push(stem.to_string());
+            }
+        }
+    }
+    stems.sort();
+    let mut out = format!("# {}\n\n", kref.name);
+    for stem in &stems {
+        let raw = std::fs::read_to_string(kref.pages_dir().join(format!("{stem}.md")))
+            .unwrap_or_default();
+        let (fm, body) = parse_frontmatter(&raw);
+        let summary = fm
+            .get("topic")
+            .or_else(|| fm.get("description"))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                body.lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty() && !l.starts_with('#'))
+                    .unwrap_or("")
+                    .chars()
+                    .take(80)
+                    .collect()
+            });
+        out.push_str(&format!("- [{stem}](pages/{stem}.md) — {summary}\n"));
+    }
+    std::fs::write(kref.index_path(), out.as_bytes())
+        .map_err(|e| Error::Tool(format!("write index.md: {e}")))?;
+    Ok(())
+}
+
 /// Knobs for [`auto_link`].
 #[derive(Debug, Clone)]
 pub struct AutoLinkOptions {
@@ -2179,9 +3029,22 @@ pub struct AutoLinkReport {
 /// keep the rewrite quiet — heavy auto-linking turns prose into a
 /// thicket. `opts.apply == false` (the default) returns the report
 /// without writing anything.
+///
+/// **dev-plan/36 Tier 1.D note:** `auto_link` rewrites N pages in
+/// one call. Per-page index hooks here would require threading the
+/// affected-page set through. Deferred to Tier 3's auto-rebuild-on-
+/// stale-manifest path (same rationale as `merge_into` above); or
+/// the operator can run `/kms reindex <name>` after a bulk
+/// auto-link to force a fresh build.
 pub fn auto_link(kref: &KmsRef, opts: AutoLinkOptions) -> Result<AutoLinkReport> {
     use regex::Regex;
     use std::collections::HashMap;
+
+    // dev-plan/41: a read-only shared KMS can't be rewritten. Dry-run
+    // (preview) stays allowed; `--apply` is refused.
+    if opts.apply {
+        ensure_writable(kref)?;
+    }
 
     let pages_dir = kref.pages_dir();
     if !pages_dir.is_dir() {
@@ -2396,6 +3259,11 @@ pub async fn auto_link_llm(
     cancel: &crate::cancel::CancelToken,
 ) -> Result<AutoLinkReport> {
     use std::collections::HashSet;
+
+    // dev-plan/41: refuse writes to a read-only shared KMS (dry-run ok).
+    if opts.apply {
+        ensure_writable(kref)?;
+    }
 
     let pages_dir = kref.pages_dir();
     if !pages_dir.is_dir() {
@@ -5008,5 +5876,316 @@ Inline `PostgreSQL` in code span.\n\
         // a small notice overhead. Loose check: stay well under the
         // full file size to confirm we didn't ship the whole thing.
         assert!(read.content.len() < BROWSE_FILE_BYTE_CAP as usize + 4096);
+    }
+
+    // ── OKF import/export ────────────────────────────────────────────
+
+    #[test]
+    fn okf_tag_conversions_round_trip() {
+        assert_eq!(tags_to_yaml_list("a, b"), "[a, b]");
+        assert_eq!(tags_to_yaml_list("[a, b]"), "[a, b]");
+        assert_eq!(tags_to_yaml_list(""), "[]");
+        assert_eq!(tags_to_csv("[a, b]"), "a, b");
+        assert_eq!(tags_to_csv("a,b"), "a, b");
+        assert_eq!(tags_to_csv("[\"x\", \"y\"]"), "x, y");
+    }
+
+    #[test]
+    fn okf_wikilinks_become_bundle_relative_links() {
+        let body = "See [[auth-flow]] and [[orders|the orders page]]. Keep [x](pages/x.md).";
+        let out = wikilinks_to_okf(body);
+        assert!(out.contains("[auth-flow](/pages/auth-flow.md)"));
+        assert!(out.contains("[the orders page](/pages/orders.md)"));
+        // Existing relative md links are left untouched.
+        assert!(out.contains("[x](pages/x.md)"));
+        // Round trip back to KMS-relative form.
+        assert_eq!(okf_links_to_kms("[a](/pages/a.md)"), "[a](pages/a.md)");
+    }
+
+    #[test]
+    fn okf_export_produces_conformant_bundle() {
+        let _home = scoped_home();
+        let k = create("notes", KmsScope::Project).unwrap();
+        std::fs::write(
+            k.pages_dir().join("auth.md"),
+            "---\ntitle: Auth\ntopic: How login works\ncategory: security\ntags: oauth, sso\nsources: session-1\nupdated: 2026-05-28\n---\n# Auth\n\nSee [[orders]] for the flow.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            k.index_path(),
+            "# notes\n\n- [auth](pages/auth.md) — How login works\n",
+        )
+        .unwrap();
+        std::fs::write(
+            k.log_path(),
+            "## [2026-05-28] ingested | auth\n## [2026-05-28] merge | other\n",
+        )
+        .unwrap();
+
+        let out = k.root.parent().unwrap().join("notes-okf");
+        let report = export_okf("notes", &out).unwrap();
+        assert_eq!(report.pages, 1);
+
+        // Page: type present (from category), description (from topic),
+        // tags list-ified, wikilink converted.
+        let page = std::fs::read_to_string(out.join("pages/auth.md")).unwrap();
+        assert!(page.contains("type: security"), "got: {page}");
+        assert!(page.contains("description: How login works"));
+        assert!(page.contains("tags: [oauth, sso]"));
+        assert!(page.contains("[orders](/pages/orders.md)"));
+        // KMS-only key rides along.
+        assert!(page.contains("sources: session-1"));
+
+        // Root index declares the OKF version.
+        let idx = std::fs::read_to_string(out.join("index.md")).unwrap();
+        assert!(idx.contains("okf_version: 0.1"));
+
+        // Log regrouped under a bare date heading.
+        let log = std::fs::read_to_string(out.join("log.md")).unwrap();
+        assert!(log.contains("## 2026-05-28"));
+        assert!(log.contains("* **Ingested**: auth"));
+
+        // Every emitted concept .md carries a `type` (conformance §9).
+        let (page_fm, _) = parse_frontmatter(&page);
+        assert!(page_fm.get("type").map(|t| !t.is_empty()).unwrap_or(false));
+    }
+
+    #[test]
+    fn okf_round_trip_preserves_page_fields() {
+        let _home = scoped_home();
+        let k = create("src", KmsScope::Project).unwrap();
+        std::fs::write(
+            k.pages_dir().join("auth.md"),
+            "---\ntitle: Auth\ntopic: How login works\ncategory: security\ntags: oauth, sso\nsources: session-1\nverified: 2026-05-01\nupdated: 2026-05-28\n---\n# Auth\n\nBody text.\n",
+        )
+        .unwrap();
+        let src_sources = k.root.join("sources");
+        std::fs::create_dir_all(&src_sources).unwrap();
+        std::fs::write(
+            src_sources.join("spec.md"),
+            "raw spec body, no frontmatter\n",
+        )
+        .unwrap();
+
+        let bundle = k.root.parent().unwrap().join("src-okf");
+        export_okf("src", &bundle).unwrap();
+
+        let report = import_okf(&bundle, "dst", KmsScope::Project).unwrap();
+        assert_eq!(report.pages, 1);
+        assert_eq!(report.sources, 1);
+
+        let dst = resolve("dst").unwrap();
+        let page = std::fs::read_to_string(dst.pages_dir().join("auth.md")).unwrap();
+        let (fm, _) = parse_frontmatter(&page);
+        assert_eq!(fm.get("category").map(String::as_str), Some("security"));
+        assert_eq!(fm.get("title").map(String::as_str), Some("Auth"));
+        assert_eq!(fm.get("topic").map(String::as_str), Some("How login works"));
+        assert_eq!(fm.get("tags").map(String::as_str), Some("oauth, sso"));
+        assert_eq!(fm.get("sources").map(String::as_str), Some("session-1"));
+        assert_eq!(fm.get("verified").map(String::as_str), Some("2026-05-01"));
+        assert_eq!(fm.get("updated").map(String::as_str), Some("2026-05-28"));
+
+        // Raw source restored without the export-time `type: Source` shim.
+        let restored = std::fs::read_to_string(dst.root.join("sources/spec.md")).unwrap();
+        assert_eq!(restored, "raw spec body, no frontmatter\n");
+
+        // Index rebuilt KMS-native.
+        let idx = dst.read_index();
+        assert!(idx.contains("(pages/auth.md)"));
+    }
+
+    #[test]
+    fn okf_import_handles_root_level_concepts_and_missing_type() {
+        let _home = scoped_home();
+        // Hand-roll an external OKF bundle: a concept at the root (not
+        // under pages/), a nested concept, and one missing `type`.
+        // `scoped_home` points cwd at a fresh tempdir; build under it.
+        let bundle = std::env::current_dir().unwrap().join("ext-bundle");
+        std::fs::create_dir_all(bundle.join("tables")).unwrap();
+        std::fs::write(
+            bundle.join("orders.md"),
+            "---\ntype: BigQuery Table\ntitle: Orders\ndescription: One row per order\ntags: [sales, revenue]\n---\n# Orders\n\nSee [customers](/tables/customers.md).\n",
+        )
+        .unwrap();
+        std::fs::write(
+            bundle.join("tables/customers.md"),
+            "---\ntitle: Customers\n---\nNo type here — should fall back.\n",
+        )
+        .unwrap();
+
+        let report = import_okf(&bundle, "imported", KmsScope::Project).unwrap();
+        assert_eq!(report.pages, 2);
+
+        let k = resolve("imported").unwrap();
+        // Root concept kept its stem.
+        let orders = std::fs::read_to_string(k.pages_dir().join("orders.md")).unwrap();
+        let (ofm, _) = parse_frontmatter(&orders);
+        assert_eq!(
+            ofm.get("category").map(String::as_str),
+            Some("BigQuery Table")
+        );
+        assert_eq!(
+            ofm.get("topic").map(String::as_str),
+            Some("One row per order")
+        );
+        assert_eq!(ofm.get("tags").map(String::as_str), Some("sales, revenue"));
+        // Link to the nested concept follows the stem flattening.
+        assert!(
+            orders.contains("](pages/tables-customers.md)"),
+            "got: {orders}"
+        );
+
+        // Nested concept flattened to `tables-customers`, missing type
+        // falls back to "uncategorized".
+        let cust = std::fs::read_to_string(k.pages_dir().join("tables-customers.md")).unwrap();
+        let (cfm, _) = parse_frontmatter(&cust);
+        assert_eq!(
+            cfm.get("category").map(String::as_str),
+            Some("uncategorized")
+        );
+    }
+
+    #[test]
+    fn okf_import_rejects_existing_name() {
+        let _home = scoped_home();
+        create("dup", KmsScope::Project).unwrap();
+        let bundle = std::env::current_dir().unwrap().join("ext-bundle");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join("a.md"), "---\ntype: Note\n---\nbody\n").unwrap();
+        let err = import_okf(&bundle, "dup", KmsScope::Project).unwrap_err();
+        assert!(format!("{err}").contains("already exists"));
+    }
+
+    // ── Shared-agent mode (dev-plan/41) ──────────────────────────────
+
+    /// Build a fake shared brain under `dir/kms/<name>` and point
+    /// THCLAWS_SHARED_AGENT_DIR at it. Caller must remove the env var.
+    fn seed_shared_kms(dir: &std::path::Path, name: &str) {
+        let kms = dir.join("kms").join(name);
+        std::fs::create_dir_all(kms.join("pages")).unwrap();
+        std::fs::write(kms.join("index.md"), format!("# {name}\n")).unwrap();
+        std::fs::write(
+            kms.join("pages").join("intro.md"),
+            "---\ncategory: x\n---\n# Intro\nshared knowledge\n",
+        )
+        .unwrap();
+        std::env::set_var("THCLAWS_SHARED_AGENT_DIR", dir);
+    }
+
+    #[test]
+    fn shared_kms_resolves_read_only_and_blocks_writes() {
+        let _home = scoped_home();
+        // scoped_home points cwd + HOME at fresh tempdirs; build the
+        // shared brain in a sibling dir under cwd.
+        let brain = std::env::current_dir().unwrap().join("brain");
+        seed_shared_kms(&brain, "company");
+
+        let kref = resolve("company").expect("shared KMS should resolve");
+        assert_eq!(kref.scope, KmsScope::Shared);
+        assert!(kref.read_only());
+
+        // Every mutation path refuses.
+        assert!(write_page(&kref, "newpage", "hi").is_err());
+        assert!(append_to_page(&kref, "intro", "more").is_err());
+        assert!(delete_page(&kref, "intro").is_err());
+        let src = std::env::current_dir().unwrap().join("src.md");
+        std::fs::write(&src, "raw").unwrap();
+        assert!(ingest(&kref, &src, Some("x"), false).is_err());
+
+        // merge INTO a shared KMS is refused; a normal user KMS still works.
+        create("scratch", KmsScope::Project).unwrap();
+        assert!(merge_into("scratch", "company").is_err());
+
+        // Reads are unaffected — the page is still listed in the index.
+        assert!(kref.read_index().contains("company"));
+
+        std::env::remove_var("THCLAWS_SHARED_AGENT_DIR");
+    }
+
+    #[test]
+    fn shared_mode_locks_instructions_to_company_agents_md() {
+        let _home = scoped_home();
+        let cwd = std::env::current_dir().unwrap();
+        // Member tries to override via working-dir + user-scope AGENTS.md.
+        std::fs::write(cwd.join("AGENTS.md"), "MEMBER OVERRIDE\n").unwrap();
+        let user_cfg = crate::util::home_dir().unwrap().join(".config/thclaws");
+        std::fs::create_dir_all(&user_cfg).unwrap();
+        std::fs::write(user_cfg.join("AGENTS.md"), "USER OVERRIDE\n").unwrap();
+
+        // Without shared mode the member sources are honored.
+        let normal = crate::context::find_claude_md_with(&cwd, false).unwrap_or_default();
+        assert!(normal.contains("MEMBER OVERRIDE"));
+
+        // With shared mode, ONLY the company AGENTS.md is used.
+        let brain = cwd.join("brain");
+        std::fs::create_dir_all(&brain).unwrap();
+        std::fs::write(brain.join("AGENTS.md"), "COMPANY RULES\n").unwrap();
+        std::env::set_var("THCLAWS_SHARED_AGENT_DIR", &brain);
+
+        let locked = crate::context::find_claude_md_with(&cwd, false).unwrap();
+        assert_eq!(locked.trim(), "COMPANY RULES");
+        assert!(!locked.contains("MEMBER OVERRIDE"));
+        assert!(!locked.contains("USER OVERRIDE"));
+
+        std::env::remove_var("THCLAWS_SHARED_AGENT_DIR");
+    }
+
+    #[test]
+    fn shared_kms_blocks_auto_link_apply_but_allows_dry_run() {
+        let _home = scoped_home();
+        let brain = std::env::current_dir().unwrap().join("brain");
+        seed_shared_kms(&brain, "company");
+        let kref = resolve("company").unwrap();
+        assert!(kref.read_only());
+        // Dry-run (read-only) is allowed.
+        assert!(auto_link(
+            &kref,
+            AutoLinkOptions {
+                min_len: 4,
+                apply: false
+            }
+        )
+        .is_ok());
+        // --apply against a read-only shared KMS is refused.
+        let err = auto_link(
+            &kref,
+            AutoLinkOptions {
+                min_len: 4,
+                apply: true,
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("read-only"));
+        std::env::remove_var("THCLAWS_SHARED_AGENT_DIR");
+    }
+
+    #[test]
+    fn shared_mode_forces_gateway_and_ignores_member_byok() {
+        let _home = scoped_home();
+        let brain = std::env::current_dir().unwrap().join("brain");
+        std::fs::create_dir_all(&brain).unwrap();
+        // Company settings pin a model; no provider/BYOK config.
+        std::fs::write(
+            brain.join("settings.json"),
+            "{\"model\":\"claude-opus-4-8\"}",
+        )
+        .unwrap();
+        // Member tries to inject a project-scope provider override.
+        std::fs::create_dir_all(".thclaws").unwrap();
+        std::fs::write(
+            ".thclaws/settings.json",
+            "{\"model\":\"gpt-4o\",\"gatewayUseFor\":[]}",
+        )
+        .unwrap();
+        std::env::set_var("THCLAWS_SHARED_AGENT_DIR", &brain);
+
+        let cfg = crate::config::AppConfig::load().unwrap();
+        // Company model wins (member's project override ignored).
+        assert_eq!(cfg.model, "claude-opus-4-8");
+        // Gateway forced for every routable provider.
+        assert!(cfg.gateway_use_for.iter().any(|p| p == "anthropic"));
+        assert!(cfg.gateway_use_for.iter().any(|p| p == "openai"));
+
+        std::env::remove_var("THCLAWS_SHARED_AGENT_DIR");
     }
 }

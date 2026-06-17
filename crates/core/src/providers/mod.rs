@@ -58,7 +58,6 @@ pub mod thclaws_gateway;
 /// any omission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProviderKind {
-    AgenticPress,
     Anthropic,
     AgentSdk,
     OpenAI,
@@ -71,6 +70,12 @@ pub enum ProviderKind {
     /// from `~/.codex/auth.json` if absent).
     ChatGptCodex,
     OpenRouter,
+    /// TokenRouter (tokenrouter.com) — OpenAI-compatible unified gateway
+    /// to 300+ models. Same wire shape as [`OpenRouter`]; models route
+    /// via the `tokenrouter/<vendor>/<model>` prefix (stripped before the
+    /// upstream request). Key `TOKENROUTER_API_KEY`, base overridable via
+    /// `TOKENROUTER_BASE_URL`.
+    TokenRouter,
     Gemini,
     Ollama,
     OllamaAnthropic,
@@ -90,17 +95,114 @@ pub enum ProviderKind {
     Nvidia,
     Minimax,
     OpenCodeGo,
+    /// Moonshot AI (moonshot.ai) — the Kimi family. OpenAI-compatible
+    /// `/chat/completions` at `api.moonshot.ai/v1` (override to the
+    /// mainland `api.moonshot.cn/v1` via `MOONSHOT_BASE_URL`). Models
+    /// route via the `moonshot/<id>` prefix (e.g. `moonshot/kimi-k2.6`),
+    /// stripped before the upstream request. Key `MOONSHOT_API_KEY`.
+    Moonshot,
+    /// xAI (x.ai) — the Grok family. OpenAI-compatible `/chat/completions`
+    /// at `api.x.ai/v1` (override via `XAI_BASE_URL`). Models route via
+    /// the `xai/<id>` prefix (e.g. `xai/grok-4.3`, stripped before the
+    /// upstream request); bare `grok-*` ids also route here. Key
+    /// `XAI_API_KEY`.
+    XAi,
+}
+
+/// Two-tier provider classification.
+///
+/// **Featured** providers are the curated set thClaws promotes: they are
+/// (or will be) routable through the thClaws cloud gateway, their pricing
+/// is verified against official vendor sources, and they are listed before
+/// Additional providers in every model picker. **Additional** providers
+/// still work (BYOK / local), they're just the long tail shown afterwards.
+///
+/// NOTE (gateway alignment, deferred): the gateway-routable set in
+/// [`thclaws_gateway::provider_segment`] does not yet match Featured 1:1 —
+/// `xai`/`moonshot` need server-side gateway routes added, and
+/// `qwen-cloud`/`thaillm` are routable today but Additional. Those moves
+/// ship with a later gateway deploy; the tier here is the source of truth
+/// for "primary".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderTier {
+    Featured,
+    Additional,
+}
+
+impl ProviderTier {
+    /// Lowercase wire/display key (used in the model-list payload so the
+    /// frontend can group + label sections).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Featured => "featured",
+            Self::Additional => "additional",
+        }
+    }
+}
+
+impl ProviderKind {
+    /// Curated display order for the Featured tier in model pickers — the
+    /// priority order the product promotes. Additional providers follow,
+    /// in `ALL` order. Must contain exactly the Featured providers (a test
+    /// enforces this against `tier()`).
+    pub const FEATURED_ORDER: &'static [Self] = &[
+        Self::OpenAI,
+        Self::Anthropic,
+        Self::Gemini,
+        Self::XAi,
+        Self::DeepSeek,
+        Self::DashScope,
+        Self::Moonshot,
+        Self::ZAi,
+        Self::Minimax,
+        Self::OpenRouter,
+    ];
+
+    /// Featured (primary) vs Additional (secondary) classification.
+    /// The 10 Featured providers map to the standard provider kinds only —
+    /// auth/protocol variants (OpenAI-Responses, ChatGPT-Codex, Agent-SDK)
+    /// and regional siblings (QwenCloud) stay Additional.
+    pub fn tier(&self) -> ProviderTier {
+        match self {
+            Self::OpenAI
+            | Self::Anthropic
+            | Self::Gemini
+            | Self::XAi
+            | Self::DeepSeek
+            | Self::DashScope
+            | Self::Moonshot
+            | Self::ZAi
+            | Self::Minimax
+            | Self::OpenRouter => ProviderTier::Featured,
+            _ => ProviderTier::Additional,
+        }
+    }
+
+    /// Providers in display order for the `/providers` list and model
+    /// pickers: Featured first (in FEATURED_ORDER), then Additional in
+    /// ALL order. Iterating this and emitting a header when `tier()`
+    /// changes yields the two grouped sections.
+    pub fn display_ordered() -> Vec<Self> {
+        let mut out: Vec<Self> = Self::FEATURED_ORDER.to_vec();
+        out.extend(
+            Self::ALL
+                .iter()
+                .copied()
+                .filter(|k| k.tier() == ProviderTier::Additional),
+        );
+        out
+    }
 }
 
 impl ProviderKind {
     pub const ALL: &'static [Self] = &[
-        Self::AgenticPress,
         Self::Anthropic,
         Self::AgentSdk,
         Self::OpenAI,
         Self::OpenAIResponses,
         Self::ChatGptCodex,
         Self::OpenRouter,
+        Self::TokenRouter,
         Self::Gemini,
         Self::Ollama,
         Self::OllamaAnthropic,
@@ -116,17 +218,19 @@ impl ProviderKind {
         Self::Nvidia,
         Self::Minimax,
         Self::OpenCodeGo,
+        Self::Moonshot,
+        Self::XAi,
     ];
 
     pub fn name(&self) -> &'static str {
         match self {
-            Self::AgenticPress => "agentic-press",
             Self::Anthropic => "anthropic",
             Self::AgentSdk => "anthropic-agent",
             Self::OpenAI => "openai",
             Self::OpenAIResponses => "openai-responses",
             Self::ChatGptCodex => "chatgpt-codex",
             Self::OpenRouter => "openrouter",
+            Self::TokenRouter => "tokenrouter",
             Self::Gemini => "gemini",
             Self::Ollama => "ollama",
             Self::OllamaAnthropic => "ollama-anthropic",
@@ -142,30 +246,34 @@ impl ProviderKind {
             Self::Nvidia => "nvidia",
             Self::Minimax => "minimax",
             Self::OpenCodeGo => "opencode-go",
+            Self::Moonshot => "moonshot",
+            Self::XAi => "xai",
         }
     }
 
     pub fn default_model(&self) -> &'static str {
         match self {
-            Self::AgenticPress => "ap/gemma4-12b",
             Self::Anthropic => "claude-sonnet-4-6",
             Self::AgentSdk => "agent/claude-sonnet-4-6",
-            Self::OpenAI => "gpt-4o",
+            Self::OpenAI => "gpt-4.1",
             Self::OpenAIResponses => "codex/gpt-5.2-codex",
             Self::ChatGptCodex => "chatgpt-codex/gpt-5.4",
             Self::OpenRouter => "openrouter/anthropic/claude-sonnet-4-6",
+            Self::TokenRouter => "tokenrouter/anthropic/claude-sonnet-4.5",
             // Pinned to a versioned ID (matching Anthropic / OpenAI
             // convention) rather than `gemini-flash-latest` — `-latest`
             // is a rolling Google-side alias that could promote into a
             // higher-tier model without warning, surprising users with
             // unexpected cost. Track upcoming retirement at:
             // https://ai.google.dev/gemini-api/docs/deprecations
-            // Next bump deadline: 2026-06-17 (gemini-2.5-flash shutdown).
-            Self::Gemini => "gemini-2.5-flash",
+            // Bumped to gemini-3.5-flash ahead of the 2026-06-17
+            // gemini-2.5-flash shutdown; track the next retirement at the
+            // deprecations page above.
+            Self::Gemini => "gemini-3.5-flash",
             Self::Ollama => "ollama/llama3.2",
             Self::OllamaAnthropic => "oa/qwen3-coder",
             Self::OllamaCloud => "ollama-cloud/deepseek-v4-flash",
-            Self::DashScope => "qwen-max",
+            Self::DashScope => "dashscope/qwen3.7-max",
             // Alibaba Singapore DashScope (`dashscope-intl.aliyuncs.com`).
             // Same OpenAI-compat wire protocol as DashScope, but a
             // separate region/account, so models route via the short
@@ -173,7 +281,7 @@ impl ProviderKind {
             // reaches the upstream (which expects bare `qwen-max`,
             // `qwen-plus`, etc.).
             Self::QwenCloud => "qc/qwen-max",
-            Self::ZAi => "zai/glm-4.6",
+            Self::ZAi => "zai/glm-5.2",
             // Most LMStudio installs change models constantly; this is a
             // placeholder that lets the connection establish so the user
             // can `/model lmstudio/<loaded-model>` to switch. list_models
@@ -207,17 +315,26 @@ impl ProviderKind {
             // that yields a doubled prefix (`nvidia/nvidia/<name>`), the outer one stripped
             // by build_provider before the request. Override via NVIDIA_BASE_URL for on-prem.
             Self::Nvidia => "nvidia/nvidia/nemotron-3-super-120b-a12b",
-            // MiniMax (minimaxi.com) — Chinese AI lab, OpenAI-compatible
-            // endpoint at api.minimaxi.com/v1. MiniMax-M2 is the latest
-            // flagship reasoning model (open-weights, hosted via the same
-            // API). Models use the `minimax/<id>` prefix; the prefix is
-            // stripped before the request reaches the upstream.
-            Self::Minimax => "minimax/MiniMax-M2",
+            // MiniMax — Chinese AI lab, OpenAI-compatible endpoint at
+            // api.minimax.io/v1. MiniMax-M3 is the latest flagship model.
+            // MiniMax-M2 remains available. Models use the `minimax/<id>`
+            // prefix; the prefix is stripped before the request reaches
+            // the upstream.
+            Self::Minimax => "minimax/MiniMax-M3",
             // OpenCodeGo (opencode.ai) — OpenAI-compatible hosted inference.
             // Models use the `opencode-go/<id>` prefix (e.g.
             // `opencode-go/kimi-k2.6`); the prefix is stripped before
             // the request reaches the upstream.
             Self::OpenCodeGo => "opencode-go/deepseek-v4-flash",
+            // Moonshot AI — latest general Kimi flagship. The `-code`
+            // variants (kimi-k2.7-code…) are coding-specialised; k2.6 is
+            // the newest general-purpose model. `moonshot/` prefix is
+            // stripped before the upstream request.
+            Self::Moonshot => "moonshot/kimi-k2.6",
+            // xAI — unified Grok flagship. `grok-4.3` supersedes the
+            // grok-4 / grok-3 lines (those are aliases of it upstream).
+            // The `xai/` prefix is stripped before the upstream request.
+            Self::XAi => "xai/grok-4.3",
         }
     }
 
@@ -226,8 +343,7 @@ impl ProviderKind {
     /// self-hosted or regional endpoints.
     pub fn endpoint_env(&self) -> Option<&'static str> {
         match self {
-            // Agentic Press is a hosted gateway with a fixed URL — no env
-            // override, no UI knob. Build-time only.
+            Self::TokenRouter => Some("TOKENROUTER_BASE_URL"),
             Self::DashScope => Some("DASHSCOPE_BASE_URL"),
             Self::QwenCloud => Some("QWENCLOUD_BASE_URL"),
             Self::Ollama => Some("OLLAMA_BASE_URL"),
@@ -241,12 +357,14 @@ impl ProviderKind {
             Self::Nvidia => Some("NVIDIA_BASE_URL"),
             Self::Minimax => Some("MINIMAX_BASE_URL"),
             Self::OpenCodeGo => Some("OPENCODE_GO_BASE_URL"),
+            Self::Moonshot => Some("MOONSHOT_BASE_URL"),
+            Self::XAi => Some("XAI_BASE_URL"),
             _ => None,
         }
     }
 
     /// Whether the Settings UI should expose this provider's base URL. We
-    /// keep hosted services (Agentic Press, DashScope, Z.ai) locked to their
+    /// keep hosted services (DashScope, Z.ai) locked to their
     /// defaults so users can't accidentally mis-point them; only self-hosted
     /// backends like Ollama and LMStudio are surfaced for editing. The env
     /// var still overrides at startup for power users who need it.
@@ -266,7 +384,7 @@ impl ProviderKind {
     /// concept (Anthropic, OpenAI, etc. — those always hit the official API).
     pub fn default_endpoint(&self) -> Option<&'static str> {
         match self {
-            // Agentic Press URL is fixed build-time; no UI placeholder.
+            Self::TokenRouter => Some("https://api.tokenrouter.com/v1"),
             Self::DashScope => Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
             // International / Singapore region of DashScope.
             Self::QwenCloud => Some("https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),
@@ -299,6 +417,11 @@ impl ProviderKind {
             Self::Minimax => Some("https://api.minimax.io/v1"),
             // OpenCodeGo — hosted gateway at opencode.ai.
             Self::OpenCodeGo => Some("https://opencode.ai/zen/go/v1"),
+            // Moonshot AI — international endpoint. Mainland users
+            // override to https://api.moonshot.cn/v1 via MOONSHOT_BASE_URL.
+            Self::Moonshot => Some("https://api.moonshot.ai/v1"),
+            // xAI — public OpenAI-compatible endpoint.
+            Self::XAi => Some("https://api.x.ai/v1"),
             _ => None,
         }
     }
@@ -322,7 +445,6 @@ impl ProviderKind {
     /// Env var holding the API key, if any. Ollama has no auth.
     pub fn api_key_env(&self) -> Option<&'static str> {
         match self {
-            Self::AgenticPress => Some("AGENTIC_PRESS_LLM_API_KEY"),
             Self::Anthropic => Some("ANTHROPIC_API_KEY"),
             Self::AgentSdk => None, // Uses Claude Code's own auth
             Self::OpenAI => Some("OPENAI_API_KEY"),
@@ -331,6 +453,7 @@ impl ProviderKind {
             // ~/.config/thclaws/auth/<profile>.json — no env var.
             Self::ChatGptCodex => None,
             Self::OpenRouter => Some("OPENROUTER_API_KEY"),
+            Self::TokenRouter => Some("TOKENROUTER_API_KEY"),
             Self::Gemini => Some("GEMINI_API_KEY"),
             Self::Ollama => None,
             Self::OllamaAnthropic => None,
@@ -346,6 +469,8 @@ impl ProviderKind {
             Self::Nvidia => Some("NVIDIA_API_KEY"),
             Self::Minimax => Some("MINIMAX_API_KEY"),
             Self::OpenCodeGo => Some("OPENCODE_GO_API_KEY"),
+            Self::Moonshot => Some("MOONSHOT_API_KEY"),
+            Self::XAi => Some("XAI_API_KEY"),
         }
     }
 
@@ -418,16 +543,6 @@ impl ProviderKind {
                 }
                 None
             }
-            Self::AgenticPress => {
-                // ap/* mirrors the same families with an `ap/` prefix.
-                if let Some(id) = anthropic_id {
-                    return Some(format!("ap/{id}"));
-                }
-                if let Some(id) = google_id {
-                    return Some(format!("ap/{id}"));
-                }
-                None
-            }
             // Providers without a notion of these aliases. Returning None
             // signals "alias doesn't apply here" so the caller can fall
             // back to whatever default the user had configured rather than
@@ -448,7 +563,12 @@ impl ProviderKind {
             | Self::DeepSeek
             | Self::Nvidia
             | Self::OpenCodeGo
-            | Self::Minimax => None,
+            // TokenRouter uses full `tokenrouter/<vendor>/<model>` ids; no
+            // short-alias table (users type the explicit id).
+            | Self::TokenRouter
+            | Self::Minimax
+            | Self::Moonshot
+            | Self::XAi => None,
         }
     }
 
@@ -460,8 +580,11 @@ impl ProviderKind {
             // Check openrouter/ first — it's the most specific prefix.
             // Models look like openrouter/anthropic/claude-sonnet-4-6.
             Some(Self::OpenRouter)
-        } else if model.starts_with("ap/") {
-            Some(Self::AgenticPress)
+        } else if model.starts_with("tokenrouter/") {
+            // TokenRouter (tokenrouter.com) — OpenAI-compatible unified
+            // gateway. Models look like tokenrouter/anthropic/claude-sonnet-4.5;
+            // the `tokenrouter/` prefix is stripped before the upstream call.
+            Some(Self::TokenRouter)
         } else if model.starts_with("agent/") {
             Some(Self::AgentSdk)
         } else if model.starts_with("claude-") {
@@ -492,6 +615,16 @@ impl ProviderKind {
             // `qc/` prefix is stripped before the request reaches the
             // upstream so it sees the bare `qwen-*` id.
             Some(Self::QwenCloud)
+        } else if model.starts_with("dashscope/") {
+            // Alibaba Cloud mainland DashScope routing prefix. Models look
+            // like `dashscope/qwen-max`, `dashscope/deepseek-v3.2`,
+            // `dashscope/kimi-k2.6`, etc.; the `dashscope/` prefix is
+            // stripped by `build_provider` before the request reaches
+            // Alibaba's upstream so it sees the bare id. Bare `qwen-*` /
+            // `qwq-*` ids still route to DashScope below — backward
+            // compat for settings that pre-date this prefix being
+            // canonical.
+            Some(Self::DashScope)
         } else if model.starts_with("qwen") || model.starts_with("qwq-") {
             Some(Self::DashScope)
         } else if model.starts_with("deepseek-") {
@@ -546,6 +679,20 @@ impl ProviderKind {
             Some(Self::Nvidia)
         } else if model.starts_with("opencode-go/") {
             Some(Self::OpenCodeGo)
+        } else if model.starts_with("moonshot/") {
+            // Moonshot AI (Kimi family). Models look like
+            // moonshot/kimi-k2.6 or moonshot/moonshot-v1-128k; the
+            // `moonshot/` prefix is stripped before the request reaches
+            // the OpenAI-compatible upstream at api.moonshot.ai.
+            Some(Self::Moonshot)
+        } else if model.starts_with("xai/") || model.starts_with("grok-") {
+            // xAI (Grok). Canonical ids carry an `xai/` prefix
+            // (xai/grok-4.3); it's stripped before the upstream request.
+            // Bare `grok-*` ids route here too for nicer UX — they pass
+            // through unchanged (the upstream expects the bare id).
+            // openrouter/x-ai/grok-* is caught by the `openrouter/`
+            // branch above, so this never steals those.
+            Some(Self::XAi)
         } else {
             None
         }
@@ -789,6 +936,15 @@ pub struct Usage {
     pub output_tokens: u32,
     pub cache_creation_input_tokens: Option<u32>,
     pub cache_read_input_tokens: Option<u32>,
+    /// dev-plan/24: hidden reasoning tokens for OpenAI o1/o3 family.
+    /// OpenAI surfaces these via `completion_tokens_details.
+    /// reasoning_tokens` on Chat Completions and `output_tokens_
+    /// details.reasoning_tokens` on Responses API. Anthropic's
+    /// extended-thinking tokens are folded into output and aren't
+    /// separately billed, so the Anthropic assembler leaves this
+    /// as `None`. `Some(0)` ⇒ provider explicitly reported zero
+    /// reasoning tokens (distinct from "didn't report").
+    pub reasoning_output_tokens: Option<u32>,
 }
 
 impl Default for Usage {
@@ -798,6 +954,7 @@ impl Default for Usage {
             output_tokens: 0,
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
+            reasoning_output_tokens: None,
         }
     }
 }
@@ -832,6 +989,23 @@ pub struct ModelInfo {
     pub display_name: Option<String>,
 }
 
+/// Display-only progress signal from the provider layer.
+/// Never accumulated into messages or persisted — renderers use it to
+/// drive spinners and tool-activity indicators.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProgressKind {
+    /// Provider is idle / waiting for first response chunk.
+    Thinking,
+    /// A tool started within the provider (agent-SDK internal execution).
+    ToolStart { id: String, label: String },
+    /// A tool finished within the provider.
+    ToolDone {
+        id: String,
+        label: String,
+        is_error: bool,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProviderEvent {
     MessageStart {
@@ -856,6 +1030,11 @@ pub enum ProviderEvent {
         stop_reason: Option<String>,
         usage: Option<Usage>,
     },
+    /// Display-only progress signal — not content, never persisted.
+    /// Providers emit this instead of sending spinner frames as
+    /// [`TextDelta`] so animation never leaks into logs, session
+    /// JSONL, GUI adapters, or accumulated assistant text.
+    Progress(ProgressKind),
 }
 
 pub type EventStream = BoxStream<'static, Result<ProviderEvent>>;
@@ -908,13 +1087,25 @@ pub fn provider_has_credentials(cfg: &crate::config::AppConfig) -> bool {
     kind_has_credentials(cfg.detect_provider_kind().ok())
 }
 
-/// True when `kind` has credentials available (env var, or no-auth
-/// local provider). Same logic the GUI's auto-fallback path uses.
+/// True when `kind` has credentials available (env var, auth file, or
+/// no-auth local provider). Same logic the GUI's auto-fallback path uses.
 pub fn kind_has_credentials(kind: Option<ProviderKind>) -> bool {
     let Some(kind) = kind else { return false };
     match kind {
         ProviderKind::AgentSdk => true,
         ProviderKind::Ollama | ProviderKind::OllamaAnthropic | ProviderKind::LMStudio => true,
+        // ChatGptCodex auths via a file-based OAuth token, not an env
+        // var, so the generic api_key_env() probe below always misses.
+        ProviderKind::ChatGptCodex => {
+            match crate::codex_auth_store::resolve_for_profile("default") {
+                Ok(Some(auth)) => !auth.is_expired(60),
+                Ok(None) => false,
+                Err(e) => {
+                    eprintln!("\x1b[33m[codex-auth] credential check failed: {e}\x1b[0m");
+                    false
+                }
+            }
+        }
         other => other
             .api_key_env()
             .and_then(|v| std::env::var(v).ok())
@@ -934,9 +1125,12 @@ pub fn kind_has_credentials(kind: Option<ProviderKind>) -> bool {
 /// timeout` against a possibly-unreachable host).
 pub async fn build_all_models_payload() -> String {
     let cat = crate::model_catalogue::EffectiveCatalogue::load();
-    let free_only_or = crate::config::AppConfig::load()
-        .map(|c| c.openrouter_free_only)
-        .unwrap_or(false);
+    let app_cfg = crate::config::AppConfig::load().unwrap_or_default();
+    let free_only_or = app_cfg.openrouter_free_only;
+    // Gateway mode (hosted cloud, metered): only Featured providers have a
+    // gateway route, so the picker hides Additional ones. BYOK sessions
+    // (desktop / own keys) see the full catalogue.
+    let gateway_mode = crate::providers::thclaws_gateway::is_active(&app_cfg);
     let ollama_live: Vec<String> = {
         let base = std::env::var("OLLAMA_BASE_URL")
             .unwrap_or_else(|_| crate::providers::ollama::DEFAULT_BASE_URL.to_string());
@@ -972,12 +1166,20 @@ pub async fn build_all_models_payload() -> String {
             None => Vec::new(),
         }
     };
-    let mut groups: Vec<serde_json::Value> = Vec::new();
-    for kind in ProviderKind::ALL {
+    // Each entry carries a sort rank so Featured providers list first
+    // (in FEATURED_ORDER), then Additional providers in ALL order.
+    let mut groups: Vec<(u32, serde_json::Value)> = Vec::new();
+    for (all_idx, kind) in ProviderKind::ALL.iter().enumerate() {
         let name = kind.name();
+        // In gateway mode, Additional providers aren't routable — skip them.
+        if gateway_mode && kind.tier() != ProviderTier::Featured {
+            continue;
+        }
         let mut model_ids: std::collections::BTreeMap<String, Option<u32>> =
             std::collections::BTreeMap::new();
         let is_openrouter = matches!(kind, ProviderKind::OpenRouter);
+        let hide_unpriced =
+            crate::providers::thclaws_gateway::hides_unpriced_models(&app_cfg, name);
         for (id, entry) in cat.list_models_for_provider(name) {
             if entry.chat == Some(false) {
                 continue;
@@ -985,11 +1187,12 @@ pub async fn build_all_models_payload() -> String {
             if is_openrouter && free_only_or && entry.free != Some(true) {
                 continue;
             }
-            let canonical = if ProviderKind::detect(&id) == Some(*kind) {
-                id
-            } else {
-                format!("{name}/{id}")
-            };
+            // Strictly metered via gateway → unpriced rows 400, hide them.
+            if hide_unpriced && (entry.input_per_mtok.is_none() || entry.output_per_mtok.is_none())
+            {
+                continue;
+            }
+            let canonical = crate::model_catalogue::canonical_model_id(name, &id);
             model_ids.insert(canonical, entry.context);
         }
         if matches!(kind, ProviderKind::Ollama) {
@@ -1009,11 +1212,28 @@ pub async fn build_all_models_payload() -> String {
             .into_iter()
             .map(|(id, ctx)| serde_json::json!({ "id": id, "context": ctx }))
             .collect();
-        groups.push(serde_json::json!({
-            "provider": name,
-            "models": model_rows,
-        }));
+        let tier = kind.tier();
+        let rank = match tier {
+            ProviderTier::Featured => ProviderKind::FEATURED_ORDER
+                .iter()
+                .position(|p| p == kind)
+                .map(|p| p as u32)
+                .unwrap_or(99),
+            // Additional providers sort after every Featured one, keeping
+            // their relative ALL order.
+            ProviderTier::Additional => 100 + all_idx as u32,
+        };
+        groups.push((
+            rank,
+            serde_json::json!({
+                "provider": name,
+                "tier": tier.as_str(),
+                "models": model_rows,
+            }),
+        ));
     }
+    groups.sort_by_key(|(rank, _)| *rank);
+    let groups: Vec<serde_json::Value> = groups.into_iter().map(|(_, g)| g).collect();
     serde_json::json!({
         "type": "all_models_list",
         "groups": groups,
@@ -1023,33 +1243,62 @@ pub async fn build_all_models_payload() -> String {
 }
 
 /// If `cfg.model`'s provider has no credentials, pick the first
-/// provider that does and return its default model. Returns `None`
-/// when the current model is already fine or nothing else is usable.
+/// **local / free** provider that's usable and return its default
+/// model. Returns `None` when the current model is already fine or
+/// no free fallback is available.
 ///
-/// Called by the GUI at startup and after `api_key_set` so the
-/// sidebar's active-provider indicator + persisted settings.json land
-/// on whatever the user actually has configured. Same logic now
-/// callable from the WS transport's settings handlers.
+/// Paid providers are deliberately excluded from the fallback list:
+/// silently swapping a user's openrouter (or other) configuration to
+/// Anthropic / OpenAI when their key check momentarily fails has
+/// caused real bill surprises. Better UX: surface the error, let the
+/// user fix the credential or pick a provider explicitly via
+/// `/model …`. Free fallbacks (Ollama variants) stay on so a user
+/// running entirely local still gets a sane default at first launch.
 pub fn auto_fallback_model(cfg: &crate::config::AppConfig) -> Option<String> {
     if provider_has_credentials(cfg) {
         return None;
     }
+    // Only no-cost providers are eligible. Each kind's
+    // `kind_has_credentials` enforces its own reachability check
+    // (Ollama variants return true unconditionally; the GUI layer
+    // probes the daemon before persisting the swap).
     const ORDER: &[ProviderKind] = &[
-        ProviderKind::Anthropic,
-        ProviderKind::OpenAI,
-        ProviderKind::AgenticPress,
-        ProviderKind::OpenRouter,
-        ProviderKind::Gemini,
-        ProviderKind::DashScope,
-        ProviderKind::QwenCloud,
-        ProviderKind::ZAi,
-        ProviderKind::DeepSeek,
-        ProviderKind::ThaiLLM,
-        ProviderKind::Minimax,
-        ProviderKind::OpenCodeGo,
+        ProviderKind::Ollama,
+        ProviderKind::OllamaAnthropic,
+        ProviderKind::LMStudio,
     ];
     for kind in ORDER {
         if kind_has_credentials(Some(*kind)) {
+            return Some(kind.default_model().to_string());
+        }
+    }
+    None
+}
+
+/// Pick the default model for the highest-priority provider the user
+/// actually has usable credentials for — their own API key (env or
+/// keychain) **or** a gateway route — scanning in the order
+/// DashScope → OpenAI → Anthropic. Used at startup / new-session to
+/// replace the compiled-in Anthropic placeholder when the user hasn't
+/// explicitly pinned a model, so a fresh install with (say) only a
+/// DashScope key lands on DashScope instead of an unconfigured
+/// Anthropic. Returns `None` when none of the three are configured, in
+/// which case the caller keeps the compiled-in default.
+///
+/// Distinct from [`auto_fallback_model`], which only ever falls back to
+/// free *local* providers when the *currently configured* provider is
+/// keyless; this picks the preferred *paid* default when nothing is
+/// configured yet.
+pub fn preferred_default_model(cfg: &crate::config::AppConfig) -> Option<String> {
+    const ORDER: &[ProviderKind] = &[
+        ProviderKind::DashScope,
+        ProviderKind::OpenAI,
+        ProviderKind::Anthropic,
+    ];
+    for kind in ORDER {
+        let has_key = kind_has_credentials(Some(*kind));
+        let via_gateway = crate::providers::thclaws_gateway::for_kind(cfg, *kind).is_some();
+        if has_key || via_gateway {
             return Some(kind.default_model().to_string());
         }
     }
@@ -1198,12 +1447,6 @@ mod tests {
             None,
         );
 
-        // Agentic Press mirrors the family names with `ap/` prefix.
-        assert_eq!(
-            ProviderKind::resolve_alias_for_provider("opus", ProviderKind::AgenticPress).as_deref(),
-            Some("ap/claude-opus-4-6"),
-        );
-
         // Providers with no alias notion return None — caller falls back
         // to default config rather than surprise-switching providers.
         assert!(ProviderKind::resolve_alias_for_provider("sonnet", ProviderKind::OpenAI).is_none());
@@ -1331,6 +1574,157 @@ mod tests {
         assert_eq!(ProviderKind::QwenCloud.default_model(), "qc/qwen-max");
     }
 
+    // Serialises the env-var mutation in `preferred_default_model_*`
+    // tests (api-key + gateway-key vars are process-global).
+    static PREF_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn tier_classifies_featured_vs_additional() {
+        // The 10 Featured (primary) providers.
+        for k in [
+            ProviderKind::OpenAI,
+            ProviderKind::Anthropic,
+            ProviderKind::Gemini,
+            ProviderKind::XAi,
+            ProviderKind::DeepSeek,
+            ProviderKind::DashScope,
+            ProviderKind::Moonshot,
+            ProviderKind::ZAi,
+            ProviderKind::Minimax,
+            ProviderKind::OpenRouter,
+        ] {
+            assert_eq!(k.tier(), ProviderTier::Featured, "{k:?} should be Featured");
+        }
+        // Variants / regional siblings / local stay Additional.
+        for k in [
+            ProviderKind::OpenAIResponses,
+            ProviderKind::ChatGptCodex,
+            ProviderKind::AgentSdk,
+            ProviderKind::QwenCloud,
+            ProviderKind::ThaiLLM,
+            ProviderKind::Nvidia,
+            ProviderKind::Ollama,
+            ProviderKind::OpenCodeGo,
+        ] {
+            assert_eq!(
+                k.tier(),
+                ProviderTier::Additional,
+                "{k:?} should be Additional"
+            );
+        }
+    }
+
+    #[test]
+    fn featured_order_matches_tier_set() {
+        use std::collections::HashSet;
+        let from_order: HashSet<ProviderKind> =
+            ProviderKind::FEATURED_ORDER.iter().copied().collect();
+        assert_eq!(
+            from_order.len(),
+            ProviderKind::FEATURED_ORDER.len(),
+            "FEATURED_ORDER has duplicates"
+        );
+        let from_tier: HashSet<ProviderKind> = ProviderKind::ALL
+            .iter()
+            .copied()
+            .filter(|k| k.tier() == ProviderTier::Featured)
+            .collect();
+        assert_eq!(
+            from_order, from_tier,
+            "FEATURED_ORDER must list exactly the Featured-tier providers"
+        );
+        assert_eq!(ProviderKind::FEATURED_ORDER.len(), 10);
+    }
+
+    #[test]
+    fn display_ordered_is_featured_then_additional() {
+        let ord = ProviderKind::display_ordered();
+        // Every provider exactly once — no drops, no duplicates.
+        assert_eq!(ord.len(), ProviderKind::ALL.len());
+        let uniq: std::collections::HashSet<_> = ord.iter().copied().collect();
+        assert_eq!(uniq.len(), ord.len());
+        // Featured block first, in FEATURED_ORDER.
+        let n = ProviderKind::FEATURED_ORDER.len();
+        assert_eq!(&ord[..n], ProviderKind::FEATURED_ORDER);
+        // Then every remaining entry is Additional.
+        assert!(ord[n..]
+            .iter()
+            .all(|k| k.tier() == ProviderTier::Additional));
+    }
+
+    #[test]
+    fn preferred_default_provider_models_match_requested() {
+        assert_eq!(
+            ProviderKind::DashScope.default_model(),
+            "dashscope/qwen3.7-max"
+        );
+        assert_eq!(ProviderKind::OpenAI.default_model(), "gpt-4.1");
+        assert_eq!(ProviderKind::Anthropic.default_model(), "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn preferred_default_model_follows_dashscope_openai_anthropic_order() {
+        let _guard = PREF_ENV_LOCK.lock().unwrap();
+        // Isolate from any real provider keys in the host env so only the
+        // gateway route under test decides the pick.
+        for v in ["DASHSCOPE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"] {
+            std::env::remove_var(v);
+        }
+        std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw_v1_test");
+
+        let mut cfg = crate::config::AppConfig::default();
+
+        // Only OpenAI gateway-routed → OpenAI's default model.
+        cfg.gateway_use_for = vec!["openai".into()];
+        assert_eq!(preferred_default_model(&cfg).as_deref(), Some("gpt-4.1"));
+
+        // DashScope outranks OpenAI when both are available.
+        cfg.gateway_use_for = vec!["openai".into(), "dashscope".into()];
+        assert_eq!(
+            preferred_default_model(&cfg).as_deref(),
+            Some("dashscope/qwen3.7-max")
+        );
+
+        // None of the three configured (no gateway route, host keys
+        // cleared) → None so the caller keeps the compiled-in default.
+        cfg.gateway_use_for = vec![];
+        let out = preferred_default_model(&cfg);
+        std::env::remove_var("THCLAWS_GATEWAY_API_KEY");
+        assert!(out.is_none());
+    }
+
+    // The catalogue stores DashScope rows with a `dashscope/` routing
+    // prefix so heterogeneous Alibaba-hosted families (qwen, deepseek,
+    // glm, kimi, …) all route through one provider — the bare-id arms
+    // alone would misroute `deepseek-v3.2` to DeepSeek even though it's
+    // Alibaba-hosted on this provider. Bare `qwen-*` still routes for
+    // backward compat with pre-prefix settings.
+    #[test]
+    fn detect_dashscope_prefix_routes_to_dashscope_provider() {
+        assert_eq!(
+            ProviderKind::detect("dashscope/qwen-max"),
+            Some(ProviderKind::DashScope)
+        );
+        assert_eq!(
+            ProviderKind::detect("dashscope/deepseek-v3.2"),
+            Some(ProviderKind::DashScope),
+            "Alibaba-hosted deepseek must route to DashScope, not the bare-`deepseek-` arm",
+        );
+        assert_eq!(
+            ProviderKind::detect("dashscope/kimi-k2.6"),
+            Some(ProviderKind::DashScope)
+        );
+        assert_eq!(
+            ProviderKind::detect("qwen-max"),
+            Some(ProviderKind::DashScope),
+            "bare qwen-* still routes to DashScope for backward compat",
+        );
+        assert_eq!(
+            ProviderKind::DashScope.default_model(),
+            "dashscope/qwen3.7-max"
+        );
+    }
+
     #[test]
     fn detect_minimax_prefix_routes_to_minimax_provider() {
         assert_eq!(
@@ -1347,7 +1741,37 @@ mod tests {
             Some("https://api.minimax.io/v1")
         );
         assert_eq!(ProviderKind::Minimax.name(), "minimax");
-        assert_eq!(ProviderKind::Minimax.default_model(), "minimax/MiniMax-M2");
+        assert_eq!(ProviderKind::Minimax.default_model(), "minimax/MiniMax-M3");
+    }
+
+    #[test]
+    fn detect_tokenrouter_prefix_routes_to_tokenrouter_provider() {
+        // tokenrouter/ must be detected before the bare-vendor heuristics.
+        assert_eq!(
+            ProviderKind::detect("tokenrouter/anthropic/claude-sonnet-4.5"),
+            Some(ProviderKind::TokenRouter)
+        );
+        assert_eq!(
+            ProviderKind::detect("tokenrouter/openai/gpt-5.4-nano"),
+            Some(ProviderKind::TokenRouter)
+        );
+        assert_eq!(
+            ProviderKind::TokenRouter.api_key_env(),
+            Some("TOKENROUTER_API_KEY")
+        );
+        assert_eq!(
+            ProviderKind::TokenRouter.endpoint_env(),
+            Some("TOKENROUTER_BASE_URL")
+        );
+        assert_eq!(
+            ProviderKind::TokenRouter.default_endpoint(),
+            Some("https://api.tokenrouter.com/v1")
+        );
+        assert_eq!(ProviderKind::TokenRouter.name(), "tokenrouter");
+        assert_eq!(
+            ProviderKind::from_name("tokenrouter"),
+            Some(ProviderKind::TokenRouter)
+        );
     }
 
     #[test]

@@ -30,6 +30,13 @@ impl Tool for BashTool {
          Default timeout: 120000ms (override with `timeout` in milliseconds, max 600000). \
          Always requires approval. Use this for general operations (git, build, \
          test, curl, ls -l, rm, etc.) that the specialized tools don't cover. \
+         Runs from the workspace root. Invoke programs by name so the shell \
+         resolves them via PATH (e.g. `python script.py`) — this works even when \
+         the interpreter is installed outside the workspace. Do NOT fabricate an \
+         absolute path to an interpreter; a guessed/wrong path just fails. \
+         Reference scripts and files by paths inside the workspace. (Only the \
+         `cwd` argument is sandboxed to the workspace — the command itself is not, \
+         but a made-up path won't exist.) \
          IMPORTANT: For long-running processes (servers, watchers, dev servers), \
          append ` &` to run in background, or use `timeout 10 command` to sample \
          initial output. Never run a server in foreground — it blocks until timeout."
@@ -64,14 +71,13 @@ impl Tool for BashTool {
         })
     }
 
-    fn requires_approval(&self, input: &Value) -> bool {
-        // Always require approval, but flag destructive commands so the
-        // approval prompt can highlight the risk.
-        if let Some(cmd) = input.get("command").and_then(Value::as_str) {
-            if is_destructive_command(cmd) {
-                return true; // could be a higher tier in the future
-            }
-        }
+    fn requires_approval(&self, _input: &Value) -> bool {
+        // Every Bash command requires approval. (Pre-#125 this had an
+        // `is_destructive_command` branch returning `true` above an
+        // unconditional `true` — a dead discriminator. `is_destructive_command`
+        // still drives the destructive-command *warning* highlight below;
+        // the gate itself is unconditional until an elevated approval tier
+        // exists.)
         true
     }
 
@@ -84,7 +90,7 @@ impl Tool for BashTool {
         } else if let Some(root) = crate::sandbox::Sandbox::root() {
             root
         } else {
-            std::env::current_dir()?
+            crate::workdir::current_workdir()
         };
 
         // Auto-activate venv for pip/python commands when no venv exists yet.
@@ -355,15 +361,30 @@ fn maybe_wrap_with_venv(cmd: &str, cwd: &std::path::Path) -> String {
     }
 }
 
-/// Does this command need a Python venv? Any python/pip command should use
-/// the project venv if one exists, plus specific tool commands.
+/// Does this command need a Python venv? Trigger ONLY on commands that
+/// actually install or run framework servers — pip/pipx/poetry/uv,
+/// long-running server runners (uvicorn/gunicorn/flask), and the
+/// pytest/celery toolchains.
+///
+/// Plain `python3 script.py` does NOT trigger here. The previous
+/// heuristic fired on every `python3 ` prefix, which:
+///   - Wrapped agent-shipped stdlib scripts (e.g. image-generator's
+///     batch.py) in `python3 -m venv && source && python3 script.py`,
+///   - Printed `[creating .venv and activating before pip]` +
+///     `⚠ destructive command detected` warnings the model then
+///     mis-attributed to the script itself,
+///   - Created a `.venv/` directory inside agent workspaces that had
+///     no business owning one.
+/// If a user actually needs venv-bound python, they call `pip` or
+/// activate the venv themselves; both still get auto-handled here.
 fn needs_venv(cmd: &str) -> bool {
     let lower = cmd.to_lowercase();
-    // Any python/pip invocation should use the venv.
-    lower.starts_with("python ")
-        || lower.starts_with("python3 ")
-        || lower.contains("pip install")
+    lower.contains("pip install")
         || lower.contains("pip3 install")
+        || lower.contains("pipx ")
+        || lower.contains("poetry install")
+        || lower.contains("poetry add")
+        || lower.contains("uv pip ")
         || lower.contains("uvicorn ")
         || lower.contains("gunicorn ")
         || lower.contains("hypercorn ")
@@ -418,90 +439,286 @@ fn ref_resets_to_different_branch(target: &str) -> bool {
     true
 }
 
-/// Commands a teammate must never run. Catches the specific footguns that
-/// have wiped teammate worktrees in past runs (`git reset --hard main`,
-/// `git reset --hard origin/...`, `git reset --hard team/<sibling>`).
-/// `git reset --hard HEAD~N` and `git reset --hard <sha>` stay allowed —
-/// those are legitimate same-branch recovery moves.
+// ── thClaws#125: shell-aware seatbelt hardening ─────────────────────────
+// The lead/teammate guards below historically matched destructive commands
+// by lowercase + collapse-whitespace + substring search. That's defeated by
+// any shell-quoting trick `/bin/sh -c` expands back to the destructive form
+// (`r''m -rf`, `$(printf rm)`, `${x:-rm}`, backticks, `{rm,-rf,..}`,
+// `IFS`-splicing, `eval $'\x72\x6d'`, arg-order swaps, quoted verbs). We
+// harden by (a) resolving each command through `shell_words` — defeating
+// quotes, escapes, wrapper prefixes, arg order, and `eval`/`sh -c`
+// indirection — and (b) refusing any command that carries an *unresolved*
+// substitution AND a destructive flag signal. No string analysis is airtight
+// against a determined model (OS-level confinement is the real boundary,
+// tracked separately) but this raises the prompt-injection bar a lot.
+
+/// Wrapper verbs that prefix a real command without changing what runs.
+const WRAPPER_PREFIXES: &[&str] = &[
+    "sudo", "env", "nice", "time", "nohup", "command", "stdbuf", "setsid", "ionice",
+];
+
+/// The lead's hard-block table: `(pattern as it appears in the canonical
+/// lowercased form, human reason)`.
+const LEAD_BLOCKED: &[(&str, &str)] = &[
+    ("git reset --hard", "discard committed work via hard reset"),
+    ("git clean -f", "delete untracked files"),
+    ("git clean -d", "delete untracked directories"),
+    ("git push --force", "rewrite shared history with force-push"),
+    ("git push -f ", "rewrite shared history with force-push"),
+    ("git rebase", "rewrite committed history"),
+    (
+        "git worktree remove",
+        "kill a teammate's active worktree (and its process)",
+    ),
+    (
+        "git worktree prune",
+        "purge worktree metadata referenced by live teammates",
+    ),
+    ("git checkout -- ", "discard a teammate's uncommitted work"),
+    ("git checkout .", "discard a teammate's uncommitted work"),
+    (
+        "git restore --worktree",
+        "discard a teammate's uncommitted work",
+    ),
+    ("git restore .", "discard a teammate's uncommitted work"),
+    (
+        "git merge --abort",
+        "tear down a merge instead of resolving via the responsible teammate",
+    ),
+    ("rm -rf", "destructively remove files"),
+    ("rm -fr", "destructively remove files"),
+    ("rm -r ", "recursively remove files"),
+];
+
+const LEAD_OBFUSCATED: &str = "obfuscated/dynamic destructive command refused in team-lead mode — the seatbelt can't verify a command built via $VAR / $(...) / backticks / brace-expansion / eval. Run a plain literal command, or hand the destructive step to the responsible teammate";
+
+const TEAMMATE_RESET_REASON: &str = "reset to a different branch / remote ref — would discard your branch's commits and overwrite your worktree with someone else's tree. Use `git reset --hard HEAD~N` or `git reset --hard <sha>` if you genuinely need to undo your own commits, OR ask the lead to handle the merge instead";
+
+/// `cmd` contains shell substitution/expansion whose effective form can't be
+/// resolved statically (var/command substitution, ANSI-C `$'…'`, `{a,b}`).
+fn looks_obfuscated(cmd: &str) -> bool {
+    cmd.contains('$') || cmd.contains('`') || brace_list(cmd)
+}
+
+fn brace_list(cmd: &str) -> bool {
+    let mut depth = 0i32;
+    for c in cmd.chars() {
+        match c {
+            '{' => depth += 1,
+            '}' => depth = (depth - 1).max(0),
+            ',' if depth > 0 => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Destructive flag signals that stay literal even when the verb is
+/// obfuscated. Kept to unambiguous multi-char flags to avoid false hits on
+/// legitimate obfuscated-but-harmless commands (`echo $(date)`).
+fn has_destructive_signal(cmd: &str) -> bool {
+    let l = cmd.to_lowercase();
+    [
+        "-rf",
+        "-fr",
+        "--hard",
+        "--force",
+        "--no-preserve-root",
+        "--delete",
+    ]
+    .iter()
+    .any(|s| l.contains(s))
+}
+
+/// Split a command line into segments on the operators that begin a new
+/// command (`;`, newline, `&&`, `||`, `|`, `&`). Coarse but enough to
+/// isolate each verb for prefix-stripping.
+fn split_shell_segments(cmd: &str) -> Vec<String> {
+    // `char_indices()` yields (byte_pos, char) tuples where every
+    // `byte_pos` is on a UTF-8 char boundary, so `cmd[pos..]` is
+    // always a valid slice. The previous byte-arithmetic version
+    // panicked on any multi-byte UTF-8 (em-dash etc.) that LLM-
+    // generated commands inadvertently include — see issue #141.
+    //
+    // Order matters: check the two-char operators `&&` / `||` BEFORE
+    // the single-char `&` / `|` branch, else the single-char arm
+    // steals the first byte of the pair and `cur` ends up with a
+    // stray `&` between two segments.
+    let mut segs = Vec::new();
+    let mut cur = String::new();
+    let mut chars = cmd.char_indices().peekable();
+    while let Some((pos, c)) = chars.next() {
+        if cmd[pos..].starts_with("&&") || cmd[pos..].starts_with("||") {
+            segs.push(std::mem::take(&mut cur));
+            chars.next(); // consume the second char of the pair
+        } else if c == ';' || c == '\n' || c == '|' || c == '&' {
+            segs.push(std::mem::take(&mut cur));
+        } else {
+            cur.push(c);
+        }
+    }
+    segs.push(cur);
+    segs.into_iter().filter(|s| !s.trim().is_empty()).collect()
+}
+
+/// Resolve `cmd` to effective token-lists: per segment, tokenise (resolving
+/// quotes/escapes/order), strip `VAR=` + wrapper prefixes, and recurse into
+/// the string argument of `eval` / `sh -c` / `bash -c` / `zsh -c` /
+/// `dash -c`. Falls back to whitespace tokens when `shell_words` can't parse.
+fn effective_commands(cmd: &str) -> Vec<Vec<String>> {
+    // Join shell line-continuations (`\<newline>`) first, else the segment
+    // splitter would treat the newline as a command separator and break
+    // `rm \⏎ -rf …` into two harmless-looking halves.
+    let cmd = cmd.replace("\\\n", " ");
+    let mut out = Vec::new();
+    for seg in split_shell_segments(&cmd) {
+        let tokens = shell_words::split(&seg)
+            .unwrap_or_else(|_| seg.split_whitespace().map(String::from).collect());
+        let mut start = 0;
+        while start < tokens.len() {
+            let t = &tokens[start];
+            let is_assign = t
+                .split_once('=')
+                .map(|(k, _)| {
+                    !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                })
+                .unwrap_or(false);
+            let is_wrap = WRAPPER_PREFIXES.contains(&t.to_ascii_lowercase().as_str());
+            if is_assign || is_wrap {
+                start += 1;
+            } else {
+                break;
+            }
+        }
+        let eff = &tokens[start..];
+        let Some(verb) = eff.first().map(|v| v.to_ascii_lowercase()) else {
+            continue;
+        };
+        // Recurse into `<sh> -c "<inner>"` and `eval <inner…>`.
+        if matches!(verb.as_str(), "sh" | "bash" | "zsh" | "dash" | "ksh") {
+            if let Some(pos) = eff.iter().position(|t| t == "-c") {
+                if let Some(inner) = eff.get(pos + 1) {
+                    out.extend(effective_commands(inner));
+                    continue;
+                }
+            }
+        } else if verb == "eval" {
+            out.extend(effective_commands(&eff[1..].join(" ")));
+            continue;
+        }
+        out.push(eff.to_vec());
+    }
+    out
+}
+
+fn lead_blocked_in(padded_lower: &str) -> Option<&'static str> {
+    LEAD_BLOCKED
+        .iter()
+        .find(|(p, _)| padded_lower.contains(p))
+        .map(|(_, w)| *w)
+}
+
+/// `rm` invoked with a recursive flag anywhere in its args (defeats
+/// arg-order swaps like `rm ../teammate -rf`).
+fn rm_is_recursive(tokens: &[String]) -> bool {
+    if tokens.first().map(|v| v.eq_ignore_ascii_case("rm")) != Some(true) {
+        return false;
+    }
+    tokens[1..].iter().any(|a| {
+        let a = a.to_ascii_lowercase();
+        (a.starts_with('-') && !a.starts_with("--") && a.contains('r')) || a == "--recursive"
+    })
+}
+
+/// `git reset --hard <cross-branch-ref>` in a resolved token list.
+fn teammate_reset_reason(tokens: &[String]) -> Option<&'static str> {
+    let lc: Vec<String> = tokens.iter().map(|t| t.to_ascii_lowercase()).collect();
+    let is_git_reset = lc.first().map(|s| s == "git").unwrap_or(false)
+        && lc.get(1).map(|s| s == "reset").unwrap_or(false);
+    if !is_git_reset {
+        return None;
+    }
+    let hpos = lc.iter().position(|s| s == "--hard")?;
+    let reftok = tokens.get(hpos + 1)?;
+    ref_resets_to_different_branch(reftok).then_some(TEAMMATE_RESET_REASON)
+}
+
+/// Commands a teammate must never run. Catches the cross-branch
+/// `git reset --hard <ref>` footgun that has wiped teammate worktrees —
+/// even when the verb is shell-quoted (`git rese''t --hard main`) or built
+/// via substitution. `git reset --hard HEAD~N` / `<sha>` stay allowed.
 pub fn teammate_forbidden_command(cmd: &str) -> Option<&'static str> {
     if !is_teammate_process() {
         return None;
     }
-    let lower = cmd.to_lowercase();
-    let collapsed: String = lower.split_whitespace().collect::<Vec<_>>().join(" ");
-    let padded = format!(" {collapsed} ");
+    teammate_block_reason(cmd)
+}
 
-    // Find `git reset --hard <ref>` and inspect the ref. Use the original
-    // (case-preserved) cmd to extract the ref so SHAs stay matchable.
-    if let Some(after) = padded.split(" git reset --hard ").nth(1) {
-        let target_lc = after.split_whitespace().next().unwrap_or("");
-        // Map back to the original-case token so a SHA passes the hex check.
-        let target_orig = cmd
-            .split_whitespace()
-            .skip_while(|t| t.to_lowercase() != "--hard")
-            .nth(1)
-            .unwrap_or(target_lc);
-        if ref_resets_to_different_branch(target_orig) {
-            return Some(
-                "reset to a different branch / remote ref — would discard your branch's commits and overwrite your worktree with someone else's tree. Use `git reset --hard HEAD~N` or `git reset --hard <sha>` if you genuinely need to undo your own commits, OR ask the lead to handle the merge instead",
-            );
+/// The teammate seatbelt decision, independent of the process-role flag so
+/// it's unit-testable without setting global state. See
+/// [`teammate_forbidden_command`].
+fn teammate_block_reason(cmd: &str) -> Option<&'static str> {
+    // Resolved forms (quote/order/wrapper/-c-defeating) + the raw command.
+    for tokens in effective_commands(cmd) {
+        if let Some(why) = teammate_reset_reason(&tokens) {
+            return Some(why);
         }
     }
-
+    if let Some(why) =
+        teammate_reset_reason(&cmd.split_whitespace().map(String::from).collect::<Vec<_>>())
+    {
+        return Some(why);
+    }
+    // Substitution we can't resolve, but a literal `--hard <cross-branch>`
+    // is still visible — refuse it.
+    if looks_obfuscated(cmd) {
+        if let Some(after) = cmd.split("--hard").nth(1) {
+            if let Some(reftok) = after.split_whitespace().next() {
+                if ref_resets_to_different_branch(reftok) {
+                    return Some(TEAMMATE_RESET_REASON);
+                }
+            }
+        }
+    }
     None
 }
 
 /// Commands the team lead must never run. Returns the human-readable reason
-/// (used in the error message) or None when allowed. Always None for non-lead
-/// processes — teammates legitimately use these inside their own worktrees.
+/// or None when allowed. Always None for non-lead processes — teammates
+/// legitimately use these inside their own worktrees. Shell-aware (#125):
+/// resolves quoting/order/wrappers and refuses obfuscated destructive forms.
 pub fn lead_forbidden_command(cmd: &str) -> Option<&'static str> {
     if !crate::team::is_team_lead() {
         return None;
     }
+    lead_block_reason(cmd)
+}
+
+/// The lead seatbelt decision, independent of the process-role flag so it's
+/// unit-testable without setting global state. See [`lead_forbidden_command`].
+fn lead_block_reason(cmd: &str) -> Option<&'static str> {
+    // 1) Unresolvable substitution carrying a destructive flag → refuse.
+    if looks_obfuscated(cmd) && has_destructive_signal(cmd) {
+        return Some(LEAD_OBFUSCATED);
+    }
+    // 2) Resolved segments: arg-order-proof `rm` check + the block table
+    //    against the canonical (quote/order/wrapper/-c-resolved) form.
+    for tokens in effective_commands(cmd) {
+        if rm_is_recursive(&tokens) {
+            return Some("destructively remove files");
+        }
+        let canon = format!(" {} ", tokens.join(" ").to_ascii_lowercase());
+        if let Some(why) = lead_blocked_in(&canon) {
+            return Some(why);
+        }
+    }
+    // 3) Raw substring fallback — never weaker than the pre-hardening guard.
     let collapsed: String = cmd
         .to_lowercase()
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    let lower = format!(" {collapsed} ");
-
-    let blocked: &[(&str, &str)] = &[
-        ("git reset --hard", "discard committed work via hard reset"),
-        ("git clean -f", "delete untracked files"),
-        ("git clean -d", "delete untracked directories"),
-        ("git push --force", "rewrite shared history with force-push"),
-        ("git push -f ", "rewrite shared history with force-push"),
-        ("git rebase", "rewrite committed history"),
-        (
-            "git worktree remove",
-            "kill a teammate's active worktree (and its process)",
-        ),
-        (
-            "git worktree prune",
-            "purge worktree metadata referenced by live teammates",
-        ),
-        ("git checkout -- ", "discard a teammate's uncommitted work"),
-        ("git checkout .", "discard a teammate's uncommitted work"),
-        (
-            "git restore --worktree",
-            "discard a teammate's uncommitted work",
-        ),
-        ("git restore .", "discard a teammate's uncommitted work"),
-        (
-            "git merge --abort",
-            "tear down a merge instead of resolving via the responsible teammate",
-        ),
-        ("rm -rf", "destructively remove files"),
-        ("rm -fr", "destructively remove files"),
-        ("rm -r ", "recursively remove files"),
-    ];
-
-    for (pat, why) in blocked {
-        if lower.contains(pat) {
-            return Some(why);
-        }
-    }
-    None
+    lead_blocked_in(&format!(" {collapsed} "))
 }
 
 pub fn is_destructive_command(cmd: &str) -> bool {
@@ -933,6 +1150,55 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    #[test]
+    fn split_shell_segments_handles_multibyte_utf8() {
+        // Regression for issue #141: the old byte-arithmetic version
+        // panicked here because `i += 1` walks into the middle of the
+        // 3-byte em-dash (U+2014, E2 80 94).
+        let cmd = "echo hello — world; ls";
+        let segs = split_shell_segments(cmd);
+        assert_eq!(
+            segs,
+            vec!["echo hello — world".to_string(), " ls".to_string()]
+        );
+
+        // And a few more exotic Unicode points to be sure: a 4-byte
+        // emoji (😀, U+1F600, F0 9F 98 80) right next to an operator.
+        let cmd = "echo 😀 | grep .";
+        let segs = split_shell_segments(cmd);
+        assert_eq!(segs, vec!["echo 😀 ".to_string(), " grep .".to_string()]);
+
+        // Mixed: Thai script (3-byte each) split by `&&`.
+        let cmd = "echo สวัสดี && echo world";
+        let segs = split_shell_segments(cmd);
+        assert_eq!(
+            segs,
+            vec!["echo สวัสดี ".to_string(), " echo world".to_string()]
+        );
+    }
+
+    #[test]
+    fn split_shell_segments_distinguishes_double_and_single_operators() {
+        // && and || vs single & and | — make sure the two-char check
+        // wins so neither operator gets corrupted.
+        assert_eq!(
+            split_shell_segments("a && b"),
+            vec!["a ".to_string(), " b".to_string()]
+        );
+        assert_eq!(
+            split_shell_segments("a || b"),
+            vec!["a ".to_string(), " b".to_string()]
+        );
+        assert_eq!(
+            split_shell_segments("a & b"),
+            vec!["a ".to_string(), " b".to_string()]
+        );
+        assert_eq!(
+            split_shell_segments("a | b"),
+            vec!["a ".to_string(), " b".to_string()]
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn echoes_stdout() {
@@ -1032,6 +1298,76 @@ mod tests {
         // Restore default so other tests that share this static aren't
         // surprised by lingering lead-mode behavior.
         crate::team::set_is_team_lead(false);
+    }
+
+    #[test]
+    fn lead_seatbelt_resists_shell_quoting() {
+        // thClaws#125: every PoC bypass that slipped past the old substring
+        // guard must now be blocked. Uses the gate-free decision helper so
+        // it doesn't depend on (or perturb) global team-lead state.
+        let blocked: &[&str] = &[
+            // controls
+            "rm -rf ../teammate",
+            "git reset --hard main",
+            // quote-splice / quoted verb / arg-order / line-continuation
+            "r''m -rf ../teammate",
+            "git rese''t --hard main",
+            "git \"reset\" --hard main",
+            "rm ../teammate -rf",
+            "rm \\\n  -rf ../teammate",
+            // substitution / expansion families
+            "r=rm; $r -rf ../teammate",
+            "${r:-rm} -rf ../teammate",
+            "$(printf rm) -rf ../teammate",
+            "`printf rm` -rf ../teammate",
+            "{rm,-rf,../teammate}",
+            "IFS=X; rm${IFS}-rf${IFS}../teammate",
+            "eval $'\\x72\\x6d -rf ../teammate'",
+            // sh -c / bash -c indirection
+            "sh -c 'rm -rf ../teammate'",
+            "bash -c \"git reset --hard main\"",
+            // wrapper prefixes
+            "sudo rm -rf /tmp/x",
+            "env FOO=bar rm -rf docs/",
+        ];
+        for cmd in blocked {
+            assert!(
+                lead_block_reason(cmd).is_some(),
+                "lead seatbelt should block: {cmd}"
+            );
+        }
+
+        // Must NOT over-block legitimate work (including obfuscated-but-
+        // harmless commands with no destructive signal).
+        let allowed: &[&str] = &[
+            "git status",
+            "git log --oneline -5",
+            "cargo build --release",
+            "echo $(date)",
+            "git diff $(git merge-base main HEAD)",
+            "rm notes.txt",
+            "npm run build",
+        ];
+        for cmd in allowed {
+            assert!(
+                lead_block_reason(cmd).is_none(),
+                "lead seatbelt should allow: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn teammate_seatbelt_resists_quoting() {
+        // Cross-branch hard reset, blocked even when the verb is quoted or
+        // built via substitution.
+        assert!(teammate_block_reason("git reset --hard main").is_some());
+        assert!(teammate_block_reason("git rese''t --hard main").is_some());
+        assert!(teammate_block_reason("git \"reset\" --hard origin/main").is_some());
+        assert!(teammate_block_reason("sh -c 'git reset --hard main'").is_some());
+        assert!(teammate_block_reason("git $(printf reset) --hard main").is_some());
+        // Same-branch recovery stays allowed.
+        assert!(teammate_block_reason("git reset --hard HEAD~2").is_none());
+        assert!(teammate_block_reason("git reset --hard d9199ba").is_none());
     }
 
     #[test]
@@ -1231,15 +1567,24 @@ mod tests {
     }
 
     #[test]
-    fn needs_venv_detects_pip_and_python_tools() {
+    fn needs_venv_detects_pip_and_server_tools() {
+        // v0.35.4 tightened needs_venv: only pip/poetry/uv installs +
+        // long-running server runners + pytest. Plain `python script.py`
+        // does NOT trigger venv auto-wrap (was producing spurious
+        // `[creating .venv]` warnings around agent-shipped stdlib
+        // scripts; the agent then mis-attributed them to the script).
         assert!(needs_venv("pip install fastapi"));
         assert!(needs_venv("pip3 install uvicorn"));
         assert!(needs_venv("uvicorn main:app --port 8000"));
         assert!(needs_venv("gunicorn app:app"));
         assert!(needs_venv("pytest tests/"));
         assert!(needs_venv("flask run"));
-        assert!(needs_venv("python app.py"));
-        assert!(needs_venv("python3 main.py"));
+        assert!(needs_venv("poetry install"));
+        assert!(needs_venv("uv pip install requests"));
+        // Plain python invocations — explicitly NOT venv-wrapped.
+        assert!(!needs_venv("python app.py"));
+        assert!(!needs_venv("python3 main.py"));
+        assert!(!needs_venv("python3 .thclaws/scripts/batch.py"));
         assert!(!needs_venv("echo hello"));
         assert!(!needs_venv("cargo build"));
         assert!(!needs_venv("npm install express"));
@@ -1557,5 +1902,62 @@ mod tests {
         assert!(wrapped.contains("source"));
         assert!(wrapped.contains("activate"));
         assert!(wrapped.contains("uvicorn main:app --port 8800"));
+    }
+
+    // Issue #119 reproduction. Mutates the GLOBAL sandbox root + spawns
+    // subprocesses, so it's #[ignore]d (would race the scheduler tests'
+    // posix_spawn under the parallel runner). Run explicitly:
+    //   cargo test --features gui -- --ignored --test-threads=1 repro_119
+    //
+    // Confirms which mechanism actually blocks the reporter's
+    // `<abs>/python.exe script.py`:
+    //   A) cwd OUTSIDE the workspace root → real sandbox denial.
+    //   B) absolute exe path IN the command (no cwd) → NOT checked; runs
+    //      and fails as an ordinary shell error (which the weak model
+    //      then paraphrased as "rejected by the security policy").
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore]
+    async fn repro_119_bash_sandbox_trigger() {
+        let ws = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        std::env::set_var("THCLAWS_PROJECT_ROOT", ws.path());
+        crate::sandbox::Sandbox::init().unwrap();
+
+        // A) cwd outside the workspace root → sandbox denies.
+        let a = BashTool
+            .call(json!({"command": "echo hi", "cwd": outside.path().to_str().unwrap()}))
+            .await;
+        eprintln!("[A cwd-outside] {a:?}");
+        let a_err = a.expect_err("cwd outside root must be denied");
+        let a_msg = format!("{a_err}");
+        assert!(
+            a_msg.contains("access denied") && a_msg.contains("outside the workspace root"),
+            "A should be the sandbox boundary error; got: {a_msg}"
+        );
+
+        // B) command runs with default root; the command STRING is not
+        //    path-checked, so an in-workspace echo just works.
+        let b = BashTool
+            .call(json!({"command": "echo IN_WS_OK"}))
+            .await
+            .expect("default-root command should run");
+        eprintln!("[B default-root] {b:?}");
+        assert!(b.contains("IN_WS_OK"));
+
+        // C) absolute exe path in the command, no cwd → NOT a sandbox
+        //    denial. It runs and fails as a plain shell error (exit
+        //    code / not found) — never "access denied".
+        let c = BashTool
+            .call(json!({"command": "/no/such/python_zzz_119 --version"}))
+            .await
+            .expect("a failing command returns Ok(output-with-exit-code), not Err");
+        eprintln!("[C abs-exe-no-cwd] {c:?}");
+        assert!(
+            !c.contains("access denied"),
+            "an absolute exe path in the command must NOT hit the sandbox; got: {c}"
+        );
+
+        std::env::remove_var("THCLAWS_PROJECT_ROOT");
     }
 }

@@ -7,29 +7,1342 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.67.0] - 2026-06-17
+
+### Added
+- **Provider tiers — Featured vs Additional.** The ten first-class providers (OpenAI, Anthropic, Gemini, xAI, DeepSeek, DashScope, Moonshot/Kimi, z.ai, MiniMax, OpenRouter) are now grouped as **Featured** and listed before everything else in the model picker and `/providers`. On thClaws.cloud, gateway-routed sessions show only Featured providers (the gateway-routable set); bring-your-own-key sessions still see the full catalogue. Featured-provider pricing is enforced to come from an official source (the provider's own pricing API, LiteLLM, or a vendor pricing page) — a missing price is now a release-blocking error instead of a silent placeholder.
+- **The `--serve` web UI is now mobile-friendly.** Opening a thClaws server from a phone browser gets a real mobile layout: the sidebar becomes a slide-in drawer (hamburger in the tab bar), the tab strip scrolls and collapses to icons, the Files view stacks tree-over-editor, modals fit narrow screens, touch targets are larger, text inputs no longer trigger iOS zoom-on-focus, and the terminal accepts a tap to bring up the on-screen keyboard.
+
+### Changed
+- **Removed the `agentic-press` provider.** Its `ap/` model ids no longer resolve.
+
+### Fixed
+- **`openrouter/fusion+` works from `/model` and the picker** ([#167](https://github.com/thClaws/thClaws/issues/167)). `/model openrouter/fusion+` in the CLI/terminal no longer reports "unknown model", and selecting `openrouter/fusion+` from the `/model ` popup now opens the Fusion config modal (matching the sidebar picker).
+- **Mobile Chrome no longer clips the layout** ([#168](https://github.com/thClaws/thClaws/issues/168)). The root container uses `100dvh`, so the tab bar and input aren't hidden behind the browser address bar.
+- **Browser/Shell tabs appear over high-latency connections.** Their visibility flags now ride the initial-state push the server sends on every (re)connect, instead of a mount-time request that a slow WebSocket (e.g. through a tunnel) could silently drop.
+- **`zai/glm-5.2` reports its real 1M context** ([#161](https://github.com/thClaws/thClaws/issues/161)) instead of the 131k provider-default fallback.
+
+## [0.66.0] - 2026-06-17
+
+### Added
+- **Two new providers — Moonshot AI (Kimi) and xAI (Grok).** Both are OpenAI-compatible and desktop-direct (bring your own key): drop `MOONSHOT_API_KEY` / `XAI_API_KEY` into Settings, then `/model moonshot/kimi-k2.6` or `/model xai/grok-4.3` (bare `grok-*` ids route too). New Kimi / Grok releases are picked up automatically by the catalogue refresh.
+- **Credential-aware default provider.** On a fresh start — when no model is explicitly pinned — thClaws now selects the first provider you actually have a key (or gateway route) for, in order DashScope → OpenAI → Anthropic, instead of always defaulting to Anthropic.
+
+### Changed
+- **Refreshed per-provider default models:** DashScope → `qwen3.7-max`, OpenAI → `gpt-4.1`, Gemini → `gemini-3.5-flash`, z.ai → `glm-5.2`. These apply both to the startup default and to `/provider <name>` switches.
+- **`make catalogue` now discovers z.ai, Moonshot, and xAI** from their live `/v1/models`, so new GLM / Kimi / Grok models appear without a hand-edit (z.ai was previously missing entirely — `glm-5.2` never showed up).
+
+### Fixed
+- **Shell tab accepts keyboard input immediately on tab switch** ([#166](https://github.com/thClaws/thClaws/issues/166)). Under the wry/Chromium webview the just-unhidden terminal wasn't reliably focusable in the same frame, so keystrokes were silently dropped until you clicked inside it. Focus is now deferred a frame (with explicit click-to-focus as a fallback).
+
+## [0.65.0] - 2026-06-17
+
+### Added
+- **Multiuser `--serve` mode** (dev-plan/42). `thclaws --serve --multiuser` hosts many authenticated users from one pod, each in their own `workspace-<id>/` working directory with isolated session history and files. The agent definition (AGENTS.md, KMS, skills, MCP config) is seeded read-only per user; HMAC-signed `X-Thclaws-User` identity routes every request — and every tool's path resolution — to the right per-user session; the gateway is forced (no BYOK). This powers thClaws.cloud **workspace sharing**: one owner-billed pod, many guests; the owner edits the agent and publishes updates to everyone, and guests can wake a sleeping shared workspace themselves.
+
+### Fixed
+- **Clear error when an image is sent to a text-only model** ([#164](https://github.com/thClaws/thClaws/issues/164)). Reading an image or an image/scanned PDF (e.g. `PdfRead` rendering blueprint pages) and feeding it to a model that can't see images (DeepSeek v4, most non-`-vl` Qwen, etc.) previously failed with a bare upstream `HTTP 400`. The OpenAI-compatible provider now detects image content in a rejected request and appends an actionable hint — switch to a vision model (e.g. `dashscope/qwen3-vl-plus`), or extract the PDF/image to text/KMS first and query that.
+
+## [0.64.0] - 2026-06-16
+
+### Fixed
+- **Telegram: recover a stuck conversation without restarting** ([#164](https://github.com/thClaws/thClaws/issues/164)). When a provider error (e.g. HTTP 400 once the history grows too large) kept replaying every turn, the only fix was killing `thclaws --telegram` from the console. You can now send `/new` (or `/reset` / `/clear`) in the chat to wipe that agent's conversation and start fresh. Tolerates the group-mention suffix (`/reset@yourbot`).
+
+## [0.63.0] - 2026-06-15
+
+Engine support for thClaws.cloud **shared agents** (company-owned agents
+several people use). Cloud-only and fully dormant on desktop — running
+locally is unchanged.
+
+### Added
+- **Shared-agent mode** (activated by `THCLAWS_SHARED_AGENT_DIR`, set only
+  by the hosted runtime): instructions lock to the company `AGENTS.md`,
+  the KMS mounts read-only, the gateway is forced (no BYOK), and member
+  scopes (`~/.config/thclaws`, `~/.claude`, working dir) are ignored, so a
+  member can't override the company agent. Skills/commands/MCP load from
+  the shared brain (with optional strict mode). All of this is gated on
+  that env var being set — when it isn't (every desktop install), config,
+  instruction, KMS, skill/command, and provider resolution behave exactly
+  as before.
+
+(The cloud control-plane half of shared agents — the dashboard, launch,
+brain upload, members, and billing — lives in the thClaws.cloud service,
+not this binary.)
+
+## [0.62.0] - 2026-06-15
+
+KMS ↔ Open Knowledge Format (OKF) interchange.
+
+### Added
+- **Import/export KMS as OKF bundles.** New `/kms export-okf <name> [<out-dir>]` writes a knowledge base as a conformant [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog) v0.1 bundle (defaults to `./<name>-okf/`); `/kms import-okf <bundle-dir> <name> [--project]` creates a new KMS from any OKF bundle. OKF is Google's open spec for knowledge-as-markdown — the same "LLM wiki" shape a KMS already uses — so this is a clean round-trip for shipping a KMS across teams/agents or pulling external bundles in. It's an adapter, not a storage change: the on-disk KMS format is unchanged.
+- **OKF import/export from the sidebar.** Right-click the desktop sidebar's **Knowledge** section header for "Import OKF bundle…" (name + scope, then a native folder picker) and per-KMS "Export OKF bundle" (native folder picker). A status line confirms the result; imports refresh the KMS list immediately.
+
+The adapter maps `category:`↔`type:`, `topic:`↔`description:`, comma `tags`↔YAML list, `sources/`↔`references/`, and converts `[[wikilinks]]` to markdown links on export; KMS-specific frontmatter rides along verbatim so round-trips are lossless. Import is permissive per the OKF spec (tolerates unknown types, missing fields, broken links, and concepts anywhere in the tree).
+
+## [0.61.0] - 2026-06-14
+
+OpenRouter Fusion: fixed, plus a configurable variant with a GUI panel.
+
+### Added
+- **`openrouter/fusion+` — configurable OpenRouter Fusion.** Selecting it in the model picker opens a config modal to tune the deliberation panel: `analysis_models` (1–8 panel models), judge model, outer/orchestrator model, `max_tool_calls`, `max_completion_tokens`, `temperature`, reasoning effort, and `tool_choice` (`auto` — coexists with the agent's own tools — or `required`). The engine calls the outer model with the `openrouter:fusion` tool attached, carrying these parameters; unset fields fall through to OpenRouter's defaults. Config persists to `.thclaws/settings.json` under `openrouterFusion`, so it works headless / `--serve` too, not just the GUI.
+
+### Fixed
+- **`openrouter/fusion` and `openrouter/auto` 404'd with "No endpoints found that support tool use".** thClaws stores OpenRouter ids as `openrouter/<vendor>/<model>` and strips the leading `openrouter/` before the wire call — but these router models' vendor *is* `openrouter`, so stripping sent the vendor-less `fusion`/`auto`, which routes to nothing that supports tools. The prefix is now kept when stripping would leave a bare single segment (a real OpenRouter id is always `vendor/model`). Other providers' prefixes (`lmstudio/`, `dashscope/`, …) are unaffected.
+
+## [0.60.0] - 2026-06-14
+
+More providers + media models, and a batch of Linux team/serve fixes.
+
+### Added
+- **TokenRouter provider** ([#162](https://github.com/thClaws/thClaws/issues/162)) — first-class, OpenAI-compatible access to TokenRouter's unified gateway (300+ models). Use `tokenrouter/<vendor>/<model>` (e.g. `tokenrouter/anthropic/claude-opus-4.7`); key `TOKENROUTER_API_KEY`, base overridable via `TOKENROUTER_BASE_URL`. Models populate the picker beyond the generic `oai/` slot.
+- **HappyHorse video models (DashScope).** `happyhorse-1.0-t2v` (text→video) and `happyhorse-1.0-i2v` (image→video) added to `TextToVideo` / `ImageToVideo` and the Media Studio shell, with a 720P/1080P `resolution` option. Needs `DASHSCOPE_API_KEY`. Local source images for i2v are sent inline (base64 data URI) — no upload step.
+
+### Fixed
+- **Team + serve mode on Linux** ([#163](https://github.com/thClaws/thClaws/issues/163)): (1) response text no longer vanishes under multi-subscriber streaming — the `ViewEvent` broadcast buffer was 256, now 2048, and lag is logged in the forwarders instead of dropped silently; (2) teammate cleanup `pkill -f -- "--team-dir …"` now works (the leading `--` was being parsed as an option — broke on Linux *and* macOS); (3) reasoning-only assistant turns serialize `content: ""` so OpenAI-compatible providers (DeepSeek, …) don't reject them with HTTP 400.
+- **Media Studio source-image picker.** Clicking a gallery image in Image Edit / Image → Video now sets it as the source (the "click a gallery item" hint finally does something).
+
+## [0.59.0] - 2026-06-14
+
+Built-in media generation — multi-provider image + video tools, plus a Media Studio GUI shell to drive them.
+
+### Added
+- **Provider-abstracted image tools.** `TextToImage` / `ImageToImage` are no longer Gemini-only — choose `flash`/`pro` (Gemini), `gpt-image-2` (OpenAI), or `qwen-image-2.0` / `-pro` (Alibaba Qwen, strong at multi-image edits + text rendering). The provider is inferred from the model.
+- **Built-in video tools.** New `TextToVideo` / `ImageToVideo` (Veo 3.1 fast/quality/lite) with an async submit→poll job model and a `MediaJobStatus` tool. Jobs persist to `.thclaws/media-jobs.jsonl` and resume across restarts; clips land in `output/vid-*.mp4`.
+- **Media Studio GUI shell.** A built-in shell (UI tab) for image + video: mode switch (text→image / image edit / text→video / image→video), provider + model picker, parameters, and a gallery with a lightbox. The gallery is disk-backed — it shows everything under `output/`, newest first, not just the current session.
+- **Theme-aware GUI shells.** chatbot, session-explorer, and Media Studio now follow the app's Light/Dark/System theme (the shell bridge exposes `thclaws.ui.theme` / `onTheme` and mirrors it onto `data-theme`). A starter template (`thclaws-gui-shell-template`) ships the correct pattern for new shells.
+
+### Changed
+- **Media tools are opt-in via `mediaToolsEnabled`** (alias of the legacy `imageToolsEnabled`; the flag now covers image *and* video) — but the Media Studio shell auto-enables them, so it works without toggling settings.
+- **GUI shells can drive tools through the approval flow.** A shell's `callTool` for a tool that costs money now raises the normal approval modal instead of being rejected outright.
+
+### Fixed
+- **Veo `durationSeconds` clamped to 4–8** — the API rejects values outside that range (a 2s request 400'd).
+- **Media Studio readability.** A lightbox backdrop with `display: flex` outranked its `hidden` attribute and dimmed the entire shell; it's now gated on the attribute.
+- **Clearer image-gen errors.** A Gemini "HTTP 200 but no image" now reports the `finishReason` / safety-block / raw body instead of an opaque "missing parts".
+
+## [0.58.0] - 2026-06-14
+
+### Added
+- **Settings-menu side flyouts.** The Instructions (Global / Folder
+  AGENTS.md), channel connectors (LINE / Telegram / Messenger), and
+  Appearance (Light / Dark / System) groups now fan out into compact
+  left-side popups instead of taking a row each — a much shorter menu.
+
+### Changed
+- **Default startup tab is now Chat** (was Terminal). Agents that pin a
+  tab via `guiShell.tabDefault` (e.g. a gui-shell workspace) still open
+  to their shell.
+- **Files tab resolves per-user subdomain URLs.** `workspacePrefix` now
+  derives the file-asset prefix for hosted workspaces served at
+  `<handle>.thclaws.cloud/<slug>/`, in addition to the legacy
+  `/u/<handle>/<slug>/` path scheme — so chapter images and other
+  relative assets load correctly under either URL form.
+
+## [0.56.0] - 2026-06-14
+
+### Added
+- **EPUB preview in the Files tab.** `.epub` files now render in-app via
+  epub.js — scroll-per-chapter with Prev/Next and arrow-key navigation, a
+  chapter label, and light/dark theming. Previously an EPUB opened as
+  "Error reading file" (it is a zipped XHTML bundle, not text); the backend
+  now serves it off `/file-asset` like PDF/audio/video.
+- **`PdfCreate` / `EpubCreate` font option.** Both tools accept
+  `font: "sans"` (default — Noto Sans + Noto Sans Thai) or `"serif"`
+  (Noto Serif + Noto Serif Thai). The serif faces ship with full Thai
+  shaping (GSUB/GPOS) for long-form / book typography; the PDF embeds the
+  chosen family and the EPUB switches its `@font-face` set accordingly.
+
+### Security
+- **Bumped `@xmldom/xmldom` to 0.8.13** (transitive via `epubjs`), fixing
+  five high-severity advisories — an uncontrolled-recursion DoS and several
+  XML-injection serialization issues — present in the pinned 0.7.13.
+
+## [0.54.0] - 2026-06-13
+
+### Fixed
+- **Browser tab chat sidebar now handles `AskUserQuestion`.** When the
+  model asked a question during a turn driven from the Browser tab's
+  sidebar, the sidebar ignored the prompt — the question never showed
+  and the turn hung with no way to answer. The sidebar now surfaces the
+  question and routes the next input to the pending-ask responder
+  (mirroring the Chat tab).
+
+### Changed
+- **Browser content extraction prefers the page snapshot over
+  screenshots.** When the browser tools are active, the model is now
+  steered to use `browser_snapshot` (the page's text / accessibility
+  tree) as the primary source for reading or extracting content —
+  translating headlines, scraping lists, pulling article text — and to
+  fall back to `browser_take_screenshot` only for visual-only content
+  (charts, canvases, image-embedded text). Reading text off pixels was
+  slower, lossier, and mis-read characters.
+
+## [0.53.0] - 2026-06-13
+
+### Fixed
+- **Browser automation now works reliably after the first run.** On
+  machines without Playwright's own Chromium installed, the engine fell
+  back to driving *branded* Google Chrome over CDP, which intermittently
+  failed playwright-mcp's init with `protocol error
+  (Browser.setDownloadBehavior): Browser context management is not
+  supported` — so every browse after the first failed until a restart.
+  The engine no longer hands a branded browser to the CDP live-view path
+  by default; playwright-mcp self-launches its own browser (reliable).
+  Opt back into branded-over-CDP with `THCLAWS_BROWSER_ALLOW_BRANDED=1`;
+  the live view / takeover otherwise uses Playwright's own Chromium
+  (`npx playwright install chromium`).
+- The engine-owned Chromium is now killed on quit (with a cookie flush)
+  instead of orphaning, and a stray orphan from a previous run is reaped
+  on the next launch rather than re-attached to.
+
+### Added
+- **Wider default browser viewport** — sessions render at desktop-width
+  1920×1080 instead of playwright-mcp's narrow 1280×720 default.
+  Override with `THCLAWS_BROWSER_VIEWPORT="W,H"`.
+- Browser automation chapter in the user manual (EN + Thai) and a
+  `browser.md` engine-internals topic in the technical manual.
+
+## [0.52.0] - 2026-06-13
+
+### Added
+- **Browser cookies/logins persist across restarts.** The
+  engine-owned Chromium profile survives browser and (cloud) pod
+  restarts — on cloud the profile moves to the workspace PVC, and a CDP
+  cookie snapshot/restore (`Storage.getCookies`/`setCookies`) closes
+  chromium's ~30s on-disk-flush window so a login isn't lost to an
+  abrupt kill. The profile is stripped from agent publishing, so
+  cookies never leak into a shared agent.
+- **opencode-go**: `minimax-m3`, `qwen3.7-max`, `qwen3.7-plus` added to
+  the wire-format routing tables (thanks @modtanoii, #158).
+- Server-level integration tests for the `/upload?dir=` endpoint —
+  subdir routing, collision suffix, path-traversal rejection (thanks
+  @modtanoii, #159).
+
+### Fixed
+- **Headless Telegram now honours `auto` permissions (#160).**
+  `thclaws --telegram` hardcoded approval-routing (`telegramgated`), so
+  `--accept-all` / `--permission-mode auto` / `settings.json
+  permissions:auto` were all silently ignored and every tool call
+  demanded an inline-button tap — no-prompt auto was impossible. It now
+  resolves the mode from config; explicit `auto` runs with no prompts.
+  Also: the CLI REPL's `/permissions auto|ask` now persists to
+  `.thclaws/settings.json` (matching the GUI), so the setting survives
+  a restart.
+- `browser_cdp` is no longer behind the `gui` feature — it was
+  referenced unconditionally by `mcp.rs`/`config.rs`, breaking the
+  `thclaws-cli` build.
+
+## [0.51.0] - 2026-06-12
+
+### Added
+- **Live browser view + native input (CDP, docs/browser slice 3).**
+  The engine now owns Chromium: at browser-MCP bootstrap it reserves a
+  DevTools endpoint and hands playwright-mcp `--cdp-endpoint`, so the
+  agent's tools and the human share ONE browser. Chromium itself
+  launches lazily — on the first browser tool call or takeover — so a
+  headed desktop doesn't pop a window at app start and an idle cloud
+  pod pays nothing. The engine's own CDP session powers the Browser
+  tab when takeover is on:
+  - `Page.startScreencast` → a true live view (JPEG stream,
+    ack-backpressured) instead of ~1 fps click-through screenshots
+  - `Input.dispatchMouseEvent` / `Input.insertText` /
+    `dispatchKeyEvent` → native click / scroll / whole-string typing
+  - `Runtime` console + exception events and top-frame navigations
+    stream into the activity feed / URL line
+  - the engine re-attaches to a still-running Chromium after a
+    restart (DevTools endpoint persisted next to the profile), so
+    logins survive engine restarts; profiles live OUTSIDE the
+    workspace so sessions can never leak into a published agent
+  - graceful fallback everywhere: no Chromium found / CDP launch
+    failure → playwright-mcp self-launches and the screenshot +
+    MCP-input takeover keeps working; `THCLAWS_BROWSER_CDP=0`
+    disables the whole mode
+
+### Added
+- **Vision models can now SEE MCP tool images** — most importantly
+  `browser_take_screenshot`. `McpTool` gained a `call_multimodal`
+  override that preserves `{type:"image"}` content blocks (the plain
+  text path silently dropped them), so the agent can read canvases,
+  charts, and visual layouts the accessibility snapshot can't express.
+  5 MB per-result image cap (oversize degrades to a text note);
+  text-only MCP results behave exactly as before; non-multimodal
+  providers still get the text blocks.
+
+## [0.50.0] - 2026-06-12
+
+### Added
+- **Browser tab: interactive takeover (Phase 2 slice 2).** A "🖱 Take
+  over" toggle makes the screenshot panel a remote control for the
+  managed browser — click anywhere on the page (object-contain-aware
+  coordinate mapping), scroll with the wheel, type into the focused
+  field, press Enter/Tab/Esc/⌫, and navigate via a URL bar — so cloud
+  users can log into sites themselves before handing the session to
+  the agent. Backed by a new `browser_input_call` IPC arm with a
+  STRICT tool allowlist (coordinate input + navigation only; no
+  evaluate/run_code/file_upload) running directly on the managed MCP
+  client, and the managed server now starts with `--caps=vision` for
+  the coordinate tools. Verified end-to-end: click → per-char typing
+  fires real input events → screenshot reflects the page.
+
+### Changed
+- **Browser automation is ON by default** (`browserEnabled` defaults to
+  `true`). Every workspace gets the managed Playwright browser + the
+  Browser tab without configuration. Graceful where it can't work: the
+  injection is skipped when the launch command isn't on PATH (node-less
+  desktops see the tab's setup hint instead of per-session spawn
+  errors), and `"browserEnabled": false` opts out entirely.
+
+### Fixed
+- Cloud runner image: the managed browser server is pinned to the
+  playwright-bundled chromium (`--browser chromium`) — playwright-mcp
+  defaults to branded Google Chrome, which isn't in the image — and
+  the server binary name is `playwright-mcp` (the package renamed its
+  bin from `mcp-server-playwright`).
+
+## [0.49.0] - 2026-06-12
+
+### Added
+- **Cloud browser automation (docs/browser Phase 2, slice 1).** The
+  runner image now ships a working browser stack: `@playwright/mcp`
+  preinstalled (no npm-registry hit per pod cold start), chromium
+  installed to a shared `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`
+  readable by the runtime user (previously root-only — the existing
+  playwright install was unusable from pods), and
+  `THCLAWS_BROWSER_MCP_CMD=mcp-server-playwright --no-sandbox` so the
+  engine launches the image-pinned server. Engine honours that env as
+  a full launch-command override (desktop default stays
+  `npx -y @playwright/mcp@latest`); `--headless` is auto-appended on
+  displayless environments. With `browserEnabled` in a cloud
+  workspace's settings, the Browser tab's screenshot panel becomes the
+  headless browser's window. Live interactive takeover (CDP screencast
+  + remote input) is the next slice.
+- **Engine-managed browser automation (Playwright MCP, Phase 0+1).**
+  `"browserEnabled": true` in settings.json injects the official
+  `@playwright/mcp` server as an engine-managed MCP config — the agent
+  gains 23 `browser__*` tools (navigate / click / type / snapshot /
+  network / …) with no `/mcp add` and no first-spawn prompt (the
+  `engine_managed` flag is serde-skipped, so a cloned repo's mcp.json
+  can never claim the bypass). Headed by default on desktop — a real
+  Chromium window beside the app, browse normally and let the agent
+  take over — headless automatically on cloud runners / displayless
+  Linux (`browserHeadless` overrides). New **Browser tab** (visible
+  only when enabled) shows the managed-server status, an npx setup
+  hint, and a live feed of every browser tool call + result. Requires
+  Node.js (`npx`) on PATH.
+- **Browser tab: chat sidebar + live page screenshots.** A compact
+  agent chat docked in the tab (same conversation as Chat — direct the
+  takeover without switching tabs), and a screenshot panel that
+  auto-captures ~1s after each browser action (plus a manual 📷
+  button). Captures run directly on the managed MCP client over a new
+  `browser_screenshot_get` IPC arm — no agent loop, no tokens, works
+  mid-turn — via `McpClient::call_tool_raw`, which preserves the image
+  content blocks the text path drops.
+
+## [0.48.0] - 2026-06-11
+
+### Added
+- **`/upload?dir=` — dir-targeted, silent file staging.** The serve
+  upload endpoint now accepts an optional `?dir=<rel>` query param that
+  writes the upload into a specific workspace subfolder (sandboxed
+  against escape) instead of `uploads/`, and skips the chat-turn
+  synthesis. Lets a GUI shell stage files for itself — e.g.
+  book-author's new Sources tab dropping the author's notes straight
+  into `raw/` — without the agent reacting to the drop. Default (no
+  `dir`) behavior is unchanged.
+
+## [0.47.0] - 2026-06-11
+
+### Added
+- **EpubCreate** — new native tool rendering markdown to a reflowable
+  EPUB 3 e-book: chapter splitting at headings (each H1 → its own
+  spine item + navigation entry), markdown→XHTML (GFM tables,
+  strikethrough, task lists, footnotes), embedded images, optional
+  cover, EPUB 3 `nav.xhtml` + EPUB 2 `toc.ncx` fallback, and embedded
+  Noto Sans + Noto Sans Thai (`@font-face`) so Thai renders on readers
+  with no Thai font. Validated against the official EPUBCheck (3.3).
+- **GUI shell `thclaws.ui.*` bridge API** — full-screen integration for
+  shell authors: `exitFullscreen()`, `claimExitControl()`,
+  `onFullscreen(cb)`, `isFullscreen`. A shell can render its own
+  full-screen exit control and have the host suppress its fallback chip.
+
+### Changed
+- **Full-screen UI exit no longer occludes the shell.** The host's exit
+  affordance was a fixed top-right chip permanently covering the shell's
+  corner. Now: a brief auto-dismissing toast names the ⌘⇧U/Ctrl⇧U escape
+  on entry, and the clickable fallback chip is revealed only on
+  top-right hot-corner hover. The keyboard escape stays host-owned. All
+  built-in shells (chatbot, session-explorer) render their own header
+  exit button via the new API.
+
+### Fixed
+- pdf_create module docs: dropped the stale "no OpenType shaping" note —
+  v2 shapes every run through rustybuzz (GSUB/GPOS).
+
+## [0.46.0] - 2026-06-11
+
+### Added
+- **PdfCreate v2** — book-quality markdown→PDF: HarfBuzz (rustybuzz)
+  text shaping so Thai stacked tone marks render correctly, ICU4X
+  Thai word-boundary line breaking, real glyph metrics, embedded
+  Noto Sans Bold/Italic + Noto Sans Thai Bold, bordered GFM tables,
+  lists with hanging indents, blockquote bars, shaded code blocks,
+  centered fit-width images with alt-text captions, `n / N` page
+  footers, Thai-readable (UTF-16) PDF outline bookmarks.
+- PdfCreate `content_path` input — render a markdown file directly
+  (books never round-trip through the model context); relative image
+  paths resolve against the file's directory. `page_break_h1` starts
+  each chapter on a fresh page; `outline_depth` controls the sidebar
+  (default: chapters only).
+- WorkflowRun `script_path` input — execute pre-authored agent
+  workflow scripts (book-author `/draft-all-parallel`) without the
+  authoring step.
+- Native Gemini image tools route through the thClaws Gateway on
+  hosted runners, sniff the actual image format (PNG/JPEG/WEBP), and
+  register on every surface (GUI, serve, REPL, print mode, workflow
+  workers); they also follow `imageToolsEnabled` across config
+  reloads.
+- Gateway overlay covers every cloud-routable provider (DashScope,
+  Qwen-Cloud, Z.ai, DeepSeek, MiniMax, ThaiLLM) with strict
+  catalogue-priced metering; unpriced models are hidden from model
+  pickers when gateway-routed.
+
+### Fixed
+- Files tab: PDFs render inline (served as `application/pdf` off
+  `/file-asset`), markdown-preview images load on hosted workspaces,
+  and the session sidebar survives fullscreen remounts.
+- Engine no longer requires a native provider API key when the
+  gateway overlay carries the credential.
+
+
+## [0.45.0] — 2026-06-09
+
+Security hardening on the gui-shell bridge — defence-in-depth that
+closes a script-breakout vector — plus a sweep of community-facing
+housekeeping: 24 retroactive entries on CONTRIBUTORS.md and the v0.32
+landing-page callout finally retired.
+
+### Security
+
+- **gui-shell: escape `</` in injected values to prevent HTML script
+  breakout ([#157](https://github.com/thClaws/thClaws/pull/157)).**
+  `inject_inline_bridge_with_id` and `inject_mode_b_head_with`
+  splice JSON-serialized values (`shell_id`, `session_id`, `ws_url`)
+  into `<script>` tags. JSON-escaping handles quotes and backslashes
+  but does NOT escape `</`, and the HTML tokenizer scans for the
+  literal byte sequence `</script>` regardless of JS-level escaping.
+  A shell manifest containing `</script>` in its `id` could close
+  the injected `<script>` tag prematurely and break out. Fix: post-
+  JSON `.replace("</", "<\/")` on every injected value plus the
+  bridge runtime — `<\/` is invisible to the HTML tokenizer, valid
+  JSON, and byte-equal to `</` in JS at runtime. Real (if low-
+  severity) defence on the `--serve` and hosted-cloud surfaces; the
+  marketplace gui-shells story makes this matter more over time.
+  PR by @JonusNattapong.
+
+### Changed
+
+- **README + landing page: retired the "new in v0.32" callout.**
+  The Shell-tab + Claude-Code-inside-thClaws callout had been the
+  top of the README and `thclaws.ai` landing page for 12 versions
+  — "new in v0.32" stopped reading as fresh ten releases ago. The
+  Shell story is permanent product surface and is covered in the
+  Features section and ch26 of the manual. Replaced with the
+  existing showcase as the first content section.
+
+### Community
+
+- **24 retroactive contributor credits.** CONTRIBUTORS.md was 5
+  entries deep but the merged-PR graph showed roughly five times
+  that. Audited every login on every merged PR and backfilled 22
+  PR senders in chronological order (oldest: @bombman's PR #2;
+  biggest counts: @parintorns 9 PRs, @siharat-th 8 PRs). Also
+  credited @triok-t (co-author on PR #16) and @dome (PR #110
+  closed → adopted into #113 by @mozeal). 29 community
+  contributors listed now. Thank-you comments posted on each
+  new contributor's most recent merged PR.
+
+## [0.44.0] — 2026-06-09
+
+DashScope routing fix — the model picker, the catalogue, and the
+engine's prefix detection finally agree on `dashscope/<model>` as
+the canonical form.
+
 ### Fixed
 
-- **Windows `--cli` readline whitespace and cursor offset.** Interactive
-  REPL input on Windows mishandled spaces and put the cursor in the wrong
-  column inside PowerShell / `cmd.exe`. Two root causes: the binary was
-  built with `#![windows_subsystem = "windows"]` and called
-  `AttachConsole(ATTACH_PARENT_PROCESS)` at startup, which detached stdio
-  from the parent terminal before rustyline could read keys; and the cyan
-  ANSI escapes embedded directly in the prompt string confused rustyline's
-  column accounting on Windows.
-  - Removed the `windows_subsystem = "windows"` attribute on
-    `crates/core/src/bin/app.rs` so the binary defaults to the console
-    subsystem and `--cli` keeps a working stdio.
-  - Replaced startup-wide `AttachConsole` with a GUI-only
-    `detach_console_for_gui()` that calls `FreeConsole()` immediately
-    before `gui::run_gui()`. Double-clicking still hides the console; the
-    REPL keeps it.
-  - Added `readline_config()` that sets `rustyline::Behavior::PreferTerm`
-    on Windows.
-  - Moved prompt coloring out of the prompt string into a
-    `highlight_prompt` impl on `SlashCompleter`, and routed the prompt
-    through a single `REPL_PROMPT` constant used by `readline()`, the
-    team-inbox reprint, and the turn-start log line.
+- **DashScope model picker double-prefix bug
+  ([#156](https://github.com/thClaws/thClaws/issues/156)).** The
+  catalogue stored DashScope rows with a `dashscope/` prefix so
+  heterogeneous Alibaba-hosted families (qwen, deepseek, glm, kimi,
+  qwq) all route through one provider, but `ProviderKind::detect()`
+  had no `dashscope/` arm — it only matched bare `qwen*`/`qwq-*`.
+  Three knock-on bugs: `/model dashscope/qwen-max` failed with
+  "unknown model provider"; the sidebar picker double-prefixed to
+  `dashscope/dashscope/qwen-flash` when switching across providers;
+  `/provider dashscope` warned "no catalogue entry for 'qwen-max'"
+  because catalogue keys were prefixed but the default was bare.
+  Brought DashScope in line with the established prefix-routing
+  pattern (`zai/`, `qc/`, `ap/`, `oai/`, `lmstudio/`): added the
+  `dashscope/` arm to `detect()`, moved the default model to
+  `dashscope/qwen-max`, and `with_strip_model_prefix("dashscope/")`
+  on the provider strips the prefix before reaching Alibaba's
+  upstream. Bare `qwen-*`/`qwq-*` ids still route to DashScope for
+  backward compat with pre-prefix settings. Reported by @pok29dev
+  with the load-bearing pointer that `dashscope/<model>` was the
+  right canonical shape.
+
+### Changed
+
+- **Docs: `thclaws cloud …` CLI surface marked deprecated.** The
+  engine removed every `thclaws cloud …` shell subcommand back at
+  v0.36; ch27 of the user manual (English + Thai) had been showing
+  the old CLI all along. Rewritten to the in-session `/cloud` slash
+  flow. Settings → thClaws.cloud paste-in-GUI is the only auth
+  surface; every other op runs as a slash command inside an open
+  session.
+
+### Community
+
+- **@pok29dev added to [CONTRIBUTORS.md](CONTRIBUTORS.md)** for
+  the DashScope picker bug report (#156).
+
+## [0.43.0] — 2026-06-09
+
+Catalog-policy reversal + Asian-provider pricing fill-in. The picker
+now shows every model the engine can route to (matches pre-v0.41
+behaviour) and dashscope-hosted families finally get a price tag
+instead of an empty cost column.
+
+### Changed
+
+- **Model picker shows every routable model again.** v0.41.0
+  introduced an `is_listable()` filter that hid catalogue rows
+  without published pricing from the sidebar / `/model` / `/models`
+  / `/v1/models`. v0.42.0 propagated it to the last hold-out
+  (`build_all_models_payload`). End result: dashscope alone lost
+  98 chat models from the picker — entire families (qwen-coder-plus,
+  qwen-flash, deepseek-v4-*, kimi-k2.6, qwen-mt-*) that work fine
+  for BYOK users were invisible. Reversed: the only filter on the
+  picker is `chat != Some(false)` again. Missing pricing means the
+  catalogue refresh has a gap to fill, not that the model is
+  unusable. Cloud-gateway-routed traffic still gets a strict 400
+  reject when the cloud `model_pricing` table is missing a row —
+  bill-shock guard intact, just not surfaced as a picker filter.
+
+### Fixed
+
+- **Asian-provider pricing fill-in.** Added
+  `MANUAL_PRICING_OVERRIDES` to `scripts/refresh-model-catalogue.py`
+  for dashscope-hosted models LiteLLM doesn't track — sourced from
+  https://www.alibabacloud.com/help/en/model-studio/model-pricing
+  (International tier, highest token-band for a safe upper bound).
+  Longest-prefix matching so dated variants
+  (`qwen3-max-2025-09-23`) pick up their base family's price
+  without enumerating every dated id. dashscope priced coverage
+  jumped from 11/109 → 39/109 in one refresh: qwen-max, qwen-plus,
+  qwen-turbo, qwen-flash, qwen3-max, qwen3-coder-plus/flash,
+  qwen3-vl-flash, deepseek-v3.2, kimi-k2.6, glm-5.1, qwq-plus.
+
+- **Sidebar showed models that `/models` hid.** Symptom of the
+  v0.42.0 `is_listable()` gap that this release reverts entirely.
+  Sidebar = REPL `/models` = HTTP `/v1/models` again.
+
+### Added (developer-facing)
+
+- **`make audit-pricing` + pre-cut gate.** Every priced row in the
+  catalogue must carry a `litellm:` / `manual:` / `derived:` tag
+  in its `source` field. `scripts/audit-pricing-provenance.py`
+  walks the catalogue and fails the release if any priced row is
+  opaque. Wired into `make release` right after the catalogue
+  refresh and before the version bump, so a tag can't go out with
+  un-attributed pricing. Bill-shock guard: every cent the gateway
+  later debits has to trace back to a documented vendor source.
+  Audit-clean at this release: 302 priced rows, all tagged
+  (274 litellm / 28 manual / 12 derived).
+
+## [0.42.0] — 2026-06-08
+
+Small cleanup release on top of v0.41.0 — one community PR plus two
+hosted-workspace UX fixes that surfaced once v0.41.0's tighter cloud
+gating went live.
+
+### Fixed
+
+- **Terminal cursor position resets on line-clear events
+  ([#153](https://github.com/thClaws/thClaws/pull/153)).** Two paths
+  cleared `lineBuffer` without resetting `cursorPos` — Escape on the
+  slash-command popup, and the engine's `terminal_clear` event. The
+  next keystroke landed at the right character but the visible caret
+  drifted past it. Matches the existing Ctrl+C handler pattern. PR
+  by @JonusNattapong.
+
+### Changed
+
+- **SSO Sign-in button hidden on hosted cloud workspaces (gateway
+  AND BYOK).** v0.41.0 already short-circuited the secrets-backend
+  picker when `THCLAWS_GATEWAY_API_KEY` was set; this release
+  generalises the cloud-workspace detection to also cover BYOK pods
+  (no gateway env, provider keys injected directly). Trigger is now
+  `THCLAWS_WORKSPACE_ID` (set by the K8sProvisioner on every cloud
+  pod regardless of routing). `ipc.rs::secrets_backend_get` returns
+  the sentinel `"hosted"` in both cases, and the desktop frontend
+  skips the navbar `<LoginButton/>` so visitors aren't asked to do
+  a second OAuth flow inside a workspace they already authenticated
+  into at the routing layer. Local desktop installs keep the button.
+
+## [0.41.0] — 2026-06-08
+
+Three issue-driven fixes from the public tracker + two cloud-only
+quality-of-life follow-ups that ride along on the same release tag.
+
+### Added
+
+- **Sidebar is now draggable
+  ([#150](https://github.com/thClaws/thClaws/issues/150)).** The
+  webapp sidebar shipped at a fixed 192px (`w-48`) — too narrow to
+  read dated model ids like `claude-sonnet-4-6` vs
+  `claude-sonnet-4-5` or longer session titles. A 3px gutter on the
+  right edge is now drag-to-resize (clamped to 160–480px, persisted
+  in `localStorage` as `thclaws_sidebar_width`). Double-click the
+  gutter to reset to the original 192px default. Existing users see
+  no shift until they drag. Thanks to @Mayth01 for the report.
+- **Model picker hides unpriced rows.** The catalogue
+  (`model_catalogue.json`) is now the single source of truth for
+  what users can pick — `ModelEntry::is_listable(provider)` filters
+  every UI listing (GUI picker, `/model` REPL command,
+  `/v1/models` HTTP endpoint) to models that either have a
+  published price, are flagged `free` / `tier_billed`, or live on a
+  local provider (`ollama` / `ollama-anthropic` / `lmstudio`).
+  Prevents bill shock when a backend gateway rejects an unpriced
+  model mid-stream.
+
+### Fixed
+
+- **Azure AI Foundry routes by model family
+  ([#149](https://github.com/thClaws/thClaws/issues/149)).**
+  `build_provider` for `ProviderKind::AzureAIFoundry` always
+  pointed at `/anthropic/v1/messages`, so `azure/gpt-*` and other
+  OpenAI-protocol Foundry deployments failed with schema errors.
+  Inspect the model id after stripping the `azure/` prefix: `claude`
+  in the name → unchanged Anthropic protocol; anything else →
+  OpenAIProvider on `/openai/v1/chat/completions` with `azure/`
+  stripped before reaching the upstream. Single user-facing prefix
+  kept, back-compatible for every existing Claude-on-Foundry user.
+  Thanks to @thayadev for the report + the drop-in patch.
+- **`--serve` aborts on panic so the listening port is released
+  ([#151](https://github.com/thClaws/thClaws/issues/151)).** Before
+  this fix, a panic in any tokio task (e.g. the UTF-8 char-boundary
+  case from #148 on long Thai responses) only unwound that task.
+  The runtime stayed alive, port 8443 stayed bound, and systemd's
+  `Restart=on-failure` couldn't recover the port without manual
+  `kill -9`. The `--serve` dispatch now installs a panic hook that
+  chains the default traceback to stderr then `process::abort()`s —
+  the OS releases the socket immediately and systemd restarts on a
+  clean port. CLI / GUI / print modes are unaffected. The
+  underlying char-boundary panic itself shipped in v0.39.0 (#148);
+  v0.41.0 makes any future panic in `--serve` fail clean. Thanks
+  to @Mayth01 for the durability observation.
+- **Gateway-routed workspaces no longer pop the "where to save API
+  keys?" picker.** On hosted thClaws.cloud workspaces with
+  `THCLAWS_GATEWAY_API_KEY` set, the engine never touches the OS
+  keychain or `.env` — every provider call routes through the
+  gateway with its own key. `ipc.rs::secrets_backend_get` now
+  returns the sentinel `"gateway"` when that env is set, and the
+  frontend treats it as already-chosen so the first-launch dialog
+  doesn't block the agent UI.
+
+## [0.39.0] — 2026-06-06
+
+UTF-8 char-boundary fix in the agent turn driver + defense-in-depth
+session flush on panic.
+
+### Fixed
+
+- **`progress_buf.drain` panic on multi-byte UTF-8 text
+  ([#148](https://github.com/thClaws/thClaws/issues/148)).**
+  `drive_turn_stream`'s progress-line buffer trimmed itself with a
+  raw byte offset (`len() - PROGRESS_BUF_CAP/2`) that could land
+  mid-codepoint when the model streamed Thai / CJK / emoji text
+  past 4096 bytes. `String::drain` then tripped its
+  `is_char_boundary(end)` assertion and the whole turn panicked.
+  Worse, the panic killed the future before the `Done` arm ran
+  `save_history`, so the in-progress turn — sometimes the whole
+  session — disappeared on restart. Snap the offset via
+  `str::floor_char_boundary` (stable 1.79+) before draining; the
+  trim is now safe regardless of what Unicode the model emits.
+  Thanks to @sc28249782 for the spot-on bug report including a
+  minimal repro and the exact fix.
+
+### Added
+
+- **`drive_turn_stream` catches panics + flushes the session.** As
+  defense in depth against any future panic in the event loop, the
+  renamed `drive_turn_stream_inner` now runs inside
+  `AssertUnwindSafe(...).catch_unwind().await`. On panic the wrapper
+  logs the cause to the lead-log, surfaces `ErrorText` to the user,
+  calls `save_history`, refreshes `SessionListRefresh`, emits
+  `TurnDone` (so the busy spinner clears), marks the lead mailbox
+  idle, then `resume_unwind`s. No public API change.
+
+## [0.34.0] — 2026-06-04
+
+Live-sync fix for the KMS browser sidebar.
+
+### Fixed
+
+- **KMS browser sidebar refetches pages on `kms_update` broadcast.** The
+  sidebar now refreshes its page list when KMS updates are broadcast,
+  keeping the view synchronized with the current state.
+
+## [0.33.0] — 2026-06-04
+
+Cloud GUI-shell-over-HTTP plus a wave of agent/auth/catalogue hardening.
+
+### Added
+
+- **GUI shell over HTTP + full-screen mode for `cloud serve`.** The
+  PTY-backed Shell surface is now reachable over the cloud serve HTTP
+  transport, with a full-screen layout mode.
+
+### Fixed
+
+- **Strip orphan `tool_use`/`tool_result` blocks before the provider
+  call** ([#144](https://github.com/thClaws/thClaws/issues/144)). A
+  dangling tool block left in the transcript (e.g. after an interrupted
+  turn) could make providers reject the next request; orphans are now
+  pruned before send.
+- **Strip wrapping quotes from pasted API keys**
+  ([#145](https://github.com/thClaws/thClaws/issues/145)). Keys pasted
+  with surrounding `"`/`'` quotes are now unwrapped, with a live
+  provider-auth integration suite added as a regression net.
+- **De-duplicate `ReloadConfig`** — the settings file-watcher and the
+  `/model` write each fired a reload; the duplicate is now coalesced.
+
+### Changed
+
+- **Catalogue cleanup** — pruned dead OpenRouter, DashScope, NVIDIA, and
+  MiniMax entries.
+
+## [0.32.2] — 2026-06-03
+
+Patch release — `.thclaws/settings.json` changes now apply without a
+restart.
+
+### Fixed
+
+- **Hot-reload of `.thclaws/settings.json`.** Editing settings (e.g.
+  flipping `shellTabEnabled` or `teamEnabled`) previously required a full
+  process restart because `ProjectConfig::load()` ran once at boot. A
+  `notify-debouncer-mini` file watcher (`spawn_settings_watcher`) now
+  watches `.thclaws/` non-recursively, debounces at 500 ms, and fires
+  `ShellInput::ReloadConfig`. Spawned from `spawn_with_roots` so every
+  startup gets it (desktop GUI, CLI REPL, `--serve` pod); idempotent, so
+  the picker's own writes re-fire as a no-op.
+
+## [0.32.1] — 2026-06-03
+
+Patch release — cloud heartbeat and a richer engine image.
+
+### Added
+
+- **`thclaws --serve` cloud heartbeat.** Inside a thclaws.cloud
+  workspace pod (`THCLAWS_CLOUD_URL`/`_TOKEN`/`WORKSPACE_ID` set), a
+  background task pings the control plane's `…/keepalive` every 60 s
+  while at least one browser WebSocket is connected — closing the
+  idle-reaper edge case where the user closes the dashboard tab but keeps
+  the workspace open. No-ops outside cloud; local CLI/desktop unaffected.
+- **Engine image bundles ffmpeg + Playwright + Python + Node.** The cloud
+  workspace container now bakes in `ffmpeg`, `python3`/`pip`/`venv`,
+  `nodejs`/`npm`, and `playwright install --with-deps chromium` so agents
+  doing media work or browser automation work out of the box (~600 MB →
+  ~1 GB; shared per node via overlayfs).
+
+### Changed
+
+- README hero now an animated carousel (Chat / Terminal / Claude Code);
+  June 15 framing corrected to "unbundle, not discontinue".
+
+## [0.32.0] — 2026-06-03
+
+A PTY-backed **Shell** tab — run Claude Code inside thClaws under your
+own subscription, ahead of Anthropic's June 15 Agent-SDK unbundling.
+
+### Added
+
+- **GUI Shell tab (PTY-backed).** Spawns `$SHELL` (`/bin/sh` /
+  `powershell.exe` fallback) under a real pseudo-tty piped through
+  xterm.js — distinct from the agent-rendered `Terminal` tab. Lets you
+  run **Claude Code** directly inside thClaws under your normal Claude
+  subscription, no third-party API surface. Because `.thclaws/` and
+  `.claude/` layouts are compatible, skills / MCP servers / agent
+  definitions are shared between the two front-ends. Opt-in via
+  `shellTabEnabled: true` (default off — it's an unsandboxed shell with
+  no agent-side permission gating). Non-UTF-8 Alt-escapes survive via
+  base64 round-trip; resize propagates via TIOCSWINSZ.
+- **Files-tab dotfile toggle** — an eye icon reveals `.thclaws/`,
+  `.claude/`, `.env`, etc. (off by default) for editing shared config
+  inside the GUI.
+- **Workflow ergonomics** — `thclaws.include("./helpers.js")` for
+  cross-script reuse (traversal-rejected), `thclaws.subagent({prompt,
+  agent})` for per-call subagent definitions, and `/workflow exec <path>`
+  to run a pre-authored script mid-session.
+
+### Changed
+
+- The previous iframe-shells "Shell" tab is renamed **`UI`**, freeing
+  "Shell" for the PTY tab (functionality unchanged).
+- **Config parse failures are no longer silent** — a malformed
+  `.thclaws/settings.json` now emits a stderr warning with file path and
+  serde's line/column hint instead of defaulting every flag off quietly.
+
+## [0.31.0] — 2026-06-03
+
+### Fixed
+
+- **Switching model preserves the conversation**
+  ([#142](https://github.com/thClaws/thClaws/issues/142)). The old "new
+  session per provider switch" rule is retired — the JSONL transcript is
+  canonical and each provider translates it per turn.
+
+### Added
+
+- `CONTRIBUTORS.md` crediting community contributors.
+
+## [0.30.0] — 2026-06-02
+
+### Changed
+
+- **MiniMax default model updated to M3**
+  ([#140](https://github.com/thClaws/thClaws/pull/140),
+  [@modtanoii](https://github.com/modtanoii)), using canonical casing
+  `MiniMax-M3` to match the upstream API.
+
+### Fixed
+
+- **`split_shell_segments` uses `char_indices`**
+  ([#141](https://github.com/thClaws/thClaws/issues/141)) — fixes a
+  byte-vs-char boundary panic on multibyte input.
+
+## [0.29.0] — 2026-06-02
+
+### Added
+
+- **GUI Shell as the primary interface — Tier 1–3 MVP** (dev-plan/39).
+- **Appendix A — providers / models / prices** in the docs, plus **+42
+  new models** in the catalogue.
+
+### Fixed
+
+- Backfilled context size on 32 newly-added models and missing pricing on
+  `gemini-3.1-flash-lite`.
+- **Cap spinner line width to terminal columns**
+  ([#139](https://github.com/thClaws/thClaws/pull/139),
+  [@gobikom](https://github.com/gobikom)).
+- Chart review feedback from
+  [#135](https://github.com/thClaws/thClaws/pull/135) addressed
+  ([#137](https://github.com/thClaws/thClaws/pull/137)).
+
+## [0.28.0] — 2026-06-01
+
+### Added
+
+- **Helm chart for self-hosted Kubernetes deployment**
+  ([#135](https://github.com/thClaws/thClaws/pull/135),
+  [@modtanoii](https://github.com/modtanoii)).
+- **thClaws.cloud catalog client + agent identity in settings.**
+- thClaws.cloud chapter in the user manual + technical manual.
+
+## [0.27.0] — 2026-05-31
+
+### Fixed
+
+- **Clamp `last_saved_count` in `sync()` to prevent a panic after
+  `/clear`** ([#134](https://github.com/thClaws/thClaws/pull/134),
+  [@gobikom](https://github.com/gobikom)); the CLI REPL also rotates the
+  session on `/clear`.
+
+### Added
+
+- REPL refreshes the system prompt on mid-session mutators.
+- Subagent factory tracks live state, plus a GUI Shells authoring guide.
+
+## [0.26.0] — 2026-05-31
+
+### Added
+
+- **BM25 `KmsSearch` + native Thai segmenter** (dev-plan/36) — full-text
+  knowledge-store search with Thai word segmentation.
+
+## [0.25.0] — 2026-05-31
+
+A follow-up wave centred on three audits + fixes: prompt-builder
+unification, tool/MCP registration parity across all four surfaces, and
+surfacing collaboration primitives to the model.
+
+### Fixed
+
+- **Skill discovery after cwd change.** `shared_session::ChangeCwd` now
+  re-discovers skills via `SkillStore::discover()`; previously the GUI's
+  skill store was populated once at startup, so project-scoped
+  `.thclaws/skills/` discovered against the launch cwd stayed pinned and
+  `/<skill-name>` was reported as an unknown command.
+- **Tool + MCP registration parity (5 fixes).** A user-set WebSearch
+  engine, Task tools (TodoWrite + queue), team tools, the always-on skill
+  family, and plugin-contributed MCP servers were each registered on only
+  some of the four surfaces (CLI REPL, GUI/`--serve`, headless print,
+  agent_runtime HTTP); all now register consistently per their gates.
+
+### Added
+
+- **Unified system-prompt builder** — `prompts::build_full_system_prompt`
+  is the single source of truth for all four surfaces, which previously
+  inlined divergent assembly and received different text. Adds a
+  `# MCP server instructions` section (per-server briefings from each
+  MCP's `InitializeResult.instructions`, previously captured but
+  discarded) and a `# Collaboration primitives` section.
+- **Model-callable `WorkflowRun` tool** — the same author + sandbox flow
+  as `/workflow run`, so the model can reach for deterministic fan-out on
+  its own (requires approval; nested calls rejected). Wired into all four
+  surfaces.
+
+## [0.24.0] — 2026-05-30
+
+Two major threads land: GUI Shell Tier 2 and multi-tenant `--serve`.
+
+### Added
+
+- **GUI Shell — Tier 2** (dev-plan/33). A third tab mode picks a
+  single-HTML or html+js+css folder as the agent's frontend, served at
+  `/t/<token>/` behind a persisted-token URL with no direct browser
+  access to the shell folder. Shell discovery layers built-in → user →
+  project (last wins); a sandboxed bridge runtime (`thclaws.run` /
+  `thclaws.on` / `thclaws.storage`) is injected at serve time. Per-project
+  adapter configs now read from `./.thclaws/<adapter>.json`.
+- **Multi-tenant `--serve` — Tier 1** (dev-plan/35). One pod hosts N
+  users with HMAC-SHA256 signed routing from a trusted layer, per-user
+  `SharedSessionHandle`s with isolated on-disk state under
+  `.thclaws/users/<id>/`, LRU + idle eviction, a file-asset URL gate
+  (HMAC + path-prefix), and a `MeteringSink` trait (HTTP/stdout/noop).
+  Single-tenant defaults unchanged. Covered by restart-recovery,
+  50-user-concurrency no-cross-leakage, and HMAC-handshake tests.
+
+## [0.23.0] — 2026-05-29
+
+### Added
+
+- **Dynamic workflows** (dev-plan/32) — Tier 1 `/workflow run` plus the
+  full Tier 2 + Tier 3 workflow surface for deterministic multi-agent
+  orchestration.
+- **Self-contained `/quiz`** embedded in thClaws
+  ([#132](https://github.com/thClaws/thClaws/pull/132)), dropping the
+  external gamedev MCP dependency.
+
+## [0.22.0] — 2026-05-28
+
+### Added
+
+- **Tool progress visibility**
+  ([#130](https://github.com/thClaws/thClaws/pull/130),
+  [@gobikom](https://github.com/gobikom)) — contextual tool labels (Bash
+  command, Read path, Grep pattern, …), a Braille spinner with elapsed
+  timer, heartbeat lines for long-running tools, and a ✓/✗ completion
+  suffix with duration. A new `tool_display` module centralises
+  formatting and redacts secrets (Bearer tokens, `--api-key=`, …) from
+  every label.
+- **Typed `ProviderEvent::Progress` channel** — spinner state now flows
+  separately from `TextDelta`, so animation never leaks into `lead_log`,
+  session JSONL, GUI envelopes, or accumulated assistant text. The REPL
+  spinner is gated on `IsTerminal` so piped/headless runs stay ANSI-free.
+
+### Changed
+
+- README restructured to attract contributors.
+
+## [0.21.0] — 2026-05-28
+
+### Added
+
+- **Facebook Page Messenger adapter — Tier 1** (dev-plan/31). Chat with
+  your thClaws install from a Page inbox. Messenger is webhook-only, so
+  the bridge is relay-based (extending the LINE relay with a
+  `/messenger/webhook` route + Graph Send API client); the Page Access
+  Token and App Secret live on the relay, never on the desktop. Pair a
+  Page with a 6-digit code, then drive thClaws from a phone, with
+  quick-reply chips as the approval surface for mutating tools.
+  - New `crates/core/src/messenger/` module; GUI Messenger Connect modal +
+    sidebar pill + boot-time auto-reconnect.
+  - Headless via `thclaws --messenger`, plus `thclaws messenger
+    status`/`pair` subcommands.
+  - `PermissionMode::MessengerGated` (folds with LineGated /
+    TelegramGated); 2,000-char chunked output filter reusing the LINE
+    ANSI/tool-narration stripper.
+  - User manual ch24 (EN + TH) + technical manual cover Meta app setup,
+    webhook subscription, pairing flow, and privacy boundary.
+
+  Tier-1 known gaps: single shared session per Page (no per-PSID
+  isolation), approval prompts target the most-recent inbound PSID, and
+  production beyond app testers needs Meta App Review + Business
+  Verification for `pages_messaging`.
+
+## [0.20.0] — 2026-05-26
+
+Telegram channels + forum topics + streaming preview, plus two
+community-driven hardening fixes.
+
+### Added
+
+- **Telegram channels + forum-topic routing (Tier 2).** The bot can post
+  to a broadcast **channel**, and comments on those posts (which land in
+  the channel's linked **discussion group**) reach the agent. Supergroup
+  **forum topics** route to different agents: `channels[].topicRouting`
+  maps a topic id to an `agentId` (an AgentDef under `.thclaws/agents/`),
+  falling back to the channel's default agent. Replies go back into the
+  originating topic, with the "General" topic's `message_thread_id=1`
+  send quirk handled. A `getChatMember` admin-rights probe returns a
+  clear error when the bot isn't an admin that can post. Per-topic
+  multi-agent routing is honoured by headless `thclaws --telegram`; the
+  GUI runs its single shared session.
+- **Telegram streaming preview edits (Tier 3.1).** Opt-in via
+  `streamPreview` in the Telegram config: instead of one reply at the end
+  of a turn, post a placeholder and **edit it in place** as the agent
+  generates (rate-limited to avoid Telegram's same-message edit
+  throttling), then swap in the final formatted reply. Headless-only for
+  now.
+
+### Fixed
+
+- **Grapheme-aware Backspace in the CLI REPL**
+  ([#126](https://github.com/thClaws/thClaws/pull/126),
+  [@modtanoii](https://github.com/modtanoii)). Backspace deleted one
+  codepoint per press, orphaning Thai/Lao/Hindi/Arabic combining marks
+  and splitting emoji ZWJ sequences. It now deletes a whole grapheme
+  cluster, via a rustyline `ConditionalEventHandler` + `unicode-segmentation`
+  (rather than vendoring rustyline).
+
+- **Shell-aware team bash seatbelts**
+  ([#125](https://github.com/thClaws/thClaws/issues/125),
+  [@ultramcu](https://github.com/ultramcu)). The team-lead / teammate
+  destructive-command guards matched by substring and were defeated by
+  shell quoting (`r''m -rf`, `$(printf rm)`, `${x:-rm}`, backticks,
+  `{rm,-rf,..}`, `IFS`-splicing, `eval $'\x72\x6d'`, arg-order swap,
+  quoted verb, line-continuation, wrapper prefixes) — letting an LLM
+  lead/teammate in `--accept-all` mode slip a destructive command past
+  the seatbelt. They now tokenize via `shell_words` (resolving quotes /
+  order / wrappers, recursing into `eval` / `sh -c` / `bash -c`) and
+  refuse obfuscated forms carrying a destructive signal; the substring
+  guard remains as a fallback.
+
+### Default model — no change
+
+Default stays `claude-sonnet-4-6`.
+
+## [0.19.0] — 2026-05-25
+
+Telegram bot adapter — chat with your local thClaws agent from Telegram.
+
+### Added
+
+- **Telegram bot adapter (Tier 1).** Create a bot with `@BotFather`,
+  connect it from the desktop (Settings → **Telegram Connect**) or run it
+  headless with `thclaws --telegram`, and DM your local agent from
+  anywhere. The agent and all its tools stay on your machine; Telegram is
+  only the chat surface, and there is **no relay** — thClaws talks to the
+  Bot API directly via long-polling (works behind NAT).
+
+  - DM + basic group support; pairing-code onboarding (the owner approves
+    new users from the GUI); HTML-formatted replies chunked to Telegram's
+    4096-character message limit.
+  - Tool calls that need approval surface as **inline-keyboard buttons**
+    (Allow / Always / Deny) via a new `telegramgated` permission mode —
+    approve `Bash`/`Edit`/`Write` from your phone.
+  - `thclaws telegram status | pair` CLI; env-first token
+    (`TELEGRAM_BOT_TOKEN`), `TELEGRAM_OWNER_ID` for instant headless
+    allowlisting.
+  - Docs: new Chapter 23 in the EN + TH user manuals and
+    `telegram-bridge.md` in the technical manual.
+
+### Fixed
+
+- **Agent SDK: avoid `ARG_MAX` on large system prompts**
+  ([#124](https://github.com/thClaws/thClaws/pull/124),
+  [@gobikom](https://github.com/gobikom)). The Agent SDK provider passed
+  the assembled system prompt as a single `--system-prompt` CLI argument;
+  with MCP tools + CLAUDE.md + skills + memory + KMS it can exceed Linux's
+  128 KB `MAX_ARG_STRLEN` → `spawn claude: Argument list too long`,
+  blocking `agent/claude-*` models in `--cli` when MCP servers are
+  registered. The prompt is now written to a temp file and passed via
+  `--system-prompt-file`.
+
+### Default model — no change
+
+Default stays `claude-sonnet-4-6`.
+
+## [0.18.0] — 2026-05-24
+
+One-shot schedules ("run once in 15 minutes / tomorrow at 9am"), plus
+two community fixes.
+
+### Added
+
+- **One-shot / relative-delay schedules**
+  ([#122](https://github.com/thClaws/thClaws/issues/122),
+  design by [@ultramcu](https://github.com/ultramcu)). Schedules can now
+  run **once** at a future time or after a relative delay, alongside the
+  existing recurring cron jobs:
+
+  ```sh
+  thclaws schedule add report --at "2026-05-24T15:30:00Z" --prompt "…"
+  thclaws schedule add check  --in 15m                    --prompt "…"
+  ```
+
+  `--in` accepts `s`/`m`/`h`/`d` (and a bare integer as seconds);
+  `--at` takes an RFC 3339 timestamp. Both are mutually exclusive with
+  `--cron`. A one-shot fires once, then auto-disables. **Catch-up by
+  design:** a fire time already in the past when the scheduler ticks
+  (e.g. the daemon was down over the slot) runs immediately rather than
+  being lost — the footgun of hand-writing a cron for a single minute,
+  where a missed slot silently waits a year. `schedule list` shows
+  `once@<time> (pending|fired)`; the new on-disk `runAt` field is
+  optional, so existing `schedules.json` files stay compatible.
+
+### Fixed
+
+- **Edit: reject an empty `old_string`**
+  ([#121](https://github.com/thClaws/thClaws/pull/121),
+  [@ultramcu](https://github.com/ultramcu)). An empty `old_string`
+  matches between every character, so with `replace_all` it would inject
+  the replacement throughout the file and corrupt it. The Edit tool now
+  rejects it up front.
+
+- **ChatGptCodex credentials detected from the auth file**
+  ([#123](https://github.com/thClaws/thClaws/pull/123),
+  [@gobikom](https://github.com/gobikom)). `kind_has_credentials()` only
+  probed env vars, but ChatGptCodex (ChatGPT subscription) authenticates
+  via a file-based OAuth token — so it was wrongly reported as having no
+  credentials, and interactive `--cli` / GUI / `--serve` triggered the
+  model-fallback path and overwrote `settings.json`. It now resolves the
+  Codex auth store (honoring token expiry), and the shared-session
+  worker delegates to the same canonical check so all surfaces agree.
+
+### Default model — no change
+
+Default stays `claude-sonnet-4-6`.
+
+## [0.17.1] — 2026-05-24
+
+KMS + Files management in the GUI, a LINE reconnect fix, and a clearer
+sandbox boundary message.
+
+### Added
+
+- **KMS sidebar create / rename / delete / edit.** The `+` buttons now
+  open proper modals (the old `window.prompt`/`confirm` silently failed
+  inside the wry webview): create a new KMS base (name + project/user
+  scope), and create a new blank page (title / topic / category / tags)
+  from the per-KMS browser panel. Right-click a page row to **Rename…**
+  (moves the file and rewrites inbound links + the index) or
+  **Delete…**. Edit the page you're viewing — a pencil opens the body
+  in the TipTap editor plus a modal for the raw YAML frontmatter; Save
+  writes it back.
+- **Files tab create file / folder.** Right-click the explorer (or the
+  new FilePlus / FolderPlus header buttons) for **New file…** /
+  **New folder…**, created in the current directory via a name modal.
+  Sandbox-checked; refuses to clobber an existing path. The explorer
+  header now shows a compact `../<last>` path (full path on hover)
+  since the viewer navbar already carries the full path.
+
+### Fixed
+
+- **LINE: reconnect storm after a clean websocket close**
+  ([#120](https://github.com/thClaws/thClaws/pull/120),
+  [@ultramcu](https://github.com/ultramcu)). `LineClient::run` reset
+  backoff and reconnected immediately on a clean close; a relay that
+  closes cleanly on every connect spun an unthrottled connect/close
+  loop. Adds a cancel-aware 1s pause mirroring the error path (shutdown
+  still returns `Cancelled` promptly).
+
+- **Clearer "outside the workspace" sandbox message**
+  ([#119](https://github.com/thClaws/thClaws/issues/119),
+  [@ruzerix](https://github.com/ruzerix)). When a path resolves outside
+  the workspace root, `Sandbox` now states plainly that this is a
+  workspace-path boundary, **not** a permission/approval issue
+  (approving a tool doesn't widen it). #119 turned out not to be a bug:
+  a small model fabricated an out-of-workspace absolute interpreter
+  path, the command failed as an ordinary shell error, and the model
+  paraphrased it as "rejected by the security policy." The Bash tool
+  description now steers models to invoke interpreters via PATH
+  (e.g. `python script.py`) rather than guessing absolute paths.
+
+### Default model — no change
+
+Default stays `claude-sonnet-4-6`.
+
+## [0.17.0] — 2026-05-24
+
+Two contributor-driven fixes: accurate Anthropic token/cost accounting,
+and a remote-MCP `/mcp add` that no longer hangs (with API-key header
+support).
+
+### Added
+
+- **`--header` on `/mcp add`** (part of
+  [#118](https://github.com/thClaws/thClaws/pull/118)).
+  `/mcp add <name> <url> --header "Key: Value"` — repeatable, `-H`
+  alias. Values support `${VAR}` interpolation resolved from the
+  environment at connect time, so an API key lives in your shell /
+  `.env` rather than plaintext in `mcp.json`:
+  ```
+  /mcp add financial-datasets https://mcp.financialdatasets.ai/api --header "X-API-KEY: ${FD_KEY}"
+  ```
+
+### Fixed
+
+- **Anthropic token usage + prompt-cache accounting**
+  ([#115](https://github.com/thClaws/thClaws/pull/115),
+  [@ultramcu](https://github.com/ultramcu)). The streaming parser read
+  usage only from `message_delta` (which carries just `output_tokens`)
+  and dropped `message_start.message.usage`, so every Anthropic turn
+  reported `input_tokens = 0` and no cache stats — making `/cost` and
+  the Cardputer cost display undercount the flagship provider. Now
+  merges `message_start` usage into the terminal result (terminal
+  `output_tokens` wins; cache fields preserved).
+
+- **Remote MCP `/mcp add` no longer hangs; supports API-key auth**
+  ([#114](https://github.com/thClaws/thClaws/issues/114),
+  [@ultramcu](https://github.com/ultramcu);
+  [#118](https://github.com/thClaws/thClaws/pull/118)). Adding an
+  OAuth-gated remote server (e.g. financial-datasets' root URL) froze
+  `/mcp add` for up to 5 minutes: the command ran the full connect
+  inline, hit a 401, and blocked on the OAuth browser callback. Four
+  fixes:
+  - `--header` lets you use the API-key endpoint (`/api` + `X-API-KEY`)
+    and skip OAuth entirely (see Added).
+  - The auth probe and `oauth::discover` now have hard timeouts (15s
+    request / 10s connect) so a stalled server can't hang the command
+    or a startup spawn indefinitely.
+  - `/mcp add` connects **non-interactively**: a server that needs
+    OAuth returns "run `/mcp reauth <name>`" instead of blocking on a
+    browser callback. The guard covers both the upfront probe and the
+    bridge's `initialize`-time 401. Startup / `/mcp reauth` stay
+    interactive (browser flow runs in the background as before).
+
+### Default model — no change
+
+Default stays `claude-sonnet-4-6`.
+
+## [0.16.1] — 2026-05-24
+
+Hotfix. macOS startup crash for every GUI / `--serve` user.
+
+### Fixed
+
+- **macOS: GUI / `--serve` build crashed on startup (TCC / Bluetooth SIGABRT)**
+  ([#116](https://github.com/thClaws/thClaws/issues/116),
+  [@ultramcu](https://github.com/ultramcu);
+  [#117](https://github.com/thClaws/thClaws/pull/117)).
+  The `cost_bridge` feature (Cardputer cost display, added in v0.15.0)
+  was enabled by default and started a Bluetooth LE scan on every
+  launch via `cost_bridge::spawn()` → `adapter.start_scan()`. On
+  macOS, any binary without an `NSBluetoothAlwaysUsageDescription`
+  `Info.plist` — every `cargo build` and every GitHub release archive
+  (none are `.app` bundles) — is killed by **TCC** with a hard
+  **SIGABRT** ~1–3s after startup, before serving any request. It also
+  popped a Bluetooth permission prompt for the ~99% of users who don't
+  own a thClaws-Cost Cardputer.
+  - Fix: `cost_bridge` is now **opt-in** (`default = []`). A stock
+    build never links `btleplug` or starts the BLE scan. Cardputer
+    users build with `--features cost_bridge`.
+  - No code changes — the call sites were already
+    `#[cfg(feature = "cost_bridge")]`-gated.
+  - **Affected releases v0.15.0 and v0.16.0**: macOS users on those
+    versions should upgrade to v0.16.1, or run with
+    `cargo run --no-default-features --features gui` as a workaround.
+
+## [0.16.0] — 2026-05-23
+
+Four user-facing fixes — three issue-driven, plus a Files-tab polish item
+caught while drafting a deck.
+
+### Fixed
+
+- **Windows: GUI launch no longer blocks the cmd.exe / PowerShell prompt**
+  ([#109](https://github.com/thClaws/thClaws/issues/109),
+  [@jubbyy](https://github.com/jubbyy);
+  [#111](https://github.com/thClaws/thClaws/pull/111)).
+  Typing `thclaws.exe` from a shell on Windows 11 used to leave the
+  prompt waiting until the GUI window closed. Root cause: PR #60 (May
+  2026) deliberately built the binary as the **console subsystem** so
+  `--cli`'s rustyline gets working stdio — the side effect was that
+  cmd.exe / PowerShell `WaitForSingleObject` on every console-subsystem
+  child, and `FreeConsole()` in the child can't undo that. Fix: at GUI
+  dispatch entry on Windows, respawn `current_exe()` with
+  `THCLAWS_GUI_DETACHED=1` and the `DETACHED_PROCESS` creation flag,
+  then `exit(0)` the parent. The detached child runs the GUI in-process
+  and survives parent / terminal closure; the parent exits in
+  microseconds so cmd's wait returns. Placed before the in-process
+  scheduler and `/v1` loopback bind so neither runs in the doomed
+  parent (no port-bind race on 18443). Spawn failure (antivirus
+  quarantine, ENOMEM, etc.) falls through to the in-process GUI run.
+  No-op on macOS / Linux.
+
+- **Agent: `max_tokens` escalation retry no longer rejected by claude-opus-4-7+**
+  ([#112](https://github.com/thClaws/thClaws/pull/112),
+  [@siharat-th](https://github.com/siharat-th)).
+  When the model hit `stop_reason=max_tokens` with no tool uses, the
+  loop escalated `max_tokens` to 64000 and retried. The partial
+  assistant message was already pushed to history, so the next
+  `provider.stream` call's messages ended with `role=assistant` —
+  which claude-opus-4-7+ rejects ("This model does not support
+  assistant message prefill. The conversation must end with a user
+  message."), failing the entire retry. Fix: pop the trailing
+  assistant (guarded on `role == Assistant` so an empty assistant
+  push is a no-op) before `continue`. The retry now sees a clean
+  conversation ending in `role=user` and the model produces a
+  complete response under the larger budget.
+
+- **CLI: `--model` flag now reaches GUI and `--serve` modes**
+  ([#110](https://github.com/thClaws/thClaws/pull/110),
+  [@dome](https://github.com/dome) — original diagnosis;
+  [#113](https://github.com/thClaws/thClaws/pull/113)).
+  `thclaws --model X` was applied only by the CLI/REPL branch in
+  `app.rs::main`, so the GUI and `--serve` paths silently ignored
+  it. Fix: route `--model` through a process-global override that
+  `AppConfig::load` applies last, after the project overlay — every
+  dispatch surface (CLI, GUI, `--serve`, `--serve --gui`) now honors
+  the flag without per-mode override plumbing. The GUI's
+  auto-fallback path clears the override after switching to a
+  working provider so a broken `--model` choice doesn't re-pin on
+  every reload. Closes #110.
+
+- **Files preview: relative `![alt](img/foo.png)` in markdown now renders.**
+  Comrak emits `<img src="img/foo.png">` verbatim, and the iframe's
+  `srcDoc` base URL is opaque, so relative paths had no directory to
+  resolve against and failed silently. Fix: inject a
+  `<base href="${origin}/file-asset/<dir>/">` into the rendered HTML
+  before `srcDoc` so relative refs resolve via the same
+  `/file-asset/` handler the `.html` branch already uses — same
+  sandbox check, no backend changes.
+
+### Added
+
+- **`--set-model VALUE` flag**
+  ([#113](https://github.com/thClaws/thClaws/pull/113)).
+  Persists a model to `.thclaws/settings.json` as the project
+  default *and* uses it for the current run. Kept separate from
+  `--model` (one-shot, in-memory) on purpose: a scripted
+  `thclaws --print --model gpt-4-mini "quick"` shouldn't silently
+  rewrite the default the user keeps for interactive work.
+  Distinguishes "file missing" (safe to create — falls back to
+  `ProjectConfig::load` so `.claude/settings.json` migrations
+  preserve existing settings) from "file exists but unreadable"
+  (bail with a clear error rather than silently nuking siblings
+  like `maxTokens` / `allowedTools` / `kms.active` with a
+  defaults-everywhere `ProjectConfig`). Save errors surface on
+  stderr; success prints a green confirmation with the resolved
+  path.
+
+### Default model — no change
+
+Default stays `claude-sonnet-4-6`.
 
 ## [0.6.2] — 2026-04-27
 

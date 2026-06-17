@@ -57,6 +57,22 @@ pub fn provider_segment(kind: ProviderKind) -> Option<&'static str> {
         ProviderKind::Anthropic => Some("anthropic"),
         ProviderKind::Gemini => Some("google"),
         ProviderKind::OpenRouter => Some("openrouter"),
+        // Cloud-routable OpenAI-compatible / hosted providers — the
+        // gateway holds their keys and proxies them so hosted runners
+        // carry none. Local providers (ollama@localhost, lmstudio) and
+        // subprocess ones (anthropic-agent, chatgpt-codex) are not
+        // here; neither are nvidia / opencode-go / ollama-cloud
+        // (removed 2026-06-10 — no per-token upstream price to meter,
+        // so the gateway dropped their routes; desktop users reach
+        // them directly with their own keys).
+        ProviderKind::DashScope => Some("dashscope"),
+        ProviderKind::QwenCloud => Some("qwen-cloud"),
+        ProviderKind::ZAi => Some("zai"),
+        ProviderKind::DeepSeek => Some("deepseek"),
+        ProviderKind::Minimax => Some("minimax"),
+        ProviderKind::ThaiLLM => Some("thaillm"),
+        ProviderKind::XAi => Some("xai"),
+        ProviderKind::Moonshot => Some("moonshot"),
         _ => None,
     }
 }
@@ -66,6 +82,53 @@ pub fn provider_segment(kind: ProviderKind) -> Option<&'static str> {
 /// vocabulary.
 pub fn provider_name_for_config(kind: ProviderKind) -> Option<&'static str> {
     provider_segment(kind)
+}
+
+/// True when this session routes through the thClaws gateway: at least
+/// one provider is toggled into `gateway_use_for` AND the access key is
+/// present (hosted cloud pods force both; desktop BYOK has neither).
+/// The model picker uses this to show only Featured (gateway-routable)
+/// providers in gateway mode, and the full catalogue for BYOK sessions.
+pub fn is_active(config: &AppConfig) -> bool {
+    !config.gateway_use_for.is_empty() && resolve_access_key().is_some()
+}
+
+/// Map a catalogue/picker provider NAME (not kind) to its gateway
+/// segment. Only the catalogue's `gemini` diverges from its segment
+/// (`google`); the other gateway-routable providers match 1:1.
+pub fn segment_for_provider_name(name: &str) -> Option<&'static str> {
+    match name {
+        "openai" => Some("openai"),
+        "anthropic" => Some("anthropic"),
+        "gemini" | "google" => Some("google"),
+        "openrouter" => Some("openrouter"),
+        "dashscope" => Some("dashscope"),
+        "qwen-cloud" => Some("qwen-cloud"),
+        "zai" => Some("zai"),
+        "deepseek" => Some("deepseek"),
+        "minimax" => Some("minimax"),
+        "thaillm" => Some("thaillm"),
+        "xai" => Some("xai"),
+        "moonshot" => Some("moonshot"),
+        _ => None,
+    }
+}
+
+/// True when model lists for `provider_name` should hide unpriced
+/// catalogue rows: the gateway overlay is active for the provider
+/// (toggle on + access key present), so every call is strictly
+/// metered and a model without catalogue pricing is rejected with
+/// 400 — offering it in the picker only advertises an error. With
+/// the overlay off (desktop, own keys) nothing is hidden.
+pub fn hides_unpriced_models(config: &AppConfig, provider_name: &str) -> bool {
+    let Some(segment) = segment_for_provider_name(provider_name) else {
+        return false;
+    };
+    config
+        .gateway_use_for
+        .iter()
+        .any(|p| p.eq_ignore_ascii_case(segment))
+        && resolve_access_key().is_some()
 }
 
 /// Compute the overlay for this provider kind. Returns `None` when
@@ -141,6 +204,45 @@ mod tests {
         );
         assert_eq!(provider_segment(ProviderKind::Ollama), None);
         assert_eq!(provider_segment(ProviderKind::LMStudio), None);
+        // Featured providers added to the gateway in part 3.
+        assert_eq!(provider_segment(ProviderKind::XAi), Some("xai"));
+        assert_eq!(provider_segment(ProviderKind::Moonshot), Some("moonshot"));
+        assert_eq!(segment_for_provider_name("xai"), Some("xai"));
+        assert_eq!(segment_for_provider_name("moonshot"), Some("moonshot"));
+    }
+
+    #[test]
+    fn is_active_requires_toggle_and_key() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw_v1_test");
+        assert!(is_active(&cfg(&["openai"])), "toggle + key → active");
+        assert!(!is_active(&cfg(&[])), "no provider toggled → inactive");
+        std::env::remove_var("THCLAWS_GATEWAY_API_KEY");
+        // No key (unless the test host has a keychain 'gateway' entry).
+        if crate::secrets::get("gateway").is_none() {
+            assert!(!is_active(&cfg(&["openai"])), "no key → inactive");
+        }
+    }
+
+    #[test]
+    fn hides_unpriced_models_requires_toggle_and_key() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw_v1_test");
+        let cfg_on = cfg(&["dashscope", "google"]);
+        assert!(hides_unpriced_models(&cfg_on, "dashscope"));
+        // Catalogue name "gemini" maps to segment "google".
+        assert!(hides_unpriced_models(&cfg_on, "gemini"));
+        // Provider not toggled on → desktop path, nothing hidden.
+        assert!(!hides_unpriced_models(&cfg_on, "zai"));
+        // Non-gateway provider names never hide.
+        assert!(!hides_unpriced_models(&cfg_on, "ollama"));
+        assert!(!hides_unpriced_models(&cfg_on, "nvidia"));
+        std::env::remove_var("THCLAWS_GATEWAY_API_KEY");
+        // No access key → overlay inert → nothing hidden (unless the
+        // test host has a keychain 'gateway' entry — accept that).
+        if crate::secrets::get("gateway").is_none() {
+            assert!(!hides_unpriced_models(&cfg_on, "dashscope"));
+        }
     }
 
     #[test]

@@ -116,7 +116,9 @@ export function TerminalView({ active, modalOpen }: Props) {
 
     const term = new Terminal({
       fontFamily: "Menlo, Monaco, 'Courier New', monospace",
-      fontSize: 13,
+      // 12px below the `sm` breakpoint buys a few more columns on a
+      // phone (wrapped logs / code read better wide); 13px on desktop.
+      fontSize: window.innerWidth < 640 ? 12 : 13,
       cursorBlink: true,
       scrollback: 10000,
       theme: TERMINAL_PALETTES[themeModeRef.current],
@@ -323,6 +325,7 @@ export function TerminalView({ active, modalOpen }: Props) {
             term.write("\x1b[2K\r");
             writePrompt();
             lineBuffer = "";
+            cursorPos = 0;
             recomputeSlash();
             return false;
           }
@@ -408,26 +411,88 @@ export function TerminalView({ active, modalOpen }: Props) {
         return false;
       }
 
+      // Apply pasted text to the line buffer. Shared between the IPC
+      // (wry desktop) and navigator.clipboard (browser --serve) paths
+      // so both produce identical line-buffer / multi-line behaviour.
+      const MAX_PASTE_BYTES = 1 * 1024 * 1024;
+      const applyPastedText = (text: string) => {
+        if (text.length > MAX_PASTE_BYTES) {
+          console.warn(
+            `[paste] clipboard too large (${text.length} bytes); ignoring`,
+          );
+          return;
+        }
+        if (text.length === 0) return;
+        if (/\r?\n/.test(text)) {
+          // Multi-line paste: submit the whole thing as ONE shell_input.
+          // Erase any local echo; the backend's UserPrompt event will
+          // re-render the full block.
+          const combined = (lineBuffer + text).replace(/\r\n/g, "\n");
+          const trimmed = combined.replace(/\n+$/, "");
+          lineBuffer = "";
+          if (trimmed.length > 0) {
+            term.write("\x1b[2K\r");
+            send({ type: "shell_input", text: trimmed });
+          }
+        } else {
+          // Single-line paste: insert at the current caret position so
+          // pasting into the middle of an in-progress edit works the
+          // same as typing there. After the buffer change, recompute
+          // the slash-popup state in case the paste extended `/<word>`.
+          lineBuffer =
+            lineBuffer.slice(0, cursorPos) +
+            text +
+            lineBuffer.slice(cursorPos);
+          cursorPos += text.length;
+          redrawLine();
+          recomputeSlash();
+        }
+      };
+
+      // Browser-mode detection — true under `--serve` in a real browser
+      // (no wry IPC bridge). In that mode arboard on the SERVER would
+      // touch the wrong machine's clipboard; navigator.clipboard goes
+      // to the user's actual clipboard. In wry desktop mode `window.ipc`
+      // is present and navigator.clipboard is blocked, so we keep the
+      // existing arboard-via-IPC path. Fixes #96.
+      const inBrowserMode =
+        typeof window !== "undefined" && !window.ipc && !!navigator.clipboard;
+
       // Copy
       if (mod && e.key === "c" && e.type === "keydown") {
         const sel = term.getSelection();
         if (sel) {
-          send({ type: "clipboard_write", text: sel });
+          if (inBrowserMode) {
+            navigator.clipboard.writeText(sel).catch((err) => {
+              console.warn("[clipboard] writeText failed:", err);
+            });
+          } else {
+            send({ type: "clipboard_write", text: sel });
+          }
           return false;
         }
         if (!isMac) return false;
       }
 
-      // Paste
-      if (mod && e.key === "v" && e.type === "keydown") {
+      // Paste. Linux/Windows convention is Ctrl+Shift+V (covered by
+      // `mod`); also accept plain Ctrl+V on non-Mac since there's no
+      // ambiguous signal binding for it (unlike Ctrl+C / SIGINT).
+      const isPasteShortcut =
+        e.type === "keydown" &&
+        e.key === "v" &&
+        (mod || (!isMac && e.ctrlKey && !e.altKey && !e.metaKey));
+      if (isPasteShortcut) {
+        if (inBrowserMode) {
+          navigator.clipboard
+            .readText()
+            .then((text) => applyPastedText(text))
+            .catch((err) => console.warn("[clipboard] readText failed:", err));
+          return false;
+        }
         const unsub = subscribe((msg) => {
           if (msg.type === "clipboard_text") {
             unsub();
             if (!msg.ok) return;
-            // Cap on paste size — atob() and TextDecoder are sync and
-            // freeze the main thread on multi-MB inputs. 1 MB binary
-            // is ~1.33 MB base64; round up the b64 ceiling for safety.
-            const MAX_PASTE_BYTES = 1 * 1024 * 1024;
             const MAX_PASTE_B64 = Math.ceil((MAX_PASTE_BYTES * 4) / 3);
             let text = "";
             if (typeof msg.text_b64 === "string") {
@@ -442,41 +507,9 @@ export function TerminalView({ active, modalOpen }: Props) {
               for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
               text = new TextDecoder("utf-8").decode(bytes);
             } else if (typeof msg.text === "string") {
-              if (msg.text.length > MAX_PASTE_BYTES) {
-                console.warn(
-                  `[paste] clipboard too large (${msg.text.length} bytes); ignoring`,
-                );
-                return;
-              }
               text = msg.text as string;
             }
-            if (text.length > 0) {
-              if (/\r?\n/.test(text)) {
-                // Multi-line paste: submit the whole thing as ONE
-                // shell_input. Erase any local echo; the backend's
-                // UserPrompt event will re-render the full block.
-                const combined = (lineBuffer + text).replace(/\r\n/g, "\n");
-                const trimmed = combined.replace(/\n+$/, "");
-                lineBuffer = "";
-                if (trimmed.length > 0) {
-                  term.write("\x1b[2K\r");
-                  send({ type: "shell_input", text: trimmed });
-                }
-              } else {
-                // Single-line paste: insert at the current caret
-                // position so pasting into the middle of an in-progress
-                // edit works the same as typing there. After the
-                // buffer change, recompute the slash-popup state in
-                // case the paste extended a `/<word>` query.
-                lineBuffer =
-                  lineBuffer.slice(0, cursorPos) +
-                  text +
-                  lineBuffer.slice(cursorPos);
-                cursorPos += text.length;
-                redrawLine();
-                recomputeSlash();
-              }
-            }
+            applyPastedText(text);
           }
         });
         send({ type: "clipboard_read" });
@@ -775,6 +808,7 @@ export function TerminalView({ active, modalOpen }: Props) {
         term.clear();
         writePrompt();
         lineBuffer = "";
+        cursorPos = 0;
         pendingAskId = null;
       } else if (
         msg.type === "terminal_history_replaced" &&
@@ -837,7 +871,14 @@ export function TerminalView({ active, modalOpen }: Props) {
       className="relative h-full w-full"
       style={{ background: "var(--terminal-bg)" }}
     >
-      <div ref={ref} className="h-full w-full p-1.5" />
+      {/* Explicit tap-to-focus so a touch reliably brings up the mobile
+          keyboard (and reinforces focus in the wry webview), matching
+          ShellTab. Focusing an already-focused terminal is a no-op. */}
+      <div
+        ref={ref}
+        className="h-full w-full p-1.5"
+        onClick={() => termRef.current?.focus()}
+      />
       {streaming && (
         // Floating Stop button overlay — sits top-right while the
         // agent is generating, fires shell_cancel on click. Mirrors

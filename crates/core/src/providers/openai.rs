@@ -32,8 +32,8 @@ pub struct OpenAIProvider {
     api_key: String,
     base_url: String,
     /// Optional prefix stripped from `req.model` before sending to the
-    /// remote. Used by aggregator-style providers (e.g. `ap/gemma4-12b` →
-    /// `gemma4-12b`) where the prefix exists only to route `detect()` on
+    /// remote. Used by aggregator-style providers (e.g. `zai/glm-5.2` →
+    /// `glm-5.2`) where the prefix exists only to route `detect()` on
     /// our side.
     strip_model_prefix: Option<String>,
     /// Override the auth header name. `None` → `Authorization: Bearer {key}`.
@@ -44,6 +44,18 @@ pub struct OpenAIProvider {
     /// Azure's models path differs from the completions path, so it needs
     /// an explicit override.
     list_models_url: Option<String>,
+    /// When set, the request's model is replaced with this id before the
+    /// wire call (after which `strip_model_prefix` still applies). Used by
+    /// the `openrouter/fusion+` pseudo-model to call a configured outer
+    /// model while the user-facing model id stays `openrouter/fusion+`.
+    model_override: Option<String>,
+    /// Extra tool objects appended verbatim to the request `tools` array
+    /// (e.g. `{"type":"openrouter:fusion","parameters":{…}}`). Carried
+    /// alongside the agent's normal function tools.
+    injected_tools: Vec<Value>,
+    /// Optional `tool_choice` body value (e.g. `"required"`). `None` omits
+    /// it, leaving the provider's default (auto).
+    tool_choice: Option<Value>,
 }
 
 impl OpenAIProvider {
@@ -55,7 +67,30 @@ impl OpenAIProvider {
             strip_model_prefix: None,
             api_key_header: None,
             list_models_url: None,
+            model_override: None,
+            injected_tools: Vec::new(),
+            tool_choice: None,
         }
+    }
+
+    /// Replace the request model with `model` before the wire call (the
+    /// `strip_model_prefix`, if any, still runs afterward). See
+    /// [`Self::model_override`].
+    pub fn with_model_override(mut self, model: impl Into<String>) -> Self {
+        self.model_override = Some(model.into());
+        self
+    }
+
+    /// Append a raw tool object to every request's `tools` array.
+    pub fn with_injected_tool(mut self, tool: Value) -> Self {
+        self.injected_tools.push(tool);
+        self
+    }
+
+    /// Set the `tool_choice` body value (e.g. `json!("required")`).
+    pub fn with_tool_choice(mut self, choice: Value) -> Self {
+        self.tool_choice = Some(choice);
+        self
     }
 
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
@@ -206,6 +241,12 @@ impl OpenAIProvider {
                     msg["content"] = json!(content_text);
                 } else if has_tools {
                     msg["content"] = Value::Null;
+                } else {
+                    // Reasoning-only turn (a thinking block, no text / tools /
+                    // images). Without a `content` field some OpenAI-compatible
+                    // providers (DeepSeek, etc.) reject the message with HTTP
+                    // 400 — fall back to an empty string (issue #163 Bug 3).
+                    msg["content"] = json!("");
                 }
                 if has_tools {
                     msg["tool_calls"] = json!(tool_calls);
@@ -281,7 +322,7 @@ impl OpenAIProvider {
         out
     }
 
-    fn build_body(req: &StreamRequest) -> Value {
+    fn build_body(&self, req: &StreamRequest) -> Value {
         let messages = Self::messages_to_openai(req);
         let mut body = json!({
             "model": req.model,
@@ -290,24 +331,50 @@ impl OpenAIProvider {
             "stream": true,
             "stream_options": {"include_usage": true},
         });
-        if !req.tools.is_empty() {
-            let tools: Vec<Value> = req
-                .tools
-                .iter()
-                .map(|t| {
-                    json!({
-                        "type": "function",
-                        "function": {
-                            "name": t.name,
-                            "description": t.description,
-                            "parameters": t.input_schema,
-                        }
-                    })
+        let mut tools: Vec<Value> = req
+            .tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.input_schema,
+                    }
                 })
-                .collect();
+            })
+            .collect();
+        tools.extend(self.injected_tools.iter().cloned());
+        if !tools.is_empty() {
             body["tools"] = json!(tools);
         }
+        if let Some(tc) = &self.tool_choice {
+            body["tool_choice"] = tc.clone();
+        }
         body
+    }
+}
+
+/// Strip the routing prefix from a stored model id before sending it
+/// upstream. Normally just removes `prefix` (e.g. `openrouter/` →
+/// `anthropic/claude-…`, `lmstudio/llama` → `llama`).
+///
+/// Special case for OpenRouter: its own router models (`openrouter/fusion`,
+/// `openrouter/auto`) have vendor == "openrouter", colliding with the
+/// `openrouter/` routing prefix. A real OpenRouter id is always
+/// `vendor/model` (contains a slash); if stripping `openrouter/` leaves a
+/// bare single segment, the original `openrouter/<x>` already WAS the
+/// correct upstream id — keep it. Sending the vendor-less `<x>` 404s with
+/// "No endpoints found that support tool use".
+fn strip_wire_prefix(model: &str, strip_prefix: Option<&str>) -> String {
+    let Some(prefix) = strip_prefix else {
+        return model.to_string();
+    };
+    match model.strip_prefix(prefix) {
+        Some(rest) if prefix == "openrouter/" && !rest.contains('/') => model.to_string(),
+        Some(rest) => rest.to_string(),
+        None => model.to_string(),
     }
 }
 
@@ -328,6 +395,26 @@ fn extract_images(content: &ToolResultContent) -> Vec<(String, String)> {
             })
             .collect(),
     }
+}
+
+/// True if any message in the request carries image pixels — either an
+/// inline `ContentBlock::Image` (pasted/attached) or a `ToolResult` whose
+/// content includes an image block (Read on an image, PdfRead rendering a
+/// scanned/image PDF to pages). Used to turn an otherwise-opaque provider
+/// 4xx into an actionable "this model can't see images" hint: text-only
+/// models (DeepSeek v4, most non-`-vl` Qwen, etc.) reject image_url
+/// content with a bare HTTP 400. See issue #164.
+fn request_carries_image(req: &StreamRequest) -> bool {
+    req.messages.iter().any(|m| {
+        m.content.iter().any(|b| match b {
+            ContentBlock::Image { .. } => true,
+            ContentBlock::ToolResult { content, .. } => {
+                matches!(content, ToolResultContent::Blocks(blocks)
+                    if blocks.iter().any(|tb| matches!(tb, ToolResultBlock::Image { .. })))
+            }
+            _ => false,
+        })
+    })
 }
 
 #[async_trait]
@@ -369,7 +456,7 @@ impl Provider for OpenAIProvider {
                     .filter_map(|m| {
                         let raw = m.get("id").and_then(Value::as_str)?;
                         // Prefix the listing so users can paste IDs straight
-                        // into `/model` (e.g. `ap/gemma4-12b`). `detect()`
+                        // into `/model` (e.g. `zai/glm-5.2`). `detect()`
                         // routes on this prefix; the stream call strips it
                         // before hitting the remote.
                         let id = if prefix.is_empty() || raw.starts_with(prefix) {
@@ -390,12 +477,11 @@ impl Provider for OpenAIProvider {
     }
 
     async fn stream(&self, mut req: StreamRequest) -> Result<EventStream> {
-        if let Some(prefix) = &self.strip_model_prefix {
-            if let Some(rest) = req.model.strip_prefix(prefix.as_str()) {
-                req.model = rest.to_string();
-            }
+        if let Some(m) = &self.model_override {
+            req.model = m.clone();
         }
-        let body = Self::build_body(&req);
+        req.model = strip_wire_prefix(&req.model, self.strip_model_prefix.as_deref());
+        let body = self.build_body(&req);
         let resp = self
             .client
             .post(&self.base_url)
@@ -409,10 +495,20 @@ impl Provider for OpenAIProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(Error::Provider(format!(
-                "http {status}: {}",
-                super::redact_key(&text, &self.api_key)
-            )));
+            let mut msg = format!("http {status}: {}", super::redact_key(&text, &self.api_key));
+            // Issue #164: a 4xx on a request that shipped image pixels is
+            // almost always "this model can't see images" (text-only
+            // model + a Read on an image / a scanned-image PDF). The raw
+            // upstream 400 body is unhelpful, so append a concrete fix.
+            if status.is_client_error() && request_carries_image(&req) {
+                msg.push_str(&format!(
+                    "\n\n⚠️ This request included an image, but model `{}` may not support image input. \
+                     Switch to a vision-capable model (e.g. dashscope/qwen3-vl-plus, gpt-4o, gemini-2.x, a Claude model), \
+                     or extract the PDF/image to text first (e.g. read it once with a vision model and save to KMS, then query the text).",
+                    req.model
+                ));
+            }
+            return Err(Error::Provider(msg));
         }
 
         let byte_stream = resp.bytes_stream();
@@ -429,20 +525,45 @@ impl Provider for OpenAIProvider {
             let mut byte_stream = Box::pin(byte_stream);
             let mut state = ParseState::default();
             let mut raw = raw_dump;
+            let mut last_activity = std::time::Instant::now();
+            let mut idle_total = std::time::Duration::ZERO;
 
             loop {
+                let since = last_activity.elapsed();
+                let threshold = crate::tool_display::THINKING_HEARTBEAT_AFTER;
+                let wait = if since >= threshold {
+                    crate::tool_display::HEARTBEAT_EVERY
+                } else {
+                    threshold - since
+                }
+                .min(chunk_timeout.saturating_sub(idle_total));
+
                 let maybe_chunk = tokio::time::timeout(
-                    chunk_timeout,
+                    wait,
                     byte_stream.next(),
                 )
-                .await
-                .map_err(|_| Error::Provider(format!(
-                    "stream idle for {}s — provider stopped sending; try again",
-                    chunk_timeout.as_secs()
-                )))?;
-                let Some(chunk) = maybe_chunk else { break };
-                let chunk = chunk.map_err(|e| Error::Provider(format!("stream: {e}")))?;
-                buffer.extend_from_slice(&chunk);
+                .await;
+
+                match maybe_chunk {
+                    Err(_) => {
+                        idle_total += wait;
+                        if idle_total >= chunk_timeout {
+                            Err(Error::Provider(format!(
+                                "stream idle for {}s — provider stopped sending; try again",
+                                chunk_timeout.as_secs()
+                            )))?;
+                        }
+                        yield ProviderEvent::Progress(super::ProgressKind::Thinking);
+                        continue;
+                    }
+                    Ok(maybe) => {
+                        let Some(chunk) = maybe else { break };
+                        let chunk = chunk.map_err(|e| Error::Provider(format!("stream: {e}")))?;
+                        buffer.extend_from_slice(&chunk);
+                        last_activity = std::time::Instant::now();
+                        idle_total = std::time::Duration::ZERO;
+                    }
+                }
 
                 while let Some(boundary) = super::find_bytes(&buffer, b"\n\n") {
                     let event_bytes: Vec<u8> = buffer.drain(..boundary + 2).collect();
@@ -519,6 +640,12 @@ fn parse_openai_usage(v: &Value) -> Option<Usage> {
     // contribution from a turn that actually consumed 5000 tokens.
     let cached_count = cached.unwrap_or(0);
     let uncached_input = input.saturating_sub(cached_count);
+    // dev-plan/24: o1/o3 hidden reasoning tokens via Chat Completions
+    // wire format. Lives at completion_tokens_details.reasoning_tokens
+    // (folded into completion_tokens total already).
+    let reasoning = u
+        .pointer("/completion_tokens_details/reasoning_tokens")
+        .and_then(Value::as_u64);
     Some(Usage {
         input_tokens: uncached_input as u32,
         output_tokens: output as u32,
@@ -527,6 +654,7 @@ fn parse_openai_usage(v: &Value) -> Option<Usage> {
         // cached → cache_read; leave cache_creation as None.
         cache_creation_input_tokens: None,
         cache_read_input_tokens: cached.map(|v| v as u32),
+        reasoning_output_tokens: reasoning.map(|v| v as u32),
     })
 }
 
@@ -1118,6 +1246,55 @@ mod tests {
     }
 
     #[test]
+    fn request_carries_image_detects_inline_and_tool_result_images() {
+        use crate::types::{ImageSource, ToolResultBlock, ToolResultContent};
+        let img = ImageSource::Base64 {
+            media_type: "image/png".into(),
+            data: "AAAA".into(),
+        };
+        let base = |content: Vec<ContentBlock>| StreamRequest {
+            model: "deepseek-v4-flash".into(),
+            system: None,
+            messages: vec![Message {
+                role: Role::User,
+                content,
+            }],
+            tools: vec![],
+            max_tokens: 100,
+            thinking_budget: None,
+            stream_chunk_timeout_override: None,
+        };
+
+        // Text-only request → no image.
+        assert!(!request_carries_image(&base(vec![ContentBlock::text(
+            "hi"
+        )])));
+
+        // Inline (pasted) image → detected.
+        assert!(request_carries_image(&base(vec![ContentBlock::Image {
+            source: img.clone(),
+        }])));
+
+        // Image riding inside a ToolResult (Read / PdfRead fallback) → detected.
+        assert!(request_carries_image(&base(vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "c1".into(),
+                content: ToolResultContent::Blocks(vec![ToolResultBlock::Image { source: img }]),
+                is_error: false,
+            }
+        ])));
+
+        // Text-only ToolResult → no image.
+        assert!(!request_carries_image(&base(vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "c2".into(),
+                content: ToolResultContent::Text("just text".into()),
+                is_error: false,
+            }
+        ])));
+    }
+
+    #[test]
     fn messages_to_openai_batched_image_tool_results_emit_tool_messages_back_to_back() {
         // Regression for the v0.3.2-dev image attachment bug: when the
         // model batches N parallel Read calls and each result carries
@@ -1361,7 +1538,7 @@ mod tests {
             thinking_budget: None,
             stream_chunk_timeout_override: None,
         };
-        let body = OpenAIProvider::build_body(&req);
+        let body = OpenAIProvider::new("k").build_body(&req);
         assert_eq!(body["stream"], true);
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["function"]["name"], "read_file");
@@ -1370,6 +1547,51 @@ mod tests {
             body["tools"][0]["function"]["parameters"]["properties"]["path"]["type"],
             "string"
         );
+    }
+
+    #[test]
+    fn build_body_appends_injected_tool_and_tool_choice() {
+        use crate::types::ToolDef;
+        let req = StreamRequest {
+            model: "openai/gpt-4.1".into(),
+            system: None,
+            messages: vec![Message::user("hi")],
+            tools: vec![ToolDef {
+                name: "read_file".into(),
+                description: "read a file".into(),
+                input_schema: json!({"type":"object"}),
+            }],
+            max_tokens: 100,
+            thinking_budget: None,
+            stream_chunk_timeout_override: None,
+        };
+        let provider = OpenAIProvider::new("k")
+            .with_injected_tool(json!({
+                "type": "openrouter:fusion",
+                "parameters": {"analysis_models": ["anthropic/claude-opus-4.8"]}
+            }))
+            .with_tool_choice(json!("required"));
+        let body = provider.build_body(&req);
+        // Agent function tool stays first; fusion tool is appended after.
+        assert_eq!(body["tools"][0]["function"]["name"], "read_file");
+        assert_eq!(body["tools"][1]["type"], "openrouter:fusion");
+        assert_eq!(
+            body["tools"][1]["parameters"]["analysis_models"][0],
+            "anthropic/claude-opus-4.8"
+        );
+        assert_eq!(body["tool_choice"], "required");
+    }
+
+    #[test]
+    fn model_override_then_strip_yields_outer_wire_model() {
+        // fusion+ scenario: stream() replaces the model with the configured
+        // outer model, then strip_model_prefix removes the routing prefix.
+        let provider = OpenAIProvider::new("k")
+            .with_strip_model_prefix("openrouter/")
+            .with_model_override("openrouter/openai/gpt-4.1");
+        let override_model = provider.model_override.clone().unwrap();
+        let wire = strip_wire_prefix(&override_model, provider.strip_model_prefix.as_deref());
+        assert_eq!(wire, "openai/gpt-4.1");
     }
 
     #[tokio::test]
@@ -1518,6 +1740,7 @@ mod tests {
                 ProviderEvent::ToolUseDelta { .. } => "ToolUseDelta",
                 ProviderEvent::ContentBlockStop => "ContentBlockStop",
                 ProviderEvent::MessageStop { .. } => "MessageStop",
+                ProviderEvent::Progress(_) => "Progress",
             })
             .collect();
         assert_eq!(
@@ -1606,6 +1829,80 @@ mod tests {
         assert!(
             assistant_plain.get("reasoning_content").is_none(),
             "non-thinking model must not see reasoning_content; got {assistant_plain:?}"
+        );
+    }
+
+    /// Issue #163 Bug 3: a reasoning-ONLY assistant turn (a Thinking
+    /// block, no text / tools) must still serialize a `content` field —
+    /// some OpenAI-compatible providers 400 on an assistant message with
+    /// no `content`. We fall back to an empty string.
+    #[test]
+    fn strip_wire_prefix_handles_openrouter_vendor_collision() {
+        // Normal OpenRouter models: strip the routing prefix → vendor/model.
+        assert_eq!(
+            strip_wire_prefix(
+                "openrouter/anthropic/claude-sonnet-4-6",
+                Some("openrouter/")
+            ),
+            "anthropic/claude-sonnet-4-6"
+        );
+        assert_eq!(
+            strip_wire_prefix("openrouter/openai/gpt-4.1", Some("openrouter/")),
+            "openai/gpt-4.1"
+        );
+        // OpenRouter-vendor router models: keep the full id (vendor is
+        // "openrouter") — stripping would send a vendor-less id that 404s.
+        assert_eq!(
+            strip_wire_prefix("openrouter/fusion", Some("openrouter/")),
+            "openrouter/fusion"
+        );
+        assert_eq!(
+            strip_wire_prefix("openrouter/auto", Some("openrouter/")),
+            "openrouter/auto"
+        );
+        // Other providers still strip to a bare id (no slash by design).
+        assert_eq!(
+            strip_wire_prefix("lmstudio/llama-3.2", Some("lmstudio/")),
+            "llama-3.2"
+        );
+        assert_eq!(
+            strip_wire_prefix("dashscope/qwen-max", Some("dashscope/")),
+            "qwen-max"
+        );
+        // No prefix configured / no match → unchanged.
+        assert_eq!(strip_wire_prefix("gpt-4o", None), "gpt-4o");
+        assert_eq!(strip_wire_prefix("gpt-4o", Some("openrouter/")), "gpt-4o");
+    }
+
+    #[test]
+    fn messages_to_openai_reasoning_only_turn_has_empty_content() {
+        let history = vec![
+            Message::user("solve x"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Thinking {
+                    content: "thinking but produced no text".into(),
+                    signature: None,
+                }],
+            },
+            Message::user("continue"),
+        ];
+        let req = StreamRequest {
+            model: "deepseek/deepseek-v4-flash".into(),
+            system: None,
+            messages: history,
+            tools: vec![],
+            max_tokens: 100,
+            thinking_budget: None,
+            stream_chunk_timeout_override: None,
+        };
+        let msgs = OpenAIProvider::messages_to_openai(&req);
+        let assistant = msgs.iter().find(|m| m["role"] == "assistant").unwrap();
+        // `content` must be present (not missing) and an empty string.
+        assert_eq!(
+            assistant.get("content"),
+            Some(&serde_json::json!("")),
+            "reasoning-only assistant must carry content:\"\"; got {assistant:?}"
         );
     }
 }

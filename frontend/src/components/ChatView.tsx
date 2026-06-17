@@ -3,11 +3,12 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { Check, Copy, Paperclip } from "lucide-react";
-import { send, subscribe } from "../hooks/useIPC";
+import { basePath, send, subscribe } from "../hooks/useIPC";
 import { useTheme } from "../hooks/useTheme";
 import { useVersion } from "../hooks/useVersion";
 import logoDark from "../assets/thClaws-logo-dark.png";
 import logoLight from "../assets/thClaws-logo-light.png";
+import { WorkflowReviewBubble } from "./WorkflowReviewBubble";
 import {
   SlashCommandPopup,
   filterCommands,
@@ -16,8 +17,18 @@ import {
 import { McpAppIframe } from "./McpAppIframe";
 
 type ChatMessage = {
-  role: "user" | "assistant" | "tool" | "system" | "error";
+  role: "user" | "assistant" | "tool" | "system" | "error" | "workflow_review";
   content: string;
+  /// `workflow_review` messages only — dev-plan/32 Tier 3 GUI
+  /// approval. Carries the script + id the WorkflowReviewBubble
+  /// posts back when the user clicks Approve / Cancel / Re-author.
+  workflowReview?: {
+    id: string;
+    script: string;
+    prompt: string;
+    model: string;
+    revision: number;
+  };
   /// `assistant` messages only — accumulated `reasoning_content` from
   /// thinking models (DeepSeek v4/r1, OpenAI o-series, NVIDIA NIM
   /// glm4.7, etc.). Rendered as a collapsible dimmed block above the
@@ -53,7 +64,24 @@ type ChatMessage = {
     uri: string;
     html: string;
     mime?: string;
+    allowSameOrigin?: boolean;
+    /// Per-widget opt-in for content-driven inline iframe height.
+    /// Mirrors `UiResource::auto_size` in Rust + `_meta.autoSize` in
+    /// the MCP-Apps resource envelope. False / absent for everything
+    /// except first-party widgets that explicitly opted in.
+    autoSize?: boolean;
   };
+  /// Mid-turn injection state (issue #106): "queued" while the
+  /// message is waiting in the agent's injection queue,
+  /// "delivered" once the agent drained it at a tool_result
+  /// boundary. Absent for normal user messages submitted at turn
+  /// start. Drives the small badge next to the bubble.
+  injectionState?: "queued" | "delivered";
+  /// Local-only id used to match the optimistic queued bubble with
+  /// the `user_message_injected` event that arrives once the agent
+  /// drains the queue. Same value the IPC payload carries in
+  /// `id`. Not persisted.
+  injectionId?: string;
 };
 
 /// Shape of a TodoWrite tool input.todos entry. Mirrors the Rust-side
@@ -106,6 +134,96 @@ const THINK_BLOCK = /<think>[\s\S]*?<\/think>\n?/gi;
 const ORPHAN_CLOSE = /^[ \t\r\n]*<\/think>\n?/i;
 function stripThinkBlocks(content: string): string {
   return content.replace(THINK_BLOCK, "").replace(ORPHAN_CLOSE, "");
+}
+
+/// Detect bare multi-line JSON object/array blocks at line-start and
+/// wrap them in ```json fences before handing to ReactMarkdown.
+///
+/// Without this pass, markdown collapses single newlines inside an
+/// unfenced JSON block to spaces — so a tool response the model echoes
+/// back as
+///   {
+///     "next_action": "first_greet",
+///     ...
+///   }
+/// renders as a single-line wall instead of the indented block the
+/// terminal tab shows (xterm.js just replaces \n with \r\n and the
+/// monospace renderer preserves layout).
+///
+/// Walks the text once with a brace counter so nested braces inside
+/// the JSON don't terminate early. Skips regions already inside a ```
+/// fence. Only wraps a candidate if `JSON.parse` accepts it — keeps
+/// false positives off (a paragraph that happens to start with `{`
+/// is left alone).
+function wrapBareJsonBlocks(content: string): string {
+  // Map of already-fenced regions to skip.
+  const fenced: [number, number][] = [];
+  const fenceRe = /```[\s\S]*?```/g;
+  let fm: RegExpExecArray | null;
+  while ((fm = fenceRe.exec(content)) !== null) {
+    fenced.push([fm.index, fm.index + fm[0].length]);
+  }
+  const inFence = (i: number) =>
+    fenced.some(([s, e]) => i >= s && i < e);
+
+  const out: string[] = [];
+  let i = 0;
+  while (i < content.length) {
+    const ch = content[i];
+    const atLineStart = i === 0 || content[i - 1] === "\n";
+    if (
+      atLineStart &&
+      (ch === "{" || ch === "[") &&
+      !inFence(i)
+    ) {
+      const close = ch === "{" ? "}" : "]";
+      let depth = 0;
+      let j = i;
+      let inString = false;
+      let escape = false;
+      while (j < content.length) {
+        const c = content[j];
+        if (escape) {
+          escape = false;
+          j++;
+          continue;
+        }
+        if (inString) {
+          if (c === "\\") escape = true;
+          else if (c === '"') inString = false;
+          j++;
+          continue;
+        }
+        if (c === '"') inString = true;
+        else if (c === ch) depth++;
+        else if (c === close) {
+          depth--;
+          if (depth === 0) {
+            j++;
+            break;
+          }
+        }
+        j++;
+      }
+      if (depth === 0 && j > i + 1) {
+        const candidate = content.substring(i, j);
+        // Only wrap if it's actually valid JSON. Streaming partial
+        // blocks (depth never reached 0) and prose paragraphs that
+        // happen to start with `{` will fall through here.
+        try {
+          JSON.parse(candidate);
+          out.push("```json\n", candidate, "\n```");
+          i = j;
+          continue;
+        } catch {
+          /* not valid JSON — leave as-is */
+        }
+      }
+    }
+    out.push(ch);
+    i++;
+  }
+  return out.join("");
 }
 
 function blobToBase64(blob: Blob): Promise<string> {
@@ -290,7 +408,7 @@ export function ChatView({ active, modalOpen }: Props) {
     }
     setUploading(true);
     try {
-      const resp = await fetch("/upload", { method: "POST", body: form });
+      const resp = await fetch(`${basePath()}upload`, { method: "POST", body: form });
       if (!resp.ok) {
         const detail = await resp.text().catch(() => "");
         showAttachmentError(`Upload failed (${resp.status}) ${detail}`);
@@ -306,14 +424,35 @@ export function ChatView({ active, modalOpen }: Props) {
   useEffect(() => {
     const unsub = subscribe((msg) => {
       switch (msg.type) {
-        case "chat_user_message":
+        case "chat_user_message": {
           // Echo of a prompt the user submitted (possibly from the
           // Terminal tab — we render it as a user bubble either way).
-          setMessages((prev) => [
-            ...prev,
-            { role: "user", content: msg.text as string },
-          ]);
+          //
+          // Special case for mid-turn injection (issue #106): if there's
+          // a local optimistic bubble in `queued` state with matching
+          // text, flip it to `delivered` instead of appending a duplicate.
+          // The first match wins; only the first matching queued bubble
+          // is flipped.
+          const incoming = msg.text as string;
+          setMessages((prev) => {
+            const queuedIdx = prev.findIndex(
+              (m) =>
+                m.role === "user" &&
+                m.injectionState === "queued" &&
+                m.content === incoming,
+            );
+            if (queuedIdx >= 0) {
+              const next = prev.slice();
+              next[queuedIdx] = {
+                ...next[queuedIdx],
+                injectionState: "delivered",
+              };
+              return next;
+            }
+            return [...prev, { role: "user", content: incoming }];
+          });
           break;
+        }
         case "chat_text_delta":
           firstByteSeenRef.current = true;
           setWaitingFirstByte(false);
@@ -398,7 +537,13 @@ export function ChatView({ active, modalOpen }: Props) {
           // `ui/notifications/tool-result` push can carry it as a
           // standard MCP text content block.
           const ui = msg.ui_resource as
-            | { uri: string; html: string; mime?: string }
+            | {
+                uri: string;
+                html: string;
+                mime?: string;
+                allow_same_origin?: boolean;
+                auto_size?: boolean;
+              }
             | undefined;
           const output = (msg.output as string | undefined) ?? "";
           // M6.38.9: parse `Source: <engine>` from the first line of
@@ -432,7 +577,15 @@ export function ChatView({ active, modalOpen }: Props) {
                     ...candidate,
                     toolDone: true,
                     content: ui ? output : candidate.content,
-                    uiResource: ui,
+                    uiResource: ui
+                      ? {
+                          uri: ui.uri,
+                          html: ui.html,
+                          mime: ui.mime,
+                          allowSameOrigin: ui.allow_same_origin === true,
+                          autoSize: ui.auto_size === true,
+                        }
+                      : undefined,
                     toolSource,
                   },
                   ...prev.slice(i + 1),
@@ -449,6 +602,36 @@ export function ChatView({ active, modalOpen }: Props) {
             { role: "system", content: msg.text as string },
           ]);
           break;
+        case "chat_workflow_review": {
+          // dev-plan/32 Tier 3: spawn a review bubble. We replace any
+          // earlier review bubble for the same id (re-author cycle
+          // emits a fresh `WorkflowReviewRequest` with revision + 1)
+          // so the user sees the latest revision in place rather
+          // than a growing stack.
+          const id = typeof msg.id === "string" ? msg.id : "";
+          const script = typeof msg.script === "string" ? msg.script : "";
+          const prompt = typeof msg.prompt === "string" ? msg.prompt : "";
+          const model = typeof msg.model === "string" ? msg.model : "?";
+          const revision = typeof msg.revision === "number" ? msg.revision : 0;
+          if (!id) break;
+          setMessages((prev) => {
+            const existing = prev.findIndex(
+              (m) => m.role === "workflow_review" && m.workflowReview?.id === id,
+            );
+            const next: ChatMessage = {
+              role: "workflow_review",
+              content: "",
+              workflowReview: { id, script, prompt, model, revision },
+            };
+            if (existing >= 0) {
+              const out = prev.slice();
+              out[existing] = next;
+              return out;
+            }
+            return [...prev, next];
+          });
+          break;
+        }
         case "chat_skill_model_note":
           // Skill-recommended-model swap or fallback. Renders as the
           // same muted system bubble as slash output — terse, in-line
@@ -656,7 +839,29 @@ export function ChatView({ active, modalOpen }: Props) {
     }
     // Allow send when EITHER text or attachments are present —
     // "describe this image" with no text is a valid use case.
-    if ((!text && attachments.length === 0) || streaming) return;
+    if (!text && attachments.length === 0) return;
+
+    // Mid-turn injection path (issue #106): if the agent is already
+    // streaming, the message goes into the agent's injection queue
+    // instead of starting a new turn. The agent drains the queue at
+    // the next tool_result boundary and folds the text into the
+    // conversation so the user can steer mid-task. Attachments
+    // can't ride along — injection only supports plain text in v1.
+    if (streaming && text && !text.startsWith("/")) {
+      const injectionId = `inj-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      setInput("");
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "user",
+          content: text,
+          injectionState: "queued",
+          injectionId,
+        },
+      ]);
+      send({ type: "user_input_inject", text, id: injectionId });
+      return;
+    }
     setInput("");
     const pendingAttachments = attachments;
     setAttachments([]);
@@ -675,7 +880,17 @@ export function ChatView({ active, modalOpen }: Props) {
     // Don't optimistically add the user bubble — the backend will echo
     // a `chat_user_message` back to us (it does so for both tabs). This
     // keeps a single source of truth about what's in the conversation.
-    if (!text.startsWith("/")) {
+    //
+    // `/workflow run` and `/workflow resume` are the slash commands
+    // that do genuinely long-running work (author + review + execute /
+    // replay + execute), so flip streaming on for them too — otherwise
+    // the Stop button (visible only while `streaming === true`) stays
+    // hidden during the workflow lifecycle. The backend emits TurnDone
+    // at the end of the workflow, which restores `streaming = false`
+    // via the chat_done handler.
+    const isLongRunningSlash =
+      text.startsWith("/workflow run") || text.startsWith("/workflow resume");
+    if (!text.startsWith("/") || isLongRunningSlash) {
       setStreaming(true);
       // Arm the cold-start indicator: if no text/thinking delta has
       // arrived 5s after submit, surface a "Waiting…" hint so the user
@@ -805,6 +1020,22 @@ export function ChatView({ active, modalOpen }: Props) {
           // ✓ done) rather than a full bubble — the chat tab is for
           // the user↔assistant conversation; raw tool output lives on
           // the Terminal tab.
+          // dev-plan/32 Tier 3 workflow review bubble. Renders a
+          // dedicated card with Approve / Cancel / Re-author buttons;
+          // each click posts a `workflow_decision` back through IPC.
+          if (msg.role === "workflow_review" && msg.workflowReview) {
+            const wr = msg.workflowReview;
+            return (
+              <WorkflowReviewBubble
+                key={`${i}-${wr.id}-${wr.revision}`}
+                id={wr.id}
+                script={wr.script}
+                prompt={wr.prompt}
+                model={wr.model}
+                revision={wr.revision}
+              />
+            );
+          }
           if (msg.role === "tool") {
             const glyph = msg.toolDone ? "✓" : "▸";
             const copied = copiedMessageIndex === i;
@@ -826,7 +1057,7 @@ export function ChatView({ active, modalOpen }: Props) {
             return (
               <div key={i} className="flex justify-start">
                 <div
-                  className={`group flex max-w-[80%] flex-col gap-1 ${widget || todos ? "w-[80%]" : ""}`}
+                  className={`group flex max-w-[92%] sm:max-w-[80%] flex-col gap-1 ${widget || todos ? "w-[92%] sm:w-[80%]" : ""}`}
                   style={{
                     color: "var(--text-secondary)",
                     fontFamily:
@@ -924,6 +1155,8 @@ export function ChatView({ active, modalOpen }: Props) {
                     <McpAppIframe
                       uri={widget.uri}
                       html={widget.html}
+                      allowSameOrigin={widget.allowSameOrigin === true}
+                      autoSize={widget.autoSize === true}
                       parentToolName={msg.toolName ?? ""}
                       toolResult={{
                         content: [{ type: "text", text: msg.content }],
@@ -954,7 +1187,7 @@ export function ChatView({ active, modalOpen }: Props) {
               className={`flex ${msg.role === "user" ? "justify-end" : isSystem || isError ? "justify-center" : "justify-start"}${needsTurnGap ? " pt-4" : ""}`}
             >
               <div
-                className={`group relative max-w-[80%] rounded-lg py-2 pl-3 pr-9 text-sm ${isAssistant ? "" : "whitespace-pre-wrap"}`}
+                className={`group relative max-w-[92%] sm:max-w-[80%] rounded-lg py-2 pl-3 pr-9 text-sm ${isAssistant ? "" : "whitespace-pre-wrap"}`}
                 style={{
                   background:
                     msg.role === "user"
@@ -1068,7 +1301,7 @@ export function ChatView({ active, modalOpen }: Props) {
                         ),
                       }}
                     >
-                      {stripThinkBlocks(msg.content)}
+                      {wrapBareJsonBlocks(stripThinkBlocks(msg.content))}
                     </ReactMarkdown>
                   </div>
                 ) : isError ? (
@@ -1081,6 +1314,33 @@ export function ChatView({ active, modalOpen }: Props) {
                 ) : (
                   msg.content
                 )}
+                {msg.injectionState && (
+                  // Mid-turn injection badge (issue #106). "queued"
+                  // → message sits in the agent's queue; "delivered"
+                  // → agent drained it at a tool_result boundary and
+                  // the LLM now sees it in the next turn's context.
+                  <span
+                    className="ml-2 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wider align-middle"
+                    style={{
+                      background:
+                        msg.injectionState === "queued"
+                          ? "color-mix(in srgb, var(--accent) 18%, transparent)"
+                          : "color-mix(in srgb, #22c55e 22%, transparent)",
+                      color:
+                        msg.injectionState === "queued"
+                          ? "var(--accent)"
+                          : "#22c55e",
+                      fontWeight: 600,
+                    }}
+                    title={
+                      msg.injectionState === "queued"
+                        ? "Queued — the agent will see this at the next tool boundary"
+                        : "Delivered — the agent has read this message"
+                    }
+                  >
+                    {msg.injectionState === "queued" ? "queued" : "delivered"}
+                  </span>
+                )}
                 <CopyMessageButton
                   copied={copied}
                   onCopy={() => copyMessage(msg, i)}
@@ -1091,10 +1351,20 @@ export function ChatView({ active, modalOpen }: Props) {
         }), [messages, copiedMessageIndex, copyMessage, handleChatLinkClick]);
 
   const awaitingUserAnswer = askPrompt !== null;
-  const inputDisabled = streaming && !awaitingUserAnswer;
+  // Allow typing while the agent is streaming so the user can queue
+  // a mid-turn correction (issue #106). The textarea is only locked
+  // when there's literally no place for input (e.g. AskUserQuestion
+  // path uses a different prompt component).
+  const inputDisabled = false;
+  // Submit-while-streaming is allowed for plain text (the message
+  // queues into the agent's injection buffer). Slash commands and
+  // file attachments don't take the inject path in v1 — keep the
+  // old gate for those.
   const submitDisabled = awaitingUserAnswer
     ? !input.trim()
-    : streaming || (!input.trim() && attachments.length === 0);
+    : streaming
+      ? !input.trim() || input.trim().startsWith("/") || attachments.length > 0
+      : (!input.trim() && attachments.length === 0);
   // The full question now renders as a markdown card above the input
   // (see `<AskCard>` below) — the placeholder is just a short hint
   // that points at the card. Truncating multi-line markdown into a

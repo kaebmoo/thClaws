@@ -24,7 +24,9 @@
 //! build their own `IpcContext` flavor and call [`handle_ipc`] uniformly.
 //! The body of [`handle_ipc`] is identical regardless of transport.
 
-use crate::permissions::GuiApprover;
+use crate::permissions::{
+    AgentOrigin, ApprovalDecision, ApprovalRequest, ApprovalSink, GuiApprover,
+};
 use crate::shared_session::{SharedSessionHandle, ShellInput};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -62,11 +64,33 @@ pub type SendInitialStateFn = Arc<dyn Fn() + Send + Sync>;
 /// client (the browser's CSS zoom handles the rest).
 pub type ZoomFn = Arc<dyn Fn(f64) + Send + Sync>;
 
+/// dev-plan/42: resolve the session store for IPC session ops. In
+/// multiuser `--serve` the handle carries per-user `session_roots`, so
+/// session list/rename/delete must hit THAT user's `sessions_dir` — not
+/// `SessionStore::default_path()` (process-cwd-relative = the owner's
+/// shared `/workspace/.thclaws/sessions/`, which leaked every user the
+/// owner's sessions and made the listed ids unloadable by the per-user
+/// worker). Falls back to the default path for single-tenant.
+fn ipc_session_store(ctx: &IpcContext) -> Option<crate::session::SessionStore> {
+    ctx.shared
+        .session_roots
+        .as_ref()
+        .map(|r| crate::session::SessionStore::new(r.sessions_dir.clone()))
+        .or_else(|| {
+            crate::session::SessionStore::default_path().map(crate::session::SessionStore::new)
+        })
+}
+
 /// Everything the IPC dispatch needs from its surrounding transport.
 /// Construct one per session in the transport's setup; pass `&` to
 /// [`handle_ipc`] for each inbound message.
 #[derive(Clone)]
 pub struct IpcContext {
+    /// `true` for cloud `--serve` mode (no desktop wry window). Used
+    /// by `get_cwd` to skip the workspace-folder modal — the cloud
+    /// engine's cwd is fixed at `/workspace` by the runner template;
+    /// the desktop GUI lets the user pick at startup.
+    pub is_serve_mode: bool,
     pub shared: Arc<SharedSessionHandle>,
     pub approver: Arc<GuiApprover>,
     pub pending_asks: PendingAsks,
@@ -74,6 +98,30 @@ pub struct IpcContext {
     pub on_quit: QuitFn,
     pub on_send_initial_state: SendInitialStateFn,
     pub on_zoom: ZoomFn,
+    /// dev-plan/32 Tier 3 workflow review approver. The
+    /// `workflow_decision` IPC message looks up pending requests by
+    /// `id` and resolves the matching oneshot, the same way the
+    /// tool-call approver resolves `approval_response`.
+    pub workflow_approver: Arc<crate::workflow::WorkflowApprover>,
+}
+
+/// Strip a single pair of wrapping `"…"` or `'…'` quotes from `s` if
+/// present. Used to normalise pasted API keys at the `api_key_set`
+/// boundary — copy-paste from a `.env` file / shell `export` line
+/// often includes the surrounding quotes verbatim, and a key like
+/// `"sk-or-v1-…"` becomes `Authorization: Bearer "sk-or-v1-…"` on
+/// the wire, which OpenRouter rejects as `Missing Authentication
+/// header` (issue #145).
+fn strip_wrapping_quotes(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2
+        && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
+    {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    }
 }
 
 /// Dispatch a single inbound IPC message. Routes by `msg.type` to one
@@ -122,9 +170,40 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 .map(|s| s.to_string())
                 .unwrap_or_default();
             let trimmed = line.trim_end_matches(['\r', '\n']).to_string();
-            if !trimmed.is_empty() {
-                let _ = ctx.shared.input_tx.send(ShellInput::Line(trimmed));
+            if trimmed.is_empty() {
+                return true;
             }
+            // dev-plan/32 Tier 3 Terminal-tab approval intercept. The
+            // worker loop is blocked inside `dispatch_workflow_run`'s
+            // `.await` on the WorkflowApprover's oneshot — any text
+            // queued through `input_tx` waits forever until the
+            // review resolves. Catch typed decisions here at the IPC
+            // boundary so they reach the approver directly. The same
+            // parser also runs at the top of `handle_line` as a
+            // safety net for non-IPC input paths (e.g. /loop body
+            // re-fires).
+            let pending = ctx.workflow_approver.pending_ids();
+            if !pending.is_empty() {
+                match crate::workflow::parse_chat_decision(&trimmed) {
+                    Some(decision) => {
+                        if let Some(id) = pending.into_iter().next_back() {
+                            ctx.workflow_approver.resolve(&id, decision);
+                        }
+                        return true;
+                    }
+                    None => {
+                        let _ = ctx.shared.events_tx.send(
+                            crate::shared_session::ViewEvent::SlashOutput(
+                                "workflow review pending — type `approve`, `cancel`, or \
+                                 `rework: <note>` (or click in the Chat tab)"
+                                    .to_string(),
+                            ),
+                        );
+                        return true;
+                    }
+                }
+            }
+            let _ = ctx.shared.input_tx.send(ShellInput::Line(trimmed));
         }
 
         "frontend_ready" => {
@@ -150,9 +229,327 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             ctx.approver.resolve(id, decision);
         }
 
+        // dev-plan/32 Tier 3 workflow approval response. Frontend posts
+        // `{type: "workflow_decision", id, decision: "approve" |
+        // "cancel" | "rework", note?}` when the user clicks a button
+        // on the review bubble; we route it to the matching pending
+        // oneshot inside WorkflowApprover.
+        "workflow_decision" => {
+            let id = msg
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let decision_str = msg
+                .get("decision")
+                .and_then(|v| v.as_str())
+                .unwrap_or("cancel");
+            let decision = match decision_str {
+                "approve" => crate::workflow::WorkflowDecision::Approve,
+                "rework" => {
+                    let note = msg
+                        .get("note")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    crate::workflow::WorkflowDecision::Rework(note)
+                }
+                _ => crate::workflow::WorkflowDecision::Cancel,
+            };
+            ctx.workflow_approver.resolve(&id, decision);
+        }
+
         "shell_cancel" => {
             // Worker observes ctrl-C / cancel via the cancel token.
             ctx.shared.request_cancel();
+        }
+
+        // GUI Shell (dev-plan/33 Tier 1) — same input/cancel plumbing as
+        // shell_input / shell_cancel above, but framed as a separate IPC
+        // type so the bridge runtime's request/response correlator can
+        // round-trip a `runId` back to the shell's JS through the
+        // gui_shell_event dispatch. Per-shell session isolation is Tier 2;
+        // Tier 1 routes through the shared session, which means the Chat
+        // tab will also see the shell's conversation. Documented limit.
+        "gui_shell_run" => {
+            let prompt = msg
+                .get("prompt")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let session_id = msg
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            if !prompt.is_empty() {
+                let _ = ctx.shared.input_tx.send(ShellInput::Line(prompt));
+            }
+            // Reply so the bridge's Promise resolves. Tier 1 echoes the
+            // request id as a placeholder runId — multi-run correlation
+            // (cancelling a specific in-flight run) lands in Tier 2.
+            (ctx.dispatch)(
+                serde_json::json!({
+                    "type": "gui_shell_event",
+                    "sessionId": session_id,
+                    "replyTo": request_id,
+                    "result": { "runId": format!("run-{request_id}") },
+                })
+                .to_string(),
+            );
+        }
+
+        "gui_shell_cancel" => {
+            ctx.shared.request_cancel();
+        }
+
+        // GUI Shell (dev-plan/33 Tier 2/3) — direct tool invocation
+        // bypassing the agent loop. The shell's domain UI uses this
+        // for deterministic actions (Media Studio's "Generate" button
+        // calls TextToImage/TextToVideo directly; no model round-trip).
+        //
+        // Rules:
+        //   - Read-only tools (ls/read/glob/grep/web_fetch/...) → run.
+        //   - Tools whose `requires_approval(&input)` returns true →
+        //     routed through the same `GuiApprover` the agent uses
+        //     (dev-plan/33 Tier 3 + dev-plan/40 Tier 3). The user gets
+        //     the normal approval modal; Deny surfaces as an error.
+        //   - MCP-contributed tools are NOT visible here — the fresh
+        //     ToolRegistry::with_builtins() doesn't include them. The
+        //     media tools (dev-plan/40) are flagged by `imageToolsEnabled`
+        //     (same as for the agent) and registered below only when that
+        //     flag is on OR the calling shell is `media-studio` — the
+        //     built-in Media Studio is the media on-ramp, so loading it
+        //     auto-enables them without the user toggling settings.
+        //
+        // The IPC dispatch is sync but Tool::call is async + the wry
+        // IPC thread has no tokio runtime context. Build a per-call
+        // single-threaded runtime in a fresh OS thread. The approval
+        // await resolves out-of-band: the GuiApprover sends a modal
+        // request to the frontend and the later `approval_response`
+        // IPC (on the main thread) calls `approver.resolve(id, ...)`,
+        // completing the oneshot this block_on is parked on.
+        "gui_shell_tool_invoke" => {
+            let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let session_id = msg
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let tool_name = msg
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let args = msg.get("args").cloned().unwrap_or(serde_json::Value::Null);
+            let shell_id = msg
+                .get("shellId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            // Media tools (dev-plan/40) are flagged by `imageToolsEnabled`
+            // like for the agent — but the built-in Media Studio shell is
+            // the on-ramp for media generation, so loading it auto-enables
+            // them without the user toggling settings. So: register the
+            // media tools into the invoke registry only when the flag is on
+            // OR the calling shell is media-studio. (Other shells stay
+            // gated by the flag.)
+            let media_enabled = shell_id == "media-studio"
+                || crate::config::AppConfig::load()
+                    .map(|c| c.image_tools_enabled)
+                    .unwrap_or(false);
+            let dispatch = ctx.dispatch.clone();
+            let approver = ctx.approver.clone();
+            std::thread::spawn(move || {
+                let outcome: std::result::Result<String, String> = (|| {
+                    if tool_name.is_empty() {
+                        return Err("gui_shell_tool_invoke: missing 'name' field".into());
+                    }
+                    let mut registry = crate::tools::ToolRegistry::with_builtins();
+                    if media_enabled {
+                        registry.register(Arc::new(crate::tools::TextToImageTool));
+                        registry.register(Arc::new(crate::tools::ImageToImageTool));
+                        registry.register(Arc::new(crate::tools::TextToVideoTool));
+                        registry.register(Arc::new(crate::tools::ImageToVideoTool));
+                        registry.register(Arc::new(crate::tools::MediaJobStatusTool));
+                    }
+                    let tool = registry
+                        .get(&tool_name)
+                        .ok_or_else(|| format!("unknown tool: {tool_name}"))?;
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|e| format!("tokio runtime build: {e}"))?;
+                    rt.block_on(async {
+                        if tool.requires_approval(&args) {
+                            let decision = approver
+                                .approve(&ApprovalRequest {
+                                    tool_name: tool_name.clone(),
+                                    input: args.clone(),
+                                    summary: Some(format!("{tool_name} (GUI shell)")),
+                                    originator: AgentOrigin::Main,
+                                })
+                                .await;
+                            if matches!(decision, ApprovalDecision::Deny) {
+                                return Err(format!("tool '{tool_name}' denied by user"));
+                            }
+                        }
+                        tool.call(args).await.map_err(|e| e.to_string())
+                    })
+                })();
+                let reply = match outcome {
+                    Ok(output) => serde_json::json!({
+                        "type": "gui_shell_event",
+                        "sessionId": session_id,
+                        "replyTo": request_id,
+                        "result": output,
+                    }),
+                    Err(err) => serde_json::json!({
+                        "type": "gui_shell_event",
+                        "sessionId": session_id,
+                        "replyTo": request_id,
+                        "error": err,
+                    }),
+                };
+                dispatch(reply.to_string());
+            });
+        }
+
+        // GUI Shell (dev-plan/33 Tier 2) — per-shell, per-session
+        // key-value storage. State lives at
+        // ~/.config/thclaws/gui-shell/<shellId>/state/<sessionId>.json
+        // — user-level regardless of how the shell was installed (state
+        // is the user's, not the repo's, so uninstall doesn't lose it).
+        "gui_shell_storage_get" => {
+            let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let session_id = msg.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+            let shell_id = msg.get("shellId").and_then(|v| v.as_str()).unwrap_or("");
+            let key = msg.get("key").and_then(|v| v.as_str()).unwrap_or("");
+            let result = match ctx.shared.session_roots.as_ref() {
+                Some(roots) => {
+                    crate::gui_shell::storage::get_in(&roots.storage_dir, shell_id, session_id, key)
+                }
+                None => crate::gui_shell::storage::get(shell_id, session_id, key),
+            };
+            let reply = match result {
+                Ok(v) => serde_json::json!({
+                    "type": "gui_shell_event",
+                    "sessionId": session_id,
+                    "replyTo": request_id,
+                    "result": { "value": v },
+                }),
+                Err(e) => serde_json::json!({
+                    "type": "gui_shell_event",
+                    "sessionId": session_id,
+                    "replyTo": request_id,
+                    "error": e.to_string(),
+                }),
+            };
+            (ctx.dispatch)(reply.to_string());
+        }
+
+        // Running-jobs UI (dev-plan/36) — point-in-time query for the
+        // current busy state. Frontend hits this on initial connect /
+        // reconnect so the running chip + auto-reattach logic don't
+        // depend on catching a transient `gui_busy_changed` event
+        // that fired before the WS was open. The shape mirrors the
+        // event payload so a single React hook handles both.
+        "gui_busy_query" => {
+            let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let meta = crate::agent_activity::busy_meta();
+            let started_at_ms = meta.as_ref().and_then(|m| {
+                m.started_at
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_millis() as u64)
+            });
+            (ctx.dispatch)(
+                serde_json::json!({
+                    "type": "gui_busy_result",
+                    "id": request_id,
+                    "busy": meta.is_some(),
+                    "sessionId": meta.as_ref().map(|m| m.session_id.clone()),
+                    "startedAtMs": started_at_ms,
+                    "lastProgress": meta.as_ref().and_then(|m| m.last_progress.clone()),
+                })
+                .to_string(),
+            );
+        }
+
+        // GUI Shell (dev-plan/33 Tier 2) — picker list. Returns the
+        // merged registry (builtin + user + project) so the picker can
+        // render its grid. Reply is fired through ctx.dispatch as a
+        // gui_shell_list_result envelope — the frontend correlates by
+        // the request id it sent. Includes the `tabDefault` resolved
+        // from settings.json::guiShell so the picker can auto-open
+        // the user's preferred shell without showing the grid.
+        "gui_shell_list" => {
+            let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let registry = crate::gui_shell::ShellRegistry::new();
+            let listed: Vec<serde_json::Value> = registry
+                .list()
+                .into_iter()
+                .map(|(source, m)| {
+                    serde_json::json!({
+                        "id": m.id,
+                        "name": m.name,
+                        "version": m.version,
+                        "description": m.description,
+                        "icon": m.icon,
+                        "source": source.as_str(),
+                        "permissions": m.permissions,
+                    })
+                })
+                .collect();
+            // Resolve tabDefault from layered config. None when unset
+            // (picker shows grid as usual).
+            let tab_default = crate::config::AppConfig::load().ok().and_then(|c| {
+                c.gui_shell
+                    .and_then(|s| s.tab_default().map(str::to_string))
+            });
+            (ctx.dispatch)(
+                serde_json::json!({
+                    "type": "gui_shell_list_result",
+                    "id": request_id,
+                    "shells": listed,
+                    "tabDefault": tab_default,
+                })
+                .to_string(),
+            );
+        }
+
+        "gui_shell_storage_set" => {
+            let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let session_id = msg.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+            let shell_id = msg.get("shellId").and_then(|v| v.as_str()).unwrap_or("");
+            let key = msg.get("key").and_then(|v| v.as_str()).unwrap_or("");
+            let value = msg.get("value").cloned().unwrap_or(serde_json::Value::Null);
+            let result = match ctx.shared.session_roots.as_ref() {
+                Some(roots) => crate::gui_shell::storage::set_in(
+                    &roots.storage_dir,
+                    shell_id,
+                    session_id,
+                    key,
+                    value,
+                ),
+                None => crate::gui_shell::storage::set(shell_id, session_id, key, value),
+            };
+            let reply = match result {
+                Ok(()) => serde_json::json!({
+                    "type": "gui_shell_event",
+                    "sessionId": session_id,
+                    "replyTo": request_id,
+                    "result": null,
+                }),
+                Err(e) => serde_json::json!({
+                    "type": "gui_shell_event",
+                    "sessionId": session_id,
+                    "replyTo": request_id,
+                    "error": e.to_string(),
+                }),
+            };
+            (ctx.dispatch)(reply.to_string());
         }
 
         // Schedule-add modal cron preview. Frontend debounces field
@@ -295,6 +692,9 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let entry = crate::schedule::Schedule {
                 id: id.clone(),
                 cron,
+                // GUI schedule-add is recurring-only for now; one-shot
+                // (--at/--in) is CLI-only until the modal mirrors it.
+                run_at: None,
                 cwd: std::path::PathBuf::from(cwd),
                 prompt,
                 model,
@@ -754,21 +1154,256 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             (ctx.dispatch)(payload.to_string());
         }
 
+        // ── Telegram bridge wiring (dev-plan/29 Tier 1) ────────────
+        // The GUI TelegramConnectModal hits these; the polling session
+        // itself lives on the worker so its cancel token sits on one
+        // tokio task (mirrors the LINE handlers above).
+        "telegram_status" => {
+            // Live status (pending pairings + counts) lives in the
+            // worker's in-memory handle — ask it to broadcast a fresh
+            // snapshot rather than reading disk. The worker answers with
+            // a disconnected payload when no session is active.
+            let _ = ctx.shared.input_tx.send(ShellInput::TelegramStatusRequest);
+        }
+        "telegram_connect" => {
+            let token = msg
+                .get("bot_token")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            // A blank token is only valid when TELEGRAM_BOT_TOKEN is set
+            // — let the worker's getMe be the final arbiter, but catch an
+            // obviously-malformed pasted token here for a fast error.
+            if !token.is_empty() {
+                if let Err(e) = crate::telegram::config::validate_token(&token) {
+                    let payload = serde_json::json!({
+                        "type": "telegram_connect_ack",
+                        "ok": false,
+                        "error": e.to_string(),
+                    });
+                    (ctx.dispatch)(payload.to_string());
+                    return true;
+                }
+            }
+            // Merge onto any existing on-disk config so we don't clobber
+            // allow_from / policy when the user re-pastes a token.
+            let mut cfg = crate::telegram::TelegramConfig::load()
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            cfg.enabled = true;
+            if !token.is_empty() {
+                cfg.bot_token = Some(token);
+            }
+            if let Err(e) = cfg.save() {
+                let payload = serde_json::json!({
+                    "type": "telegram_connect_ack",
+                    "ok": false,
+                    "error": format!("save config: {e}"),
+                });
+                (ctx.dispatch)(payload.to_string());
+                return true;
+            }
+            let _ = ctx.shared.input_tx.send(ShellInput::TelegramConnect(cfg));
+            let payload = serde_json::json!({
+                "type": "telegram_connect_ack",
+                "ok": true,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+        "telegram_disconnect" => {
+            let _ = ctx.shared.input_tx.send(ShellInput::TelegramDisconnect);
+            let payload = serde_json::json!({
+                "type": "telegram_disconnect_ack",
+                "ok": true,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+        "telegram_pairing_approve" => {
+            if let Some(code) = msg.get("code").and_then(|v| v.as_str()) {
+                let _ = ctx
+                    .shared
+                    .input_tx
+                    .send(ShellInput::TelegramPairingApprove {
+                        code: code.to_string(),
+                    });
+            }
+        }
+        "telegram_pairing_reject" => {
+            if let Some(code) = msg.get("code").and_then(|v| v.as_str()) {
+                let _ = ctx.shared.input_tx.send(ShellInput::TelegramPairingReject {
+                    code: code.to_string(),
+                });
+            }
+        }
+
+        // ── Messenger bridge wiring (dev-plan/31) ──────────────────
+        // The GUI MessengerConnectModal hits these. Pairing redemption
+        // mirrors `line_pair`: POST the relay's /pair with the code the
+        // relay DMed the user, save the binding JWT, hand off to the
+        // worker. Status / disconnect mirror the LINE arms.
+        "messenger_status" => {
+            let _ = ctx.shared.input_tx.send(ShellInput::MessengerStatusRequest);
+        }
+        "messenger_pair" => {
+            let code = msg
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let cwd = msg
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| ".".into())
+                });
+            let machine_label = msg
+                .get("machine_label")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    std::env::var("HOSTNAME")
+                        .or_else(|_| std::env::var("COMPUTERNAME"))
+                        .unwrap_or_else(|_| "this-machine".into())
+                });
+            let server_url = std::env::var("THCLAWS_MESSENGER_SERVER")
+                .ok()
+                .map(|u| u.trim_end_matches('/').to_string())
+                .unwrap_or_else(|| {
+                    crate::messenger::config::DEFAULT_SERVER_URL
+                        .trim_end_matches('/')
+                        .to_string()
+                });
+            let pair_url = format!("{server_url}/pair");
+            let input_tx = ctx.shared.input_tx.clone();
+            let dispatch = ctx.dispatch.clone();
+            tokio::spawn(async move {
+                let body = serde_json::json!({
+                    "code": code,
+                    "cwd": cwd,
+                    "machine_label": machine_label,
+                });
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(15))
+                    .build()
+                    .expect("reqwest client build");
+                let resp = match client.post(&pair_url).json(&body).send().await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let payload = serde_json::json!({
+                            "type": "messenger_pair_result",
+                            "ok": false,
+                            "error": format!("relay HTTP: {e}"),
+                        });
+                        (dispatch)(payload.to_string());
+                        return;
+                    }
+                };
+                let status = resp.status();
+                let response_text = resp.text().await.unwrap_or_default();
+                if !status.is_success() {
+                    let payload = serde_json::json!({
+                        "type": "messenger_pair_result",
+                        "ok": false,
+                        "error": format!("relay {status}: {response_text}"),
+                    });
+                    (dispatch)(payload.to_string());
+                    return;
+                }
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&response_text).unwrap_or(serde_json::Value::Null);
+                let token = parsed
+                    .get("token")
+                    .and_then(|t| t.as_str())
+                    .filter(|t| !t.is_empty())
+                    .map(String::from);
+                let Some(token) = token else {
+                    let payload = serde_json::json!({
+                        "type": "messenger_pair_result",
+                        "ok": false,
+                        "error": "relay response missing 'token'",
+                    });
+                    (dispatch)(payload.to_string());
+                    return;
+                };
+                let cfg = crate::messenger::MessengerConfig {
+                    binding_token: token,
+                    server_url: Some(server_url.clone()),
+                    page_name: None,
+                    page_id: None,
+                };
+                if let Err(e) = cfg.save() {
+                    let payload = serde_json::json!({
+                        "type": "messenger_pair_result",
+                        "ok": false,
+                        "error": format!("save config: {e}"),
+                    });
+                    (dispatch)(payload.to_string());
+                    return;
+                }
+                let _ = input_tx.send(crate::shared_session::ShellInput::MessengerConnect(cfg));
+                let payload = serde_json::json!({
+                    "type": "messenger_pair_result",
+                    "ok": true,
+                    "server_url": server_url,
+                });
+                (dispatch)(payload.to_string());
+            });
+        }
+        "messenger_disconnect" => {
+            let _ = ctx
+                .shared
+                .input_tx
+                .send(crate::shared_session::ShellInput::MessengerDisconnect);
+            let payload = serde_json::json!({
+                "type": "messenger_disconnect_ack",
+                "ok": true,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
         // ── Working directory (M6.36 SERVE9d — migrated from gui.rs) ─
         "get_cwd" => {
             let cwd = std::env::current_dir()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| ".".into());
+            // Serve mode: cwd is fixed (cloud runner template mounts
+            // `/workspace`), so skip the picker modal. Also resolve
+            // `guiShell.tabDefault` and pass it through as `initial_tab`
+            // — the frontend uses this to land on the UI tab when a
+            // shell is pinned, instead of always defaulting to terminal.
+            let tab_default = crate::config::AppConfig::load().ok().and_then(|c| {
+                c.gui_shell
+                    .and_then(|s| s.tab_default().map(str::to_string))
+            });
+            let initial_tab = if tab_default.is_some() {
+                Some("ui")
+            } else {
+                None
+            };
             let payload = serde_json::json!({
                 "type": "current_cwd",
                 "path": cwd,
-                "needs_modal": true,
+                "needs_modal": !ctx.is_serve_mode,
                 "recent_dirs": crate::recent_dirs::load_recent_dirs(),
+                "initial_tab": initial_tab,
             });
             (ctx.dispatch)(payload.to_string());
         }
 
         "set_cwd" => {
+            // dev-plan/42: in a multiuser serve pod, switching the
+            // *process* cwd would relocate every tenant's working dir.
+            // Refuse — each user's root is fixed to their workspace-<id>/
+            // via the task-local scope. (Desktop / single-tenant serve is
+            // unaffected.)
+            if crate::workdir::is_multiuser() {
+                return true;
+            }
             if let Some(path) = msg.get("path").and_then(|v| v.as_str()) {
                 let p = std::path::Path::new(path);
                 if p.is_dir() {
@@ -841,6 +1476,12 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                     None,
                 ),
             };
+            // Trigger an in-place system-prompt rebuild on the running
+            // worker — without this, an edit-and-save cycle in the
+            // Settings menu only takes effect on the next session.
+            if ok {
+                let _ = ctx.shared.input_tx.send(ShellInput::InstructionsChanged);
+            }
             let payload = serde_json::json!({
                 "type": "instructions_save_result",
                 "scope": scope,
@@ -851,9 +1492,274 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             (ctx.dispatch)(payload.to_string());
         }
 
+        // ── Deploy target (dev-plan/28: /deploy command config) ────
+        "remote_agent_get" => {
+            let url = crate::remote_agent::url();
+            // Resolve the token to learn whether one is stored AND
+            // how long it is — the length is what powers the
+            // ••••• sentinel sizing in the Settings modal (matches
+            // the api_key_status row shape). The value itself is
+            // NEVER returned to the frontend.
+            let token_resolved = crate::remote_agent::token();
+            let has_token = token_resolved.is_some();
+            let token_length = token_resolved.as_deref().map(|t| t.len()).unwrap_or(0);
+            let env_var_set = std::env::var("THCLAWS_REMOTE_AGENT_TOKEN")
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false);
+            let payload = serde_json::json!({
+                "type": "remote_agent_config",
+                "url": url,
+                "has_token": has_token,
+                "token_length": token_length,
+                "env_var_set": env_var_set,
+                "keychain_writable": crate::remote_agent::keychain_writable(),
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        "remote_agent_set" => {
+            // url and token are independent — either can be omitted to
+            // update only one. Empty string explicitly clears.
+            let url_arg = msg.get("url").and_then(|v| v.as_str());
+            let token_arg = msg.get("token").and_then(|v| v.as_str());
+            let mut url_ok = true;
+            let mut url_err = String::new();
+            let mut token_ok = true;
+            let mut token_err = String::new();
+
+            if let Some(url) = url_arg {
+                let mut project = crate::config::ProjectConfig::load().unwrap_or_default();
+                let normalized = if url.trim().is_empty() {
+                    None
+                } else {
+                    Some(url)
+                };
+                project.set_remote_agent_url(normalized);
+                if let Err(e) = project.save() {
+                    url_ok = false;
+                    url_err = format!("settings.json write failed: {e}");
+                }
+            }
+
+            if let Some(token) = token_arg {
+                let trimmed = token.trim();
+                let result = if trimmed.is_empty() {
+                    crate::remote_agent::clear_token()
+                } else {
+                    crate::remote_agent::set_token(trimmed)
+                };
+                if let Err(e) = result {
+                    token_ok = false;
+                    token_err = format!("{e}");
+                }
+            }
+
+            let payload = serde_json::json!({
+                "type": "remote_agent_result",
+                "url_ok": url_ok,
+                "url_error": url_err,
+                "token_ok": token_ok,
+                "token_error": token_err,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        // ── thClaws.cloud catalog (dev-plan/34) ────────────────────
+        // Same shape as remote_agent_get/set above. URL persists to
+        // settings.json::cloud.url; token persists to the active
+        // secrets backend (keychain or ~/.config/thclaws/.env), same
+        // bundle as provider API keys.
+        "cloud_config_get" => {
+            let url = crate::cloud::persisted_url();
+            let token_resolved = crate::cloud::token();
+            let has_token = token_resolved.is_some();
+            let token_length = token_resolved.as_deref().map(|t| t.len()).unwrap_or(0);
+            let env_var_set = std::env::var(crate::cloud::ENV_TOKEN)
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false);
+            let payload = serde_json::json!({
+                "type": "cloud_config",
+                "url": url,
+                "default_url": crate::cloud::DEFAULT_CLOUD_URL,
+                "has_token": has_token,
+                "token_length": token_length,
+                "env_var_set": env_var_set,
+                "token_writable": crate::cloud::token_writable(),
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        "cloud_config_set" => {
+            let url_arg = msg.get("url").and_then(|v| v.as_str());
+            let token_arg = msg.get("token").and_then(|v| v.as_str());
+            let mut url_ok = true;
+            let mut url_err = String::new();
+            let mut token_ok = true;
+            let mut token_err = String::new();
+
+            if let Some(url) = url_arg {
+                let mut project = crate::config::ProjectConfig::load().unwrap_or_default();
+                let normalized = if url.trim().is_empty() {
+                    None
+                } else {
+                    Some(url)
+                };
+                project.set_cloud_url(normalized);
+                if let Err(e) = project.save() {
+                    url_ok = false;
+                    url_err = format!("settings.json write failed: {e}");
+                }
+            }
+
+            if let Some(token) = token_arg {
+                let trimmed = token.trim();
+                let result = if trimmed.is_empty() {
+                    crate::cloud::clear_token()
+                } else {
+                    crate::cloud::set_token(trimmed)
+                };
+                if let Err(e) = result {
+                    token_ok = false;
+                    token_err = format!("{e}");
+                }
+            }
+
+            let payload = serde_json::json!({
+                "type": "cloud_config_result",
+                "url_ok": url_ok,
+                "url_error": url_err,
+                "token_ok": token_ok,
+                "token_error": token_err,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        // ── Agent identity (dev-plan/34 Option A) ──────────────────
+        // settings.json::agent block — the folder's authoritative
+        // {id, name, description, uuid}. UUID is server-managed (set
+        // by `cloud publish`, cleared by `cloud unbind`); the GUI lets
+        // the user edit the other three + read the UUID.
+        "agent_config_get" => {
+            let agent = crate::config::ProjectConfig::load().and_then(|c| c.agent.clone());
+            let payload = match agent {
+                Some(a) => serde_json::json!({
+                    "type": "agent_config",
+                    "exists": true,
+                    "id": a.id,
+                    "name": a.name,
+                    "description": a.description,
+                    "uuid": a.uuid,
+                }),
+                None => serde_json::json!({
+                    "type": "agent_config",
+                    "exists": false,
+                    "id": null,
+                    "name": null,
+                    "description": null,
+                    "uuid": null,
+                }),
+            };
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        "agent_config_set" => {
+            // UUID is deliberately NOT writable from the UI — it's
+            // server-assigned. Empty-string for id/name/description
+            // means "clear this field"; absent fields mean "no change".
+            let id = msg.get("id").and_then(|v| v.as_str());
+            let name = msg.get("name").and_then(|v| v.as_str());
+            let description = msg.get("description").and_then(|v| v.as_str());
+
+            let mut project = crate::config::ProjectConfig::load().unwrap_or_default();
+            // Convert "" → None so a cleared input drops the field;
+            // a non-empty value updates it; an absent field is ignored
+            // (preserves existing value — partial update). merge_agent's
+            // None-as-no-change semantics fit publish-side writeback;
+            // here we need explicit-clear, so we mutate `current`
+            // directly so that field-present-but-empty becomes None.
+            let normalize = |s: &str| -> Option<String> {
+                let t = s.trim();
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t.to_string())
+                }
+            };
+            let mut current = project.agent.clone().unwrap_or_default();
+            if let Some(v) = id {
+                current.id = normalize(v);
+            }
+            if let Some(v) = name {
+                current.name = normalize(v);
+            }
+            if let Some(v) = description {
+                current.description = normalize(v);
+            }
+            let all_empty = current.id.is_none()
+                && current.name.is_none()
+                && current.description.is_none()
+                && current.uuid.is_none();
+            project.agent = if all_empty { None } else { Some(current) };
+
+            let (ok, error) = match project.save() {
+                Ok(()) => (true, String::new()),
+                Err(e) => (false, format!("settings.json write failed: {e}")),
+            };
+            let payload = serde_json::json!({
+                "type": "agent_config_result",
+                "ok": ok,
+                "error": error,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        "agent_unbind" => {
+            let mut project = crate::config::ProjectConfig::load().unwrap_or_default();
+            let had_uuid = project
+                .agent
+                .as_ref()
+                .and_then(|a| a.uuid.as_ref())
+                .is_some();
+            project.clear_agent_uuid();
+            let (ok, error) = match project.save() {
+                Ok(()) => (true, String::new()),
+                Err(e) => (false, format!("settings.json write failed: {e}")),
+            };
+            let payload = serde_json::json!({
+                "type": "agent_unbind_result",
+                "ok": ok,
+                "error": error,
+                "had_uuid": had_uuid,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
         // ── Settings panel (M6.36 SERVE9e — migrated from gui.rs) ──
         "secrets_backend_get" => {
-            let backend = crate::secrets::get_backend().map(|b| b.as_str().to_string());
+            // Hosted-workspace short-circuit. Two cloud variants both
+            // pre-inject everything the engine needs at pod-start, so
+            // the first-launch backend picker has nothing to decide:
+            //   - Gateway-routed (THCLAWS_GATEWAY_API_KEY set) — all
+            //     provider calls go through the gateway.
+            //   - BYOK on cloud (just THCLAWS_WORKSPACE_ID set) —
+            //     per-provider keys are decrypted and injected as env
+            //     vars by the K8sProvisioner, never touching keychain
+            //     or .env in the pod.
+            // Both cases return the synthetic "hosted" sentinel which
+            // also drives frontend chrome that's irrelevant in a
+            // cloud workspace (e.g. the SSO Sign-in button — the
+            // visitor is already authenticated at the routing layer).
+            let in_hosted_workspace = std::env::var("THCLAWS_WORKSPACE_ID")
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false)
+                || std::env::var("THCLAWS_GATEWAY_API_KEY")
+                    .map(|v| !v.trim().is_empty())
+                    .unwrap_or(false);
+            let backend = if in_hosted_workspace {
+                Some("hosted".to_string())
+            } else {
+                crate::secrets::get_backend().map(|b| b.as_str().to_string())
+            };
             let payload = serde_json::json!({
                 "type": "secrets_backend",
                 "backend": backend,
@@ -1065,6 +1971,114 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let _ = arboard::Clipboard::new().and_then(|mut c| c.set_text(text.to_string()));
         }
 
+        // ── PTY-backed Shell tab ───────────────────────────────────
+        // Distinct from `shell_input` (agent prompt) and from
+        // `gui_shell_*` (iframe-loaded UI tab). One global session at
+        // a time; `pty_open` replaces any existing session. Output
+        // flows back as `pty_data` (base64 bytes) / `pty_exit` events
+        // emitted by the reader thread inside `shell_pty::open`.
+        #[cfg(feature = "gui")]
+        "pty_open" => {
+            // Opt-in gate. Without `shellTabEnabled: true` in
+            // .thclaws/settings.json we refuse to spawn — protects
+            // against a stale frontend that still has the tab cached
+            // or an external caller poking at the IPC. The frontend
+            // also filters the tab visibility based on this flag.
+            let enabled = crate::config::ProjectConfig::load()
+                .and_then(|c| c.shell_tab_enabled)
+                .unwrap_or(false);
+            if !enabled {
+                let payload = serde_json::json!({
+                    "type": "pty_open_result",
+                    "ok": false,
+                    "error": "shell tab is opt-in — set `shellTabEnabled: true` in .thclaws/settings.json to enable",
+                });
+                (ctx.dispatch)(payload.to_string());
+                return true;
+            }
+            let cmd = msg
+                .get("cmd")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(crate::shell_pty::default_shell);
+            let args: Vec<String> = msg
+                .get("args")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            // Resolve cwd: explicit `cwd` in the payload wins, else
+            // fall back to the worker process's current_dir() — that's
+            // the workspace folder set by the StartupModal / ChangeCwd
+            // flow (`std::env::set_current_dir`). Without this fallback,
+            // portable-pty just inherits whatever cwd the binary
+            // happened to launch from, which can be the user's home or
+            // an arbitrary path. Explicit beats implicit.
+            let cwd = msg
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .map(|p| p.to_string_lossy().to_string())
+                });
+            let cols = msg.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
+            let rows = msg.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
+            let result = crate::shell_pty::open(
+                &cmd,
+                &args,
+                cwd.as_deref(),
+                cols,
+                rows,
+                ctx.dispatch.clone(),
+            );
+            let payload = match result {
+                Ok(()) => serde_json::json!({
+                    "type": "pty_open_result",
+                    "ok": true,
+                    "cmd": cmd,
+                    "cwd": cwd,
+                }),
+                Err(e) => serde_json::json!({
+                    "type": "pty_open_result",
+                    "ok": false,
+                    "error": e,
+                }),
+            };
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        #[cfg(feature = "gui")]
+        "pty_input" => {
+            // Frontend ships keystrokes as base64 (xterm.js may surface
+            // bytes that aren't valid UTF-8 — Alt-key escapes, etc. —
+            // and JSON strings can't carry those losslessly).
+            use base64::Engine;
+            let data_b64 = msg.get("data").and_then(|v| v.as_str()).unwrap_or("");
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data_b64)
+                .unwrap_or_default();
+            if !bytes.is_empty() {
+                let _ = crate::shell_pty::write(&bytes);
+            }
+        }
+
+        #[cfg(feature = "gui")]
+        "pty_resize" => {
+            let cols = msg.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
+            let rows = msg.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
+            let _ = crate::shell_pty::resize(cols, rows);
+        }
+
+        #[cfg(feature = "gui")]
+        "pty_close" => {
+            crate::shell_pty::close();
+        }
+
         // ── AskUserQuestion modal response (M6.36 SERVE9f) ─────────
         "ask_user_response" => {
             let id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -1103,6 +2117,19 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             }
         }
 
+        // Manual settings reload — driven by a "Reload settings"
+        // button (Settings menu). Re-runs the same code path as the
+        // sidebar model picker's auto-reload: dispatches ReloadConfig
+        // → worker re-reads .thclaws/settings.json + AppConfig defaults
+        // → rebuilds the agent in place + broadcasts SettingsChanged so
+        // App.tsx refetches dependent flags (shellTabEnabled, …).
+        "settings_reload" => {
+            let _ = ctx
+                .shared
+                .input_tx
+                .send(crate::shared_session::ShellInput::ReloadConfig);
+        }
+
         // ── Team feature toggle (M6.36 SERVE9f) ────────────────────
         "team_enabled_get" => {
             let enabled = crate::config::ProjectConfig::load()
@@ -1113,6 +2140,250 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 "enabled": enabled,
             });
             (ctx.dispatch)(payload.to_string());
+        }
+
+        // Browser tab status (docs/browser Phase 1). Reports the
+        // engine-managed Playwright MCP config so the tab can show
+        // enabled/headed state + a setup hint when npx is missing.
+        // Live activity is derived client-side from the existing
+        // chat_tool_call/chat_tool_result stream (names `browser.*`).
+        "browser_status_get" => {
+            let cfg = crate::config::AppConfig::load().ok();
+            let enabled = cfg.as_ref().map(|c| c.browser_enabled).unwrap_or(false);
+            let server = crate::config::AppConfig::browser_mcp_config(
+                cfg.as_ref().and_then(|c| c.browser_headless),
+            );
+            let headless = server.args.iter().any(|a| a == "--headless");
+            // `npx` on desktop, the image-preinstalled `playwright-mcp`
+            // when THCLAWS_BROWSER_MCP_CMD is set (cloud runners). Same
+            // resolution the injection guard uses.
+            let command_found = crate::config::command_on_path(&server.command);
+            let payload = serde_json::json!({
+                "type": "browser_status",
+                "enabled": enabled,
+                "headless": headless,
+                "command": format!("{} {}", server.command, server.args.join(" ")),
+                "command_found": command_found,
+                // slice 3: engine owns the chromium → live screencast
+                // + native CDP input are available.
+                "cdp": crate::browser_cdp::cdp_active(),
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        // docs/browser slice 3 — live view. Start pushes `browser_frame`
+        // (JPEG base64) + `browser_console` + `browser_nav` envelopes
+        // through this client's dispatch until stop. Each start
+        // re-attaches to the currently active page, so toggling
+        // takeover recovers from closed tabs.
+        "browser_screencast_start" => {
+            let dispatch = ctx.dispatch.clone();
+            std::thread::spawn(move || {
+                let result = crate::browser_cdp::screencast_start(dispatch.clone());
+                let reply = match result {
+                    Ok(()) => serde_json::json!({
+                        "type": "browser_screencast", "ok": true, "active": true,
+                    }),
+                    Err(e) => serde_json::json!({
+                        "type": "browser_screencast", "ok": false, "active": false, "error": e,
+                    }),
+                };
+                dispatch(reply.to_string());
+            });
+        }
+
+        "browser_screencast_stop" => {
+            let dispatch = ctx.dispatch.clone();
+            std::thread::spawn(move || {
+                crate::browser_cdp::screencast_stop();
+                dispatch(
+                    serde_json::json!({
+                        "type": "browser_screencast", "ok": true, "active": false,
+                    })
+                    .to_string(),
+                );
+            });
+        }
+
+        // Native input on the live page (mouse/keyboard via the CDP
+        // Input domain — insertText types whole strings in one shot).
+        // Same trust posture as browser_input_call: UI-initiated,
+        // input + navigation only, no script-execution surface.
+        "browser_cdp_input" => {
+            let kind = msg
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let args = msg.get("args").cloned().unwrap_or(serde_json::json!({}));
+            let dispatch = ctx.dispatch.clone();
+            std::thread::spawn(move || {
+                let result = crate::browser_cdp::input(&kind, &args);
+                let reply = match result {
+                    Ok(()) => serde_json::json!({
+                        "type": "browser_input_result", "ok": true,
+                        "tool": format!("cdp_{kind}"),
+                    }),
+                    Err(e) => serde_json::json!({
+                        "type": "browser_input_result", "ok": false,
+                        "tool": format!("cdp_{kind}"), "error": e,
+                    }),
+                };
+                dispatch(reply.to_string());
+            });
+        }
+
+        // Browser-tab screenshot capture (docs/browser Phase 1). UI-
+        // initiated + read-only, so it runs DIRECTLY on the managed
+        // `browser` MCP client — not through the agent loop (no tokens)
+        // and not through the worker input queue (which only drains
+        // between turns; this works mid-run). Uses call_tool_raw
+        // because the regular text path drops image content blocks.
+        "browser_screenshot_get" => {
+            let slot = ctx.shared.browser_mcp.clone();
+            let dispatch = ctx.dispatch.clone();
+            std::thread::spawn(move || {
+                let outcome: std::result::Result<(String, String), String> = (|| {
+                    let client = slot
+                        .read()
+                        .unwrap()
+                        .clone()
+                        .ok_or("browser MCP not connected yet")?;
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|e| format!("tokio runtime build: {e}"))?;
+                    let result = rt
+                        .block_on(
+                            client.call_tool_raw("browser_take_screenshot", serde_json::json!({})),
+                        )
+                        .map_err(|e| e.to_string())?;
+                    let content = result
+                        .get("content")
+                        .and_then(|c| c.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    let img = content
+                        .iter()
+                        .find(|b| b.get("type").and_then(|t| t.as_str()) == Some("image"))
+                        .ok_or("screenshot returned no image block")?;
+                    let data = img
+                        .get("data")
+                        .and_then(|d| d.as_str())
+                        .ok_or("image block missing data")?
+                        .to_string();
+                    let mime = img
+                        .get("mimeType")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("image/png")
+                        .to_string();
+                    Ok((data, mime))
+                })();
+                let reply = match outcome {
+                    Ok((data, mime)) => serde_json::json!({
+                        "type": "browser_screenshot",
+                        "ok": true,
+                        "data": data,
+                        "mime": mime,
+                    }),
+                    Err(e) => serde_json::json!({
+                        "type": "browser_screenshot",
+                        "ok": false,
+                        "error": e,
+                    }),
+                };
+                dispatch(reply.to_string());
+            });
+        }
+
+        // Browser-tab interactive takeover (docs/browser Phase 2
+        // slice 2). UI-initiated mouse/keyboard/navigation on the
+        // managed browser — direct MCP calls, same trust posture as
+        // the screenshot arm. STRICT allowlist: only coordinate input
+        // + navigation; nothing that touches the page DOM with
+        // arbitrary code (no evaluate / run_code) and nothing
+        // filesystem-shaped (no file_upload). The synthetic
+        // `type_text` expands to per-character press_key calls so the
+        // frontend can send a whole field's text in one round trip.
+        "browser_input_call" => {
+            const ALLOWED: &[&str] = &[
+                "browser_mouse_click_xy",
+                "browser_mouse_move_xy",
+                "browser_mouse_drag_xy",
+                "browser_mouse_down",
+                "browser_mouse_up",
+                "browser_mouse_wheel",
+                "browser_press_key",
+                "browser_navigate",
+                "browser_navigate_back",
+            ];
+            let tool = msg
+                .get("tool")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let args = msg.get("args").cloned().unwrap_or(serde_json::json!({}));
+            let slot = ctx.shared.browser_mcp.clone();
+            let dispatch = ctx.dispatch.clone();
+            std::thread::spawn(move || {
+                let tool_for_reply = tool.clone();
+                let outcome: std::result::Result<(), String> =
+                    (|| {
+                        let is_type_text = tool == "type_text";
+                        if !is_type_text && !ALLOWED.contains(&tool.as_str()) {
+                            return Err(format!("tool '{tool}' is not an allowed takeover input"));
+                        }
+                        let client = slot
+                            .read()
+                            .unwrap()
+                            .clone()
+                            .ok_or("browser MCP not connected yet")?;
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .map_err(|e| format!("tokio runtime build: {e}"))?;
+                        if is_type_text {
+                            let text = args
+                                .get("text")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            if text.is_empty() || text.chars().count() > 500 {
+                                return Err("type_text needs 1-500 characters".into());
+                            }
+                            for ch in text.chars() {
+                                let key = if ch == '\n' {
+                                    "Enter".to_string()
+                                } else {
+                                    ch.to_string()
+                                };
+                                rt.block_on(client.call_tool(
+                                    "browser_press_key",
+                                    serde_json::json!({ "key": key }),
+                                ))
+                                .map_err(|e| e.to_string())?;
+                            }
+                            return Ok(());
+                        }
+                        rt.block_on(client.call_tool(&tool, args))
+                            .map_err(|e| e.to_string())?;
+                        Ok(())
+                    })();
+                let reply = match outcome {
+                    Ok(()) => serde_json::json!({
+                        "type": "browser_input_result",
+                        "ok": true,
+                        "tool": tool_for_reply,
+                    }),
+                    Err(e) => serde_json::json!({
+                        "type": "browser_input_result",
+                        "ok": false,
+                        "tool": tool_for_reply,
+                        "error": e,
+                    }),
+                };
+                dispatch(reply.to_string());
+            });
         }
 
         "team_enabled_set" => {
@@ -1135,6 +2406,42 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             (ctx.dispatch)(payload.to_string());
         }
 
+        // Mirror of team_enabled_get/set for the PTY-backed Shell tab.
+        // Opt-in: surface the tab only when `shellTabEnabled: true`
+        // sits in .thclaws/settings.json. The pty_open handler also
+        // checks this, so a stale frontend can't sneak a spawn past
+        // the gate.
+        "shell_tab_enabled_get" => {
+            let enabled = crate::config::ProjectConfig::load()
+                .and_then(|c| c.shell_tab_enabled)
+                .unwrap_or(false);
+            let payload = serde_json::json!({
+                "type": "shell_tab_enabled",
+                "enabled": enabled,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        "shell_tab_enabled_set" => {
+            let enabled = msg
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let mut cfg = crate::config::ProjectConfig::load().unwrap_or_default();
+            cfg.shell_tab_enabled = Some(enabled);
+            let (ok, error) = match cfg.save() {
+                Ok(()) => (true, String::new()),
+                Err(e) => (false, e.to_string()),
+            };
+            let payload = serde_json::json!({
+                "type": "shell_tab_enabled_result",
+                "enabled": enabled,
+                "ok": ok,
+                "error": error,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
         "openrouter_free_only_get" => {
             let enabled = crate::config::AppConfig::load()
                 .map(|c| c.openrouter_free_only)
@@ -1144,6 +2451,92 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 "enabled": enabled,
             });
             (ctx.dispatch)(payload.to_string());
+        }
+
+        // ── Auto-learn project setting ─────────────────────────────
+        // Exposes `ProjectConfig.auto_learn` as a webui toggle so the
+        // setting isn't desktop-GUI-only. See #105.
+        // ── Mid-turn user input injection (issue #106) ──────────────
+        // Push a user-typed message into the agent's injection queue
+        // while the agent is busy. The agent drains the queue at the
+        // next tool_result boundary inside `run_turn`. Frontend uses
+        // this to let the user "steer" the leader between tool calls
+        // without `/stop`-and-restart.
+        "user_input_inject" => {
+            let text = msg
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let id = msg
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            if text.is_empty() {
+                let payload = serde_json::json!({
+                    "type": "user_input_inject_result",
+                    "id": id,
+                    "ok": false,
+                    "error": "empty text",
+                    "pending": 0,
+                });
+                (ctx.dispatch)(payload.to_string());
+                return true;
+            }
+            let pending = {
+                let mut q = ctx
+                    .shared
+                    .injection_queue
+                    .lock()
+                    .expect("injection_queue lock");
+                q.push_back(text);
+                q.len()
+            };
+            let payload = serde_json::json!({
+                "type": "user_input_inject_result",
+                "id": id,
+                "ok": true,
+                "pending": pending,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        "auto_learn_get" => {
+            let enabled = crate::config::AppConfig::load()
+                .map(|c| c.auto_learn)
+                .unwrap_or(false);
+            let payload = serde_json::json!({
+                "type": "auto_learn",
+                "enabled": enabled,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        "auto_learn_set" => {
+            let enabled = msg
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let mut cfg = crate::config::ProjectConfig::load().unwrap_or_default();
+            cfg.auto_learn = Some(enabled);
+            let (ok, error) = match cfg.save() {
+                Ok(()) => (true, String::new()),
+                Err(e) => (false, e.to_string()),
+            };
+            let payload = serde_json::json!({
+                "type": "auto_learn_result",
+                "enabled": enabled,
+                "ok": ok,
+                "error": error,
+            });
+            (ctx.dispatch)(payload.to_string());
+            // Reload AppConfig so the next session-end ingest /
+            // reconcile pass sees the new value without a restart.
+            let _ = ctx
+                .shared
+                .input_tx
+                .send(crate::shared_session::ShellInput::ReloadConfig);
         }
 
         "openrouter_free_only_set" => {
@@ -1170,6 +2563,46 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 .shared
                 .input_tx
                 .send(crate::shared_session::ShellInput::ReloadConfig);
+        }
+
+        // ── openrouter/fusion+ configuration ────────────────────────
+        // Read/write the FusionConfig block that drives the configurable
+        // OpenRouter Fusion pseudo-model. The GUI's fusion config modal
+        // (opened when the user selects `openrouter/fusion+`) round-trips
+        // these. camelCase on the wire (matches settings.json keys).
+        "fusion_config_get" => {
+            let cfg = crate::config::AppConfig::load().unwrap_or_default();
+            let payload = serde_json::json!({
+                "type": "fusion_config",
+                "config": cfg.openrouter_fusion,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+        "fusion_config_set" => {
+            let raw = msg.get("config").cloned().unwrap_or(serde_json::json!({}));
+            let (ok, error) = match serde_json::from_value::<crate::config::FusionConfig>(raw) {
+                Ok(fc) => {
+                    let mut cfg = crate::config::ProjectConfig::load().unwrap_or_default();
+                    cfg.openrouter_fusion = Some(fc);
+                    match cfg.save() {
+                        Ok(()) => (true, String::new()),
+                        Err(e) => (false, e.to_string()),
+                    }
+                }
+                Err(e) => (false, format!("invalid fusion config: {e}")),
+            };
+            let payload = serde_json::json!({
+                "type": "fusion_config_result",
+                "ok": ok,
+                "error": error,
+            });
+            (ctx.dispatch)(payload.to_string());
+            if ok {
+                let _ = ctx
+                    .shared
+                    .input_tx
+                    .send(crate::shared_session::ShellInput::ReloadConfig);
+            }
         }
 
         // ── thClaws Gateway settings ────────────────────────────────
@@ -1296,10 +2729,249 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             (ctx.dispatch)(crate::kms::build_update_payload().to_string());
         }
 
+        // Create a new blank KMS page from the per-KMS browser's `+`.
+        // The browser is scoped to one KMS, so `kms` names the target.
+        // `title` is required; `topic`/`category`/`tags` are optional
+        // frontmatter. The page filename is the slugified title. An
+        // empty body lets `write_page` stamp the canonical
+        // `# {title}` / Description header. After writing we re-emit a
+        // fresh `kms_browse_result` so the open browser refreshes.
+        "kms_new_page" => {
+            let kms = msg.get("kms").and_then(|v| v.as_str()).unwrap_or("");
+            let title = msg
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            let topic = msg
+                .get("topic")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            let category = msg
+                .get("category")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            let tags = msg
+                .get("tags")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+
+            let (ok, error, page_name) = if title.is_empty() {
+                (false, "title required".to_string(), String::new())
+            } else {
+                match crate::kms::resolve(kms) {
+                    None => (false, format!("KMS '{kms}' not found"), String::new()),
+                    Some(kref) => {
+                        let slug = crate::kms::sanitize_alias(title);
+                        if slug.is_empty() {
+                            (
+                                false,
+                                "title has no usable characters for a filename".to_string(),
+                                String::new(),
+                            )
+                        } else {
+                            // Build frontmatter; empty body → write_page
+                            // injects the canonical title/Description header.
+                            let mut fm = String::from("---\n");
+                            fm.push_str(&format!("title: {title}\n"));
+                            if !topic.is_empty() {
+                                fm.push_str(&format!("topic: {topic}\n"));
+                            }
+                            if !category.is_empty() {
+                                fm.push_str(&format!("category: {category}\n"));
+                            }
+                            if !tags.is_empty() {
+                                fm.push_str(&format!("tags: {tags}\n"));
+                            }
+                            fm.push_str("---\n\n");
+                            match crate::kms::write_page(&kref, &slug, &fm) {
+                                Ok(_) => (true, String::new(), slug),
+                                Err(e) => (false, e.to_string(), String::new()),
+                            }
+                        }
+                    }
+                }
+            };
+            (ctx.dispatch)(
+                serde_json::json!({
+                    "type": "kms_new_page_result",
+                    "kms": kms,
+                    "name": page_name,
+                    "ok": ok,
+                    "error": error,
+                })
+                .to_string(),
+            );
+            // Refresh the browser listing if the write succeeded.
+            if ok {
+                if let Some(listing) = crate::kms::browse(kms) {
+                    (ctx.dispatch)(
+                        serde_json::json!({
+                            "type": "kms_browse_result",
+                            "kms": listing.kms,
+                            "pages": listing.pages,
+                            "sources": listing.sources,
+                            "ok": true,
+                        })
+                        .to_string(),
+                    );
+                }
+            }
+        }
+
+        // Rename a KMS page from the browser's row context menu. Moves
+        // the file + rewrites inbound links + the index. `name` is the
+        // current page stem; `new_name` is slugified server-side.
+        "kms_rename_page" => {
+            let kms = msg.get("kms").and_then(|v| v.as_str()).unwrap_or("");
+            let name = msg.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let new_name = msg
+                .get("new_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            let (ok, error) = if name.is_empty() || new_name.is_empty() {
+                (false, "name and new_name required".to_string())
+            } else {
+                match crate::kms::resolve(kms) {
+                    None => (false, format!("KMS '{kms}' not found")),
+                    Some(kref) => match crate::kms::rename_page(&kref, name, new_name) {
+                        Ok(_) => (true, String::new()),
+                        Err(e) => (false, e.to_string()),
+                    },
+                }
+            };
+            (ctx.dispatch)(
+                serde_json::json!({
+                    "type": "kms_rename_page_result",
+                    "kms": kms,
+                    "name": name,
+                    "ok": ok,
+                    "error": error,
+                })
+                .to_string(),
+            );
+            if ok {
+                if let Some(listing) = crate::kms::browse(kms) {
+                    (ctx.dispatch)(
+                        serde_json::json!({
+                            "type": "kms_browse_result",
+                            "kms": listing.kms,
+                            "pages": listing.pages,
+                            "sources": listing.sources,
+                            "ok": true,
+                        })
+                        .to_string(),
+                    );
+                }
+            }
+        }
+
+        // Overwrite a KMS page's full content (frontmatter + body) from
+        // the viewer's edit mode. `content` is the recombined markdown
+        // the frontend assembled (edited YAML frontmatter + TipTap body).
+        // write_page re-stamps `updated:`, preserves `created:`, and is
+        // idempotent on the canonical header. Edit never renames — the
+        // filename stays `name` even if the frontmatter title changed.
+        "kms_write_page" => {
+            let kms = msg.get("kms").and_then(|v| v.as_str()).unwrap_or("");
+            let name = msg.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let (ok, error) = if name.is_empty() {
+                (false, "name required".to_string())
+            } else {
+                match crate::kms::resolve(kms) {
+                    None => (false, format!("KMS '{kms}' not found")),
+                    Some(kref) => match crate::kms::write_page(&kref, name, content) {
+                        Ok(_) => (true, String::new()),
+                        Err(e) => (false, e.to_string()),
+                    },
+                }
+            };
+            (ctx.dispatch)(
+                serde_json::json!({
+                    "type": "kms_write_page_result",
+                    "kms": kms,
+                    "name": name,
+                    "ok": ok,
+                    "error": error,
+                })
+                .to_string(),
+            );
+            if ok {
+                if let Some(listing) = crate::kms::browse(kms) {
+                    (ctx.dispatch)(
+                        serde_json::json!({
+                            "type": "kms_browse_result",
+                            "kms": listing.kms,
+                            "pages": listing.pages,
+                            "sources": listing.sources,
+                            "ok": true,
+                        })
+                        .to_string(),
+                    );
+                }
+            }
+        }
+
+        // Delete a KMS page from the browser's row context menu.
+        "kms_delete_page" => {
+            let kms = msg.get("kms").and_then(|v| v.as_str()).unwrap_or("");
+            let name = msg.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let (ok, error) = if name.is_empty() {
+                (false, "name required".to_string())
+            } else {
+                match crate::kms::resolve(kms) {
+                    None => (false, format!("KMS '{kms}' not found")),
+                    Some(kref) => match crate::kms::delete_page(&kref, name) {
+                        Ok(_) => (true, String::new()),
+                        Err(e) => (false, e.to_string()),
+                    },
+                }
+            };
+            (ctx.dispatch)(
+                serde_json::json!({
+                    "type": "kms_delete_page_result",
+                    "kms": kms,
+                    "name": name,
+                    "ok": ok,
+                    "error": error,
+                })
+                .to_string(),
+            );
+            if ok {
+                if let Some(listing) = crate::kms::browse(kms) {
+                    (ctx.dispatch)(
+                        serde_json::json!({
+                            "type": "kms_browse_result",
+                            "kms": listing.kms,
+                            "pages": listing.pages,
+                            "sources": listing.sources,
+                            "ok": true,
+                        })
+                        .to_string(),
+                    );
+                }
+            }
+        }
+
         // ── api_key_set (M6.36 SERVE9f — full rich path) ──────────
         "api_key_set" => {
             let provider = msg.get("provider").and_then(|v| v.as_str()).unwrap_or("");
-            let key = msg.get("key").and_then(|v| v.as_str()).unwrap_or("").trim();
+            // Strip whitespace AND surrounding "…" / '…' quotes. Users
+            // frequently paste from a quoted source (`.env` line, shell
+            // export, screenshot caption) and don't notice the wrapping
+            // chars. Issue #145: a key stored as `"sk-or-v1-…"` produced
+            // `Authorization: Bearer "sk-or-v1-…"`, which OpenRouter
+            // rejects with the exact message `Missing Authentication
+            // header` (the bearer regex doesn't accept a quoted token).
+            // Normalize once at write time so the on-disk / keychain
+            // value is always the bare key.
+            let raw = msg.get("key").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let key = strip_wrapping_quotes(raw);
             // Route strictly by the user's stored backend choice.
             // Keychain is tried only when the user opted into it; dotenv
             // users never trigger an OS keychain prompt.
@@ -1364,6 +3036,14 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                     models.retain(|(_, e)| e.chat != Some(false));
                     if provider == "openrouter" && new_cfg.openrouter_free_only {
                         models.retain(|(_, e)| e.free == Some(true));
+                    }
+                    // Gateway routing is strictly metered: unpriced
+                    // models 400 upstream, so don't offer them.
+                    if crate::providers::thclaws_gateway::hides_unpriced_models(&new_cfg, provider)
+                    {
+                        models.retain(|(_, e)| {
+                            e.input_per_mtok.is_some() && e.output_per_mtok.is_some()
+                        });
                     }
                     let runtime_loaded =
                         matches!(provider, "ollama" | "ollama-anthropic" | "lmstudio");
@@ -1507,9 +3187,18 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let user_cmds = crate::commands::CommandStore::discover_with_extra(
                 &crate::plugins::plugin_command_dirs(),
             );
+            // Names already shown as built-ins above (e.g. the seeded `/quiz`)
+            // must not be listed a second time as a "Custom" command.
+            let builtin_names: std::collections::HashSet<&str> = crate::repl::built_in_commands()
+                .iter()
+                .map(|c| c.name)
+                .collect();
             let mut user_names: Vec<&str> = user_cmds.commands.keys().map(String::as_str).collect();
             user_names.sort();
             for name in user_names {
+                if builtin_names.contains(name) {
+                    continue;
+                }
                 if let Some(cmd) = user_cmds.get(name) {
                     entries.push(serde_json::json!({
                         "name": cmd.name,
@@ -1691,6 +3380,16 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let raw_path = crate::file_preview::ospath(
                 msg.get("path").and_then(|v| v.as_str()).unwrap_or("."),
             );
+            // Opt-in: when `show_hidden: true` the listing includes
+            // dot-prefixed entries (`.thclaws/`, `.claude/`, `.env`,
+            // etc.). Default off — the agent workspace has dozens of
+            // dot-paths the user doesn't usually want to see, but the
+            // few important ones (config / per-project memory / agent
+            // defs) are reachable behind this switch.
+            let show_hidden = msg
+                .get("show_hidden")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let resolved = crate::sandbox::Sandbox::check(&raw_path)
                 .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default());
             if let Ok(entries) = std::fs::read_dir(&resolved) {
@@ -1698,7 +3397,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                     .flatten()
                     .filter_map(|e| {
                         let name = e.file_name().to_string_lossy().into_owned();
-                        if name.starts_with('.') {
+                        if !show_hidden && name.starts_with('.') {
                             return None;
                         }
                         let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
@@ -1755,6 +3454,22 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         || ext == "ods";
                     let is_pptx = ext == "pptx";
                     let is_office = is_docx || is_xlsx || is_pptx;
+                    // Audio + video are streamed via the file-asset
+                    // route, NOT base64-inlined here — a 50 MB MP4
+                    // round-tripped through IPC + base64 would dwarf
+                    // the actual playback. Frontend keys off `mime`
+                    // and renders <audio>/<video> with assetUrl().
+                    let is_audio = matches!(
+                        ext.as_str(),
+                        "mp3" | "wav" | "m4a" | "ogg" | "oga" | "opus" | "flac" | "aac" | "weba"
+                    );
+                    let is_video =
+                        matches!(ext.as_str(), "mp4" | "m4v" | "webm" | "mov" | "mkv" | "ogv");
+                    // EPUB is a zipped XHTML bundle — `read_to_string`
+                    // would fail on the binary. Serve it off /file-asset
+                    // (empty inline content); the frontend renders it
+                    // with epub.js, which unzips client-side.
+                    let is_epub = ext == "epub";
                     let mime = match ext.as_str() {
                         "png" => "image/png",
                         "jpg" | "jpeg" => "image/jpeg",
@@ -1764,6 +3479,19 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         "ico" => "image/x-icon",
                         "bmp" => "image/bmp",
                         "pdf" => "application/pdf",
+                        "mp3" => "audio/mpeg",
+                        "wav" => "audio/wav",
+                        "m4a" | "aac" => "audio/mp4",
+                        "ogg" | "oga" => "audio/ogg",
+                        "opus" => "audio/opus",
+                        "flac" => "audio/flac",
+                        "weba" => "audio/webm",
+                        "mp4" | "m4v" => "video/mp4",
+                        "webm" => "video/webm",
+                        "mov" => "video/quicktime",
+                        "mkv" => "video/x-matroska",
+                        "ogv" => "video/ogg",
+                        "epub" => "application/epub+zip",
                         "md" | "markdown" => {
                             if source_mode {
                                 "text/markdown"
@@ -1775,18 +3503,39 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         "docx" | "xlsx" | "xlsm" | "xlsb" | "xls" | "ods" | "pptx" => "text/html",
                         _ => "text/plain",
                     };
-                    if is_image || is_pdf {
-                        if let Ok(bytes) = std::fs::read(&path) {
-                            let b64 = crate::file_preview::encode_bytes_b64(&bytes);
-                            let payload = serde_json::json!({
-                                "type": "file_content",
-                                "path": raw_path,
-                                "content": b64,
-                                "mime": mime,
-                                "mode": mode,
-                            });
-                            (ctx.dispatch)(payload.to_string());
-                        }
+                    if is_audio || is_video || is_epub {
+                        // No content payload — frontend mounts the
+                        // file-asset URL into <audio>/<video> directly,
+                        // or hands the EPUB URL to epub.js.
+                        let payload = serde_json::json!({
+                            "type": "file_content",
+                            "path": raw_path,
+                            "content": "",
+                            "mime": mime,
+                            "mode": mode,
+                        });
+                        (ctx.dispatch)(payload.to_string());
+                    } else if is_image || is_pdf {
+                        // PDFs render via an /file-asset iframe (Chrome
+                        // refuses its viewer in data: iframes) — don't
+                        // push megabytes of base64 through the WS for
+                        // bytes the frontend never reads.
+                        let b64 = if is_pdf {
+                            String::new()
+                        } else {
+                            match std::fs::read(&path) {
+                                Ok(bytes) => crate::file_preview::encode_bytes_b64(&bytes),
+                                Err(_) => String::new(),
+                            }
+                        };
+                        let payload = serde_json::json!({
+                            "type": "file_content",
+                            "path": raw_path,
+                            "content": b64,
+                            "mime": mime,
+                            "mode": mode,
+                        });
+                        (ctx.dispatch)(payload.to_string());
                     } else if is_office {
                         let extracted = if is_docx {
                             crate::tools::docx_read::extract_docx(&path)
@@ -1861,6 +3610,91 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             }
         }
 
+        "file_download" => {
+            // Streams raw file bytes back as base64 so the frontend
+            // can wrap them in a Blob and trigger a browser-side
+            // <a download> click. Used by the Files-tab sidebar's
+            // "Download" context-menu action. Separate from
+            // `file_read` because that handler decides what to send
+            // based on extension (text vs base64 vs office-extracted)
+            // — for download we always want raw bytes, regardless
+            // of how the preview chose to render them.
+            let raw_path =
+                crate::file_preview::ospath(msg.get("path").and_then(|v| v.as_str()).unwrap_or(""));
+            let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let (ok, content_b64, filename, mime, error) = match crate::sandbox::Sandbox::check(
+                &raw_path,
+            ) {
+                Ok(path) => match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        let b64 = crate::file_preview::encode_bytes_b64(&bytes);
+                        let name = path
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("download")
+                            .to_string();
+                        let ext = path
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("")
+                            .to_lowercase();
+                        // Generic MIME for download; the browser
+                        // honours `download` attr regardless of
+                        // mime, but a sensible value helps when
+                        // the user opens the file directly from
+                        // the download bar.
+                        let mime = match ext.as_str() {
+                                "png" => "image/png",
+                                "jpg" | "jpeg" => "image/jpeg",
+                                "gif" => "image/gif",
+                                "svg" => "image/svg+xml",
+                                "webp" => "image/webp",
+                                "pdf" => "application/pdf",
+                                "json" => "application/json",
+                                "csv" => "text/csv",
+                                "html" | "htm" => "text/html",
+                                "md" | "markdown" => "text/markdown",
+                                "txt" => "text/plain",
+                                "zip" => "application/zip",
+                                "tar" => "application/x-tar",
+                                "gz" | "tgz" => "application/gzip",
+                                "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                _ => "application/octet-stream",
+                            }
+                            .to_string();
+                        (true, b64, name, mime, String::new())
+                    }
+                    Err(e) => (
+                        false,
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        format!("read: {e}"),
+                    ),
+                },
+                Err(e) => (
+                    false,
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    format!("access denied: {e}"),
+                ),
+            };
+            let payload = serde_json::json!({
+                "type": "file_download_result",
+                "id": request_id,
+                "ok": ok,
+                "path": raw_path,
+                "content": content_b64,
+                "filename": filename,
+                "mime": mime,
+                "error": error,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
         "file_write" => {
             let raw_path = msg.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
@@ -1894,6 +3728,79 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             (ctx.dispatch)(payload.to_string());
         }
 
+        // Create a new directory (Files-tab explorer context menu).
+        // Sandbox-checked; refuses to clobber an existing path.
+        "file_mkdir" => {
+            let raw_path = msg.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let (ok, error): (bool, Option<String>) = match crate::sandbox::Sandbox::check(raw_path)
+            {
+                Ok(path) => {
+                    if path.exists() {
+                        (
+                            false,
+                            Some("a file or folder with that name already exists".into()),
+                        )
+                    } else {
+                        match std::fs::create_dir_all(&path) {
+                            Ok(()) => (true, None),
+                            Err(e) => (false, Some(format!("mkdir: {e}"))),
+                        }
+                    }
+                }
+                Err(e) => (false, Some(format!("access denied: {e}"))),
+            };
+            (ctx.dispatch)(
+                serde_json::json!({
+                    "type": "file_mkdir_result",
+                    "path": raw_path,
+                    "ok": ok,
+                    "error": error,
+                })
+                .to_string(),
+            );
+        }
+
+        // Create a new empty file (Files-tab explorer context menu).
+        // Sandbox-checked; creates parent dirs; refuses to clobber via
+        // `create_new` (atomic exists-check).
+        "file_create" => {
+            let raw_path = msg.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let (ok, error): (bool, Option<String>) = match crate::sandbox::Sandbox::check(raw_path)
+            {
+                Ok(path) => {
+                    let parent_made = match path.parent() {
+                        Some(parent) => std::fs::create_dir_all(parent)
+                            .map_err(|e| format!("mkdir parent: {e}")),
+                        None => Ok(()),
+                    };
+                    match parent_made {
+                        Err(e) => (false, Some(e)),
+                        Ok(()) => match std::fs::OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(&path)
+                        {
+                            Ok(_) => (true, None),
+                            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                                (false, Some("a file with that name already exists".into()))
+                            }
+                            Err(e) => (false, Some(format!("create: {e}"))),
+                        },
+                    }
+                }
+                Err(e) => (false, Some(format!("access denied: {e}"))),
+            };
+            (ctx.dispatch)(
+                serde_json::json!({
+                    "type": "file_create_result",
+                    "path": raw_path,
+                    "ok": ok,
+                    "error": error,
+                })
+                .to_string(),
+            );
+        }
+
         // ── Session sidebar mutators (M6.36 SERVE9j) ──────────────
         "session_load" => {
             if let Some(id) = msg.get("id").and_then(|v| v.as_str()) {
@@ -1912,9 +3819,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let (ok, error) = if id.is_empty() {
                 (false, "id required".to_string())
             } else {
-                match crate::session::SessionStore::default_path()
-                    .map(crate::session::SessionStore::new)
-                {
+                match ipc_session_store(ctx) {
                     Some(store) => match store.rename(id, title) {
                         Ok(_) => (true, String::new()),
                         Err(e) => (false, e.to_string()),
@@ -1939,10 +3844,19 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         title: title.to_string(),
                     },
                 );
-                let store = crate::session::SessionStore::default_path()
-                    .map(crate::session::SessionStore::new);
+                let store = ipc_session_store(ctx);
                 (ctx.dispatch)(crate::shared_session::build_session_list(&store, ""));
             }
+        }
+
+        "sessions_request" => {
+            // Sidebar mount-time refresh: the component unmounts in
+            // fullscreen (gui-shell tabs) and remounts after the
+            // `initial_state` snapshot already passed — answer with a
+            // fresh list so the history isn't blank until the next
+            // worker-side push.
+            let store = ipc_session_store(ctx);
+            (ctx.dispatch)(crate::shared_session::build_session_list(&store, ""));
         }
 
         "session_delete" => {
@@ -1950,9 +3864,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let (ok, error) = if id.is_empty() {
                 (false, "id required".to_string())
             } else {
-                match crate::session::SessionStore::default_path()
-                    .map(crate::session::SessionStore::new)
-                {
+                match ipc_session_store(ctx) {
                     Some(store) => match store.delete(id) {
                         Ok(()) => (true, String::new()),
                         Err(e) => (false, e.to_string()),
@@ -1975,8 +3887,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         id: id.to_string(),
                     },
                 );
-                let store = crate::session::SessionStore::default_path()
-                    .map(crate::session::SessionStore::new);
+                let store = ipc_session_store(ctx);
                 (ctx.dispatch)(crate::shared_session::build_session_list(&store, ""));
             }
         }
@@ -2020,6 +3931,7 @@ mod tests {
         let on_zoom: ZoomFn = Arc::new(|_scale: f64| {});
 
         let ctx = IpcContext {
+            is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -2027,6 +3939,7 @@ mod tests {
             on_quit,
             on_send_initial_state,
             on_zoom,
+            workflow_approver: crate::workflow::WorkflowApprover::new(),
         };
 
         // Exercise the only currently-wired arm.
@@ -2054,6 +3967,7 @@ mod tests {
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = captured.clone();
         let ctx = IpcContext {
+            is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -2063,6 +3977,7 @@ mod tests {
             on_quit: Arc::new(|| {}),
             on_send_initial_state: Arc::new(|| {}),
             on_zoom: Arc::new(|_| {}),
+            workflow_approver: crate::workflow::WorkflowApprover::new(),
         };
         let handled = handle_ipc(
             serde_json::json!({
@@ -2089,6 +4004,7 @@ mod tests {
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = captured.clone();
         let ctx = IpcContext {
+            is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -2098,6 +4014,7 @@ mod tests {
             on_quit: Arc::new(|| {}),
             on_send_initial_state: Arc::new(|| {}),
             on_zoom: Arc::new(|_| {}),
+            workflow_approver: crate::workflow::WorkflowApprover::new(),
         };
         handle_ipc(
             serde_json::json!({
@@ -2121,6 +4038,7 @@ mod tests {
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = captured.clone();
         let ctx = IpcContext {
+            is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -2130,6 +4048,7 @@ mod tests {
             on_quit: Arc::new(|| {}),
             on_send_initial_state: Arc::new(|| {}),
             on_zoom: Arc::new(|_| {}),
+            workflow_approver: crate::workflow::WorkflowApprover::new(),
         };
         handle_ipc(
             serde_json::json!({
@@ -2161,6 +4080,7 @@ mod tests {
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = captured.clone();
         let ctx = IpcContext {
+            is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -2170,6 +4090,7 @@ mod tests {
             on_quit: Arc::new(|| {}),
             on_send_initial_state: Arc::new(|| {}),
             on_zoom: Arc::new(|_| {}),
+            workflow_approver: crate::workflow::WorkflowApprover::new(),
         };
         let handled = handle_ipc(
             serde_json::json!({
@@ -2213,6 +4134,7 @@ mod tests {
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = captured.clone();
         let ctx = IpcContext {
+            is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -2222,6 +4144,7 @@ mod tests {
             on_quit: Arc::new(|| {}),
             on_send_initial_state: Arc::new(|| {}),
             on_zoom: Arc::new(|_| {}),
+            workflow_approver: crate::workflow::WorkflowApprover::new(),
         };
         handle_ipc(
             serde_json::json!({
@@ -2245,6 +4168,7 @@ mod tests {
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = captured.clone();
         let ctx = IpcContext {
+            is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -2254,6 +4178,7 @@ mod tests {
             on_quit: Arc::new(|| {}),
             on_send_initial_state: Arc::new(|| {}),
             on_zoom: Arc::new(|_| {}),
+            workflow_approver: crate::workflow::WorkflowApprover::new(),
         };
 
         // Empty form → must error before any save.
@@ -2279,6 +4204,7 @@ mod tests {
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = captured.clone();
         let ctx = IpcContext {
+            is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -2288,6 +4214,7 @@ mod tests {
             on_quit: Arc::new(|| {}),
             on_send_initial_state: Arc::new(|| {}),
             on_zoom: Arc::new(|_| {}),
+            workflow_approver: crate::workflow::WorkflowApprover::new(),
         };
 
         // Use a tempdir so the cwd-exists check passes; cron is bad.
@@ -2318,6 +4245,7 @@ mod tests {
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = captured.clone();
         let ctx = IpcContext {
+            is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -2327,6 +4255,7 @@ mod tests {
             on_quit: Arc::new(|| {}),
             on_send_initial_state: Arc::new(|| {}),
             on_zoom: Arc::new(|_| {}),
+            workflow_approver: crate::workflow::WorkflowApprover::new(),
         };
 
         let handled = handle_ipc(
@@ -2353,6 +4282,7 @@ mod tests {
         let (approver, _rx) = crate::permissions::GuiApprover::new();
         let pending_asks: PendingAsks = Arc::new(Mutex::new(HashMap::new()));
         let ctx = IpcContext {
+            is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -2360,6 +4290,7 @@ mod tests {
             on_quit: Arc::new(|| {}),
             on_send_initial_state: Arc::new(|| {}),
             on_zoom: Arc::new(|_| {}),
+            workflow_approver: crate::workflow::WorkflowApprover::new(),
         };
         // Unmigrated / unknown types must return false so the wry
         // closure falls through to its own match.

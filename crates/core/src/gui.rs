@@ -17,8 +17,8 @@
 
 use crate::config::AppConfig;
 use crate::event_render::{
-    render_chat_dispatches, render_terminal_ansi, terminal_data_envelope,
-    terminal_history_replaced_envelope, TerminalRenderState,
+    render_chat_dispatches, render_gui_shell_dispatch, render_terminal_ansi,
+    terminal_data_envelope, terminal_history_replaced_envelope, TerminalRenderState,
 };
 use crate::session::SessionStore;
 use crate::shared_session::{SharedSessionHandle, ShellInput, ViewEvent};
@@ -120,6 +120,14 @@ fn spawn_event_translator(handle: &SharedSessionHandle, proxy: EventLoopProxy<Us
                         for dispatch in render_chat_dispatches(&ev) {
                             let _ = proxy.send_event(UserEvent::Dispatch(dispatch));
                         }
+                        // dev-plan/33 Tier 1: also emit a gui_shell_event
+                        // for any active shell iframes. The shell shares
+                        // this session in Tier 1, so this is effectively
+                        // a third rendering of the same stream — Chat and
+                        // Terminal still get their events as before.
+                        if let Some(dispatch) = render_gui_shell_dispatch(&ev) {
+                            let _ = proxy.send_event(UserEvent::Dispatch(dispatch));
+                        }
                         if let Some(ansi) = render_terminal_ansi(&mut term_state, &ev) {
                             // HistoryReplaced needs a distinct envelope
                             // so the frontend always re-renders the
@@ -136,11 +144,12 @@ fn spawn_event_translator(handle: &SharedSessionHandle, proxy: EventLoopProxy<Us
                             let _ = proxy.send_event(UserEvent::Dispatch(envelope));
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        // Slow consumer dropped events; resync by replaying
-                        // a fresh "history replaced" with the agent's view
-                        // would need agent access — skip for now and hope
-                        // the next live event keeps state in sync.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        // Slow consumer dropped events; log the drop so it's
+                        // diagnosable (issue #163 Bug 1) — a full re-sync
+                        // would need agent access; the next live event keeps
+                        // state roughly in sync.
+                        eprintln!("[event_forwarder:gui] lagged: dropped {n} events");
                         continue;
                     }
                     Err(_) => break,
@@ -250,17 +259,18 @@ pub(crate) fn native_confirm(title: &str, message: &str, yes_label: &str, no_lab
 /// PowerShell `FolderBrowserDialog`) with the `rfd` crate, which calls
 /// the same OS APIs natively. Eliminates dependence on `osascript` /
 /// `zenity` being installed and PowerShell quote-escaping bugs.
-fn pick_directory_native(start_dir: &str) -> Option<String> {
+fn pick_directory_native(start_dir: &str, title: &str) -> Option<String> {
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     {
         FileDialog::new()
-            .set_title("Select working directory")
+            .set_title(title)
             .set_directory(start_dir)
             .pick_folder()
             .map(|p| p.to_string_lossy().into_owned())
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
+        let _ = title;
         None
     }
 }
@@ -300,6 +310,16 @@ fn mcp_tool_counts() -> &'static std::sync::Mutex<std::collections::HashMap<Stri
 pub(crate) fn update_mcp_tool_count(server_name: &str, count: usize) {
     if let Ok(mut map) = mcp_tool_counts().lock() {
         map.insert(server_name.to_string(), count);
+    }
+}
+
+/// Wipe every stored MCP tool count. Used by `ChangeCwd` before the
+/// new project's MCP servers respawn — a same-named server in the
+/// new project would otherwise display the old project's tool count
+/// until its own `McpReady` event lands.
+pub(crate) fn clear_mcp_tool_counts() {
+    if let Ok(mut map) = mcp_tool_counts().lock() {
+        map.clear();
     }
 }
 
@@ -398,6 +418,98 @@ fn escape_for_js(s: &str) -> String {
         .replace('\u{2029}', "\\u2029")
 }
 
+/// Resolve a `/gui-shell/<id>/<rel>` request against the embedded
+/// registry and return the asset bytes (HTML responses get the bridge
+/// `<script>` injected). Used by the custom-protocol handler.
+fn serve_gui_shell_asset(
+    registry: &crate::gui_shell::ShellRegistry,
+    rest: &str,
+) -> Response<Cow<'static, [u8]>> {
+    // rest = "<id>/<path>" or "<id>" (latter → treat as "<id>/index.html"
+    // wouldn't apply here because the loader always specifies index.html
+    // in the iframe src, so a bare id is a 404).
+    let decoded = urlencoding::decode(rest)
+        .map(|c| c.into_owned())
+        .unwrap_or_else(|_| rest.to_string());
+    let mut parts = decoded.splitn(2, '/');
+    let shell_id = parts.next().unwrap_or("");
+    let rel = parts.next().unwrap_or("");
+
+    let Some(shell) = registry.resolve(shell_id) else {
+        return Response::builder()
+            .status(404)
+            .body(Cow::Borrowed(&b"unknown shell"[..]))
+            .expect("build 404");
+    };
+
+    let (bytes, mime) = match shell.read_asset(rel) {
+        Ok(pair) => pair,
+        Err(_) => {
+            return Response::builder()
+                .status(404)
+                .body(Cow::Borrowed(&b"asset not found"[..]))
+                .expect("build 404");
+        }
+    };
+
+    let body: Cow<'static, [u8]> = if mime.starts_with("text/html") {
+        Cow::Owned(inject_bridge_script(&bytes))
+    } else {
+        Cow::Owned(bytes)
+    };
+
+    Response::builder()
+        .header("Content-Type", mime)
+        .header("X-Content-Type-Options", "nosniff")
+        .body(body)
+        .expect("build gui-shell asset response")
+}
+
+/// Inject `<script src="thclaws://localhost/gui-shell-bridge.js"></script>`
+/// at the start of `<head>` so shell authors don't have to include it
+/// manually. If no `<head>` is present (rare — shells are encouraged to
+/// declare one), prepend a minimal head wrapper at the top of the body.
+fn inject_bridge_script(html: &[u8]) -> Vec<u8> {
+    const TAG: &[u8] = b"<script src=\"thclaws://localhost/gui-shell-bridge.js\"></script>";
+    let lower = html.to_ascii_lowercase();
+    if let Some(idx) = find_subslice(&lower, b"<head>") {
+        let insert_at = idx + b"<head>".len();
+        let mut out = Vec::with_capacity(html.len() + TAG.len());
+        out.extend_from_slice(&html[..insert_at]);
+        out.extend_from_slice(TAG);
+        out.extend_from_slice(&html[insert_at..]);
+        out
+    } else if let Some(idx) = find_subslice(&lower, b"<head ") {
+        // Match `<head class="...">` etc. — insert after the closing >.
+        let after_open = html[idx..]
+            .iter()
+            .position(|&b| b == b'>')
+            .map(|p| idx + p + 1)
+            .unwrap_or(idx);
+        let mut out = Vec::with_capacity(html.len() + TAG.len());
+        out.extend_from_slice(&html[..after_open]);
+        out.extend_from_slice(TAG);
+        out.extend_from_slice(&html[after_open..]);
+        out
+    } else {
+        // No head — prepend one. Wraps the bridge in <head> so a strict
+        // parser still treats the rest as body.
+        let mut out = Vec::with_capacity(html.len() + TAG.len() + b"<head></head>".len());
+        out.extend_from_slice(b"<head>");
+        out.extend_from_slice(TAG);
+        out.extend_from_slice(b"</head>");
+        out.extend_from_slice(html);
+        out
+    }
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
 #[cfg(target_os = "macos")]
 fn is_macos_close_shortcut(event: &tao::event::KeyEvent, modifiers: ModifiersState) -> bool {
     if event.state != ElementState::Pressed || !modifiers.super_key() {
@@ -450,6 +562,11 @@ fn request_gui_shutdown(
     let _ = std::process::Command::new("pkill")
         .args(["-f", "team-agent"])
         .status();
+    // Snapshot browser cookies and kill the engine-managed Chromium so
+    // it doesn't orphan — a surviving orphan breaks the next launch's
+    // playwright-mcp CDP attach ("Browser context management is not
+    // supported").
+    crate::browser_cdp::shutdown();
     *control_flow = ControlFlow::Exit;
 }
 
@@ -723,19 +840,62 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
 
     let builder = WebViewBuilder::new()
         .with_url(start_url)
-        .with_custom_protocol("thclaws".into(), |_webview_id, request| {
+        .with_custom_protocol("thclaws".into(), move |_webview_id, request| {
             // File-asset route: serves on-disk files so previewed HTML
             // can load its sibling CSS/JS with relative URLs. Example:
             // `thclaws://localhost/file-asset/Users/jimmy/site/index.html`
             // → reads `/Users/jimmy/site/index.html`. Every request is
             // validated through the sandbox before hitting disk.
             let req_path = request.uri().path();
+
+            // GUI Shell bridge runtime — served at a fixed path so every
+            // shell's injected <script src="…/gui-shell-bridge.js"> hits
+            // the same well-known URL regardless of which shell is loaded.
+            if req_path == "/gui-shell-bridge.js" {
+                return Response::builder()
+                    .header("Content-Type", "application/javascript; charset=utf-8")
+                    .body(Cow::Borrowed(crate::gui_shell::BRIDGE_RUNTIME.as_bytes()))
+                    .expect("build bridge-runtime response");
+            }
+
+            // GUI Shell asset route — `/gui-shell/<id>/<rel>`. Rebuild
+            // the registry per request so newly-installed agents and
+            // workspace cwd switches are picked up live (matches the
+            // fresh-scan the `gui_shell_list` IPC does — without this
+            // the picker would list a project shell that the protocol
+            // handler 404s, producing a blank iframe). Each shell load
+            // triggers a handful of asset requests, so the per-request
+            // FS scan stays well under the human-perceptible threshold.
+            if let Some(rest) = req_path.strip_prefix("/gui-shell/") {
+                let registry = crate::gui_shell::ShellRegistry::new();
+                return serve_gui_shell_asset(&registry, rest);
+            }
+
             if let Some(rest) = req_path.strip_prefix("/file-asset/") {
                 let decoded = urlencoding::decode(rest)
                     .map(|c| c.into_owned())
                     .unwrap_or_else(|_| rest.to_string());
-                let abs = format!("/{decoded}");
-                match crate::sandbox::Sandbox::check(&abs) {
+                // Two URL shapes both reach this route — match the
+                // dual-path lookup in server.rs::serve_project_asset:
+                //   - FilesView builds absolute paths (`/Users/.../foo.png`);
+                //     the URL pathname strips the leading slash, so we
+                //     re-add it and try Sandbox::check (cwd-or-absolute).
+                //   - GUI shells (image-batch's Gallery, speech-studio,
+                //     video-studio) build workspace-relative paths
+                //     (`images/<slug>/<file>.png`); the absolute attempt
+                //     resolves to `/images/...` and 404s, so we fall back
+                //     to passing `decoded` directly and let Sandbox::check
+                //     join it with cwd.
+                //
+                // Cloud (`server.rs`) had this fallback since the early
+                // shells shipped; desktop was stuck on the absolute-only
+                // path, which is why image-generator's Gallery worked in
+                // hosted workspaces but rendered broken thumbnails in the
+                // desktop GUI.
+                let abs_first = format!("/{decoded}");
+                let resolved = crate::sandbox::Sandbox::check(&abs_first)
+                    .or_else(|_| crate::sandbox::Sandbox::check(&decoded));
+                match resolved {
                     Ok(resolved) => match std::fs::read(&resolved) {
                         Ok(bytes) => {
                             let ext = resolved.extension()
@@ -757,6 +917,20 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                                 "woff2" => "font/woff2",
                                 "ttf" => "font/ttf",
                                 "otf" => "font/otf",
+                                // Audio
+                                "mp3" => "audio/mpeg",
+                                "wav" => "audio/wav",
+                                "m4a" | "aac" => "audio/mp4",
+                                "ogg" | "oga" => "audio/ogg",
+                                "opus" => "audio/opus",
+                                "flac" => "audio/flac",
+                                "weba" => "audio/webm",
+                                // Video
+                                "mp4" | "m4v" => "video/mp4",
+                                "webm" => "video/webm",
+                                "mov" => "video/quicktime",
+                                "mkv" => "video/x-matroska",
+                                "ogv" => "video/ogg",
                                 _ => "application/octet-stream",
                             };
                             return Response::builder()
@@ -820,6 +994,7 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                 // the shared dispatch path today.
                 let on_zoom: crate::ipc::ZoomFn = Arc::new(|_scale: f64| {});
                 let ipc_ctx = crate::ipc::IpcContext {
+                    is_serve_mode: false,
                     shared: shared_for_ipc.clone(),
                     approver: approver_for_ipc.clone(),
                     pending_asks: pending_asks_for_ipc.clone(),
@@ -827,6 +1002,7 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                     on_quit,
                     on_send_initial_state,
                     on_zoom,
+                    workflow_approver: shared_for_ipc.workflow_approver.clone(),
                 };
                 if crate::ipc::handle_ipc(msg.clone(), &ipc_ctx) {
                     return;
@@ -876,7 +1052,7 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                         .unwrap_or_else(|| std::env::current_dir()
                             .map(|p| p.to_string_lossy().to_string())
                             .unwrap_or_else(|_| ".".into()));
-                    let result = pick_directory_native(&start_dir);
+                    let result = pick_directory_native(&start_dir, "Select working directory");
                     let payload = match result {
                         Some(path) => serde_json::json!({
                             "type": "directory_picked",
@@ -890,6 +1066,117 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                     let _ = proxy_for_ipc.send_event(
                         UserEvent::SessionLoaded(payload.to_string()),
                     );
+                }
+                // OKF (Open Knowledge Format) import/export for a KMS,
+                // driven from the sidebar "Knowledge" header context menu.
+                // GUI-only: both open a native folder picker (rfd), so they
+                // can't live in the transport-agnostic handle_ipc path. The
+                // picker blocks the event loop the same way `pick_directory`
+                // above does.
+                "kms_export_okf" => {
+                    let name = msg
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    let start_dir = std::env::current_dir()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| ".".into());
+                    let payload = if name.is_empty() {
+                        serde_json::json!({
+                            "type": "kms_okf_result", "ok": false,
+                            "message": "Export failed: no KMS selected.",
+                        })
+                    } else {
+                        match pick_directory_native(
+                            &start_dir,
+                            &format!("Export '{name}' — choose a destination folder"),
+                        ) {
+                            None => serde_json::json!({
+                                "type": "kms_okf_result", "ok": false,
+                                "message": "Export cancelled.",
+                            }),
+                            Some(dir) => {
+                                let out = std::path::Path::new(&dir).join(format!("{name}-okf"));
+                                match crate::kms::export_okf(&name, &out) {
+                                    Ok(r) => serde_json::json!({
+                                        "type": "kms_okf_result", "ok": true,
+                                        "message": format!(
+                                            "Exported '{name}' → {} ({} page(s), {} reference(s)).",
+                                            r.out_dir.display(), r.pages, r.sources,
+                                        ),
+                                    }),
+                                    Err(e) => serde_json::json!({
+                                        "type": "kms_okf_result", "ok": false,
+                                        "message": format!("Export failed: {e}"),
+                                    }),
+                                }
+                            }
+                        }
+                    };
+                    let _ = proxy_for_ipc
+                        .send_event(UserEvent::SessionLoaded(payload.to_string()));
+                }
+                "kms_import_okf" => {
+                    let name = msg
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    let scope = match msg.get("scope").and_then(|v| v.as_str()) {
+                        Some("project") => crate::kms::KmsScope::Project,
+                        _ => crate::kms::KmsScope::User,
+                    };
+                    let start_dir = std::env::current_dir()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| ".".into());
+                    let mut imported = false;
+                    let payload = if name.is_empty() {
+                        serde_json::json!({
+                            "type": "kms_okf_result", "ok": false,
+                            "message": "Import failed: name the new KMS first.",
+                        })
+                    } else {
+                        match pick_directory_native(
+                            &start_dir,
+                            "Import OKF bundle — choose the bundle folder",
+                        ) {
+                            None => serde_json::json!({
+                                "type": "kms_okf_result", "ok": false,
+                                "message": "Import cancelled.",
+                            }),
+                            Some(dir) => match crate::kms::import_okf(
+                                std::path::Path::new(&dir),
+                                &name,
+                                scope,
+                            ) {
+                                Ok(r) => {
+                                    imported = true;
+                                    serde_json::json!({
+                                        "type": "kms_okf_result", "ok": true,
+                                        "message": format!(
+                                            "Imported OKF bundle → KMS '{name}' ({} page(s), {} source(s)). Tick it to attach.",
+                                            r.pages, r.sources,
+                                        ),
+                                    })
+                                }
+                                Err(e) => serde_json::json!({
+                                    "type": "kms_okf_result", "ok": false,
+                                    "message": format!("Import failed: {e}"),
+                                }),
+                            },
+                        }
+                    };
+                    let _ = proxy_for_ipc
+                        .send_event(UserEvent::SessionLoaded(payload.to_string()));
+                    if imported {
+                        // Refresh the sidebar's KMS list so the new one shows.
+                        let _ = proxy_for_ipc.send_event(UserEvent::SessionLoaded(
+                            crate::kms::build_update_payload().to_string(),
+                        ));
+                    }
                 }
                 "confirm" => {
                     // Native OS confirmation dialog. Frontend sends an
@@ -1005,6 +1292,36 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                             images: attachments,
                         });
                     } else if !trimmed.is_empty() {
+                        // dev-plan/32 Tier 3 Terminal-tab approval
+                        // intercept (mirrors crate::ipc::handle_ipc).
+                        // The worker loop is blocked on the workflow
+                        // approver oneshot, so typed approvals queued
+                        // through input_tx wait forever. Resolve at
+                        // the IPC boundary instead.
+                        let pending = shared_for_ipc.workflow_approver.pending_ids();
+                        if !pending.is_empty() {
+                            match crate::workflow::parse_chat_decision(trimmed) {
+                                Some(decision) => {
+                                    if let Some(id) = pending.into_iter().next_back() {
+                                        shared_for_ipc
+                                            .workflow_approver
+                                            .resolve(&id, decision);
+                                    }
+                                    return;
+                                }
+                                None => {
+                                    let _ = shared_for_ipc.events_tx.send(
+                                        crate::shared_session::ViewEvent::SlashOutput(
+                                            "workflow review pending — type \
+                                             `approve`, `cancel`, or `rework: <note>` \
+                                             (or click in the Chat tab)"
+                                                .to_string(),
+                                        ),
+                                    );
+                                    return;
+                                }
+                            }
+                        }
                         let _ = shared_for_ipc
                             .input_tx
                             .send(ShellInput::Line(trimmed.to_string()));
@@ -1108,6 +1425,13 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                         .unwrap_or_default();
                     project.set_model(&new_model);
                     let _ = project.save();
+                    // The user's `--model X` choice has been deemed
+                    // unreachable; drop the CLI override so the reload
+                    // returns the fallback (Y), not X. Without this the
+                    // session would keep re-pinning to a model whose
+                    // provider has no credentials, defeating the entire
+                    // auto-fallback affordance.
+                    crate::config::clear_cli_model_override();
                     config = AppConfig::load().unwrap_or_default();
                 }
                 let provider_name = config.detect_provider().unwrap_or("unknown");
@@ -1127,6 +1451,13 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                     }))
                     .collect();
                 let kms_update = build_kms_update_payload();
+                // #95(c): mirror server.rs's initial_state so GUI mode
+                // ships team_enabled too. wry IPC is synchronous (no
+                // CONNECTING race), but keeping the two builders in
+                // lockstep avoids drift across the GUI / --serve split.
+                let team_enabled = crate::config::ProjectConfig::load()
+                    .and_then(|c| c.team_enabled)
+                    .unwrap_or(false);
                 let state = serde_json::json!({
                     "type": "initial_state",
                     "provider": provider_name,
@@ -1135,6 +1466,7 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                     "mcp_servers": mcp_servers,
                     "sessions": sessions,
                     "kmss": kms_update.get("kmss").cloned().unwrap_or(serde_json::Value::Array(vec![])),
+                    "team_enabled": team_enabled,
                     "version": crate::version::VERSION,
                 });
                 let js = format!(
@@ -1209,7 +1541,8 @@ mod tool_coalesce_tests {
         assert!(out.contains("[tool: Ls]"));
         assert!(out.starts_with("\r\n"));
         let res = render_terminal_ansi(&mut s, &ok()).unwrap();
-        assert_eq!(res, " \x1b[32m✓\x1b[0m");
+        assert!(res.starts_with(" \x1b[32m✓"));
+        assert!(res.ends_with("\x1b[0m"));
     }
 
     #[test]
@@ -1255,9 +1588,9 @@ mod tool_coalesce_tests {
     #[test]
     fn chat_dispatch_carries_tool_name_and_input_for_todowrite() {
         // Frontend keys on `tool_name === "TodoWrite"` to render the
-        // checklist card. The IPC envelope must carry both the
-        // unmangled tool name and the raw input so the renderer has
-        // everything it needs without a follow-up round-trip.
+        // checklist card. The IPC envelope must carry the unmangled
+        // tool name and a redacted copy of the input so the renderer has
+        // everything it needs without leaking secrets.
         let ev = ViewEvent::ToolCallStart {
             name: "TodoWrite".to_string(),
             label: "TodoWrite".to_string(),
@@ -1265,7 +1598,8 @@ mod tool_coalesce_tests {
                 "todos": [
                     { "id": "1", "content": "Investigate bug", "status": "in_progress" },
                     { "id": "2", "content": "Write fix", "status": "pending" },
-                ]
+                ],
+                "note": "Authorization: Bearer sk-123",
             }),
         };
         let dispatches = render_chat_dispatches(&ev);
@@ -1281,5 +1615,9 @@ mod tool_coalesce_tests {
         assert!(todos.is_array(), "todos array missing in input: {envelope}");
         assert_eq!(todos[0]["content"], "Investigate bug");
         assert_eq!(todos[0]["status"], "in_progress");
+        assert_eq!(
+            envelope["input"]["note"],
+            "Authorization: Bearer <redacted>"
+        );
     }
 }
