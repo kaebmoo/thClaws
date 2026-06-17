@@ -200,7 +200,7 @@ impl ProviderKind {
             // reaches the upstream (which expects bare `qwen-max`,
             // `qwen-plus`, etc.).
             Self::QwenCloud => "qc/qwen-max",
-            Self::ZAi => "zai/glm-5.1",
+            Self::ZAi => "zai/glm-5.2",
             // Most LMStudio installs change models constantly; this is a
             // placeholder that lets the connection establish so the user
             // can `/model lmstudio/<loaded-model>` to switch. list_models
