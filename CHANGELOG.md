@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.66.0] - 2026-06-17
+
+### Added
+- **Two new providers — Moonshot AI (Kimi) and xAI (Grok).** Both are OpenAI-compatible and desktop-direct (bring your own key): drop `MOONSHOT_API_KEY` / `XAI_API_KEY` into Settings, then `/model moonshot/kimi-k2.6` or `/model xai/grok-4.3` (bare `grok-*` ids route too). New Kimi / Grok releases are picked up automatically by the catalogue refresh.
+- **Credential-aware default provider.** On a fresh start — when no model is explicitly pinned — thClaws now selects the first provider you actually have a key (or gateway route) for, in order DashScope → OpenAI → Anthropic, instead of always defaulting to Anthropic.
+
+### Changed
+- **Refreshed per-provider default models:** DashScope → `qwen3.7-max`, OpenAI → `gpt-4.1`, Gemini → `gemini-3.5-flash`, z.ai → `glm-5.2`. These apply both to the startup default and to `/provider <name>` switches.
+- **`make catalogue` now discovers z.ai, Moonshot, and xAI** from their live `/v1/models`, so new GLM / Kimi / Grok models appear without a hand-edit (z.ai was previously missing entirely — `glm-5.2` never showed up).
+
+### Fixed
+- **Shell tab accepts keyboard input immediately on tab switch** ([#166](https://github.com/thClaws/thClaws/issues/166)). Under the wry/Chromium webview the just-unhidden terminal wasn't reliably focusable in the same frame, so keystrokes were silently dropped until you clicked inside it. Focus is now deferred a frame (with explicit click-to-focus as a fallback).
+
 ## [0.65.0] - 2026-06-17
 
 ### Added
