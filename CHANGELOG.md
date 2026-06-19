@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.68.0] - 2026-06-19
+
+### Added
+- **Marketplace now covers four types — skills · MCP · plugins · subagents.** Subagents (agent defs) are a new installable catalog type: `/subagent marketplace | search | info | install` pulls a single `.md` agent def into `.thclaws/agents/`. A unified **`/marketplace`** command opens a GUI browser with a tab per type, search, and one-click install.
+- **Author agent defs in the GUI — `/agent new` / `/agent edit`.** GUI-only commands open a modal to edit an agent's YAML frontmatter and system prompt, saving a project override at `.thclaws/agents/<name>.md`.
+- **Gated tool groups + GUI Shell authoring tools.** Tools can be registered but hidden until a skill opens their gate; the GUI-shell authoring tools are now surfaced lazily via the bundled `gui-shell` skill instead of a ~3KB always-on system-prompt block.
+
+### Changed
+- **Gateway overlay → `gateway.thclaws.cloud` + CLI-token auth.** The thClaws Gateway base URL is the consolidated `gateway.thclaws.cloud`, and a thClaws.cloud login (CLI token) is now accepted directly — no separate `gw_v1_` key needed when you're signed in.
+
+### Fixed
+- **Native Gemini provider no longer 400s on tool schemas** ([#172](https://github.com/thClaws/thClaws/issues/172)). Tool schemas are sanitized to Gemini's `Schema` subset before sending — strips `$schema` / `additionalProperties` / `propertyNames` (recursively), drops non-string `enum`s (e.g. `[0,1,2]`), keeps string enums.
+- **WYSIWYG `.md` editor preserves HTML comments and images** on edit/save. Wrapper markers like `<!-- img:foo -->` and `![alt](src)` survive the round-trip (custom comment node + Image extension) instead of being silently dropped.
+- **Chat no longer yanks you to the bottom while reading history** ([#170](https://github.com/thClaws/thClaws/issues/170)). Streamed tokens only auto-scroll when you're already pinned to the bottom.
+- **Compact running indicator** ([#171](https://github.com/thClaws/thClaws/issues/171)). The RunningChip is now a narrow dot + elapsed time (a static dot when idle); session id and progress move to the hover tooltip so it no longer pushes header items off-screen.
+
 ## [0.67.0] - 2026-06-17
 
 ### Added

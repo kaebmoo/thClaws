@@ -1,11 +1,12 @@
 /**
  * RunningChip — header indicator that an agent turn is in flight.
  *
- * Shows nothing when idle. When busy, shows a pulsing dot, elapsed
- * time, and the last `[i/N] subject — verdict` progress line the
- * engine extracted from the text stream. Click to attach to the
- * running session (sends `/load <id>` through the normal shell
- * input path).
+ * Compact: a pulsing green dot + elapsed time when busy, a static gray
+ * dot when idle (always present so the agent's alive/ready state is
+ * visible). Session id and the last `[i/N] subject — verdict` progress
+ * line move to the hover tooltip so the chip stays narrow (issue #171).
+ * Click while busy to attach to the running session (sends `/load <id>`
+ * through the normal shell input path).
  *
  * Companion to `useBusyState` — see dev-plan/36.
  */
@@ -34,30 +35,43 @@ export function RunningChip() {
     return () => window.clearInterval(id);
   }, [busy]);
 
-  if (!busy) return null;
-
-  const elapsed = startedAtMs ? fmtElapsed(startedAtMs) : "";
+  // Compact, near-fixed-width indicator (issue #171): a status dot +
+  // elapsed when busy, a static gray dot when idle. Full details
+  // (session, progress) move to the hover tooltip so the chip never
+  // pushes other header items off-screen. Always rendered — a persistent
+  // dot confirms the agent is alive/ready.
+  const elapsed = busy && startedAtMs ? fmtElapsed(startedAtMs) : "";
   const onClick = () => {
-    if (sessionId) {
+    if (busy && sessionId) {
       send({ type: "shell_input", text: `/load ${sessionId}` });
     }
   };
 
+  const title = busy
+    ? [
+        sessionId ? `Running session ${sessionId}` : "Agent running",
+        elapsed && `elapsed ${elapsed}`,
+        lastProgress || null,
+        sessionId && "click to attach",
+      ]
+        .filter(Boolean)
+        .join(" — ")
+    : "Idle";
+
   return (
     <button
       onClick={onClick}
-      title={
-        sessionId
-          ? `Running session ${sessionId} — click to attach`
-          : "Agent running"
-      }
-      className="running-chip flex items-center gap-1.5 px-2 py-0.5 mr-2 rounded text-xs font-medium"
+      title={title}
+      className={`${busy ? "running-chip " : ""}flex items-center justify-center gap-1.5 mr-2 rounded text-xs font-medium`}
       style={{
-        background: "rgba(95, 179, 179, 0.15)",
-        color: "var(--accent, #5fb3b3)",
-        border: "1px solid rgba(95, 179, 179, 0.45)",
-        cursor: sessionId ? "pointer" : "default",
-        maxWidth: 480,
+        padding: "1px 6px",
+        minWidth: 24,
+        background: busy ? "rgba(95, 179, 179, 0.15)" : "transparent",
+        color: busy ? "var(--accent, #5fb3b3)" : "var(--text-secondary)",
+        border: busy
+          ? "1px solid rgba(95, 179, 179, 0.45)"
+          : "1px solid transparent",
+        cursor: busy && sessionId ? "pointer" : "default",
       }}
     >
       <span
@@ -67,25 +81,11 @@ export function RunningChip() {
           width: 7,
           height: 7,
           borderRadius: "50%",
-          background: "currentColor",
+          background: busy ? "currentColor" : "var(--text-secondary, #888)",
+          opacity: busy ? 1 : 0.5,
         }}
       />
-      <span>running</span>
-      {elapsed && <span style={{ opacity: 0.8 }}>· {elapsed}</span>}
-      {lastProgress && (
-        <span
-          style={{
-            opacity: 0.75,
-            fontFamily: "ui-monospace, SFMono-Regular, monospace",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-            maxWidth: 320,
-          }}
-        >
-          · {lastProgress}
-        </span>
-      )}
+      {busy && elapsed && <span style={{ opacity: 0.85 }}>{elapsed}</span>}
     </button>
   );
 }
