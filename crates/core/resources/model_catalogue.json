@@ -1,7 +1,7 @@
 {
   "schema": 4,
   "source": "baseline 2026-06-10 — pricing synced from LiteLLM (github.com/BerriAI/litellm)",
-  "fetched_at": "2026-06-17T00:00:00Z",
+  "fetched_at": "2026-06-20T00:00:00Z",
   "providers": {
     "anthropic": {
       "list_url": "https://api.anthropic.com/v1/models",
@@ -2848,6 +2848,11 @@
           "context": 202752,
           "source": "https://opencode.ai/zen/go/v1/models (context: Z.ai GLM-4.6 spec; GLM-5 family carries the same window)",
           "verified_at": "2026-05-14"
+        },
+        "opencode-go/glm-5.2": {
+          "context": 131072,
+          "source": "https://opencode.ai/zen/go/v1/models",
+          "verified_at": "2026-06-20"
         },
         "opencode-go/hy3-preview": {
           "context": 131072,
@@ -7359,6 +7364,11 @@
           "context": 128000,
           "source": "https://api.tokenrouter.com/v1/models",
           "verified_at": "2026-06-14"
+        },
+        "tokenrouter/ex/gpt-5.4": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-20"
         },
         "tokenrouter/google/gemini-3-flash-preview": {
           "context": 128000,

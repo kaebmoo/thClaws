@@ -6,6 +6,7 @@
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use thclaws_core::bridge::BridgeConfig;
 use thclaws_core::config::AppConfig;
 use thclaws_core::dotenv::load_dotenv;
 use thclaws_core::repl::{run_print_mode, run_repl};

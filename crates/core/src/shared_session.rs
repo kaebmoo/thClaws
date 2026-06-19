@@ -190,6 +190,22 @@ pub enum ShellInput {
         text: String,
         respond: tokio::sync::oneshot::Sender<String>,
     },
+    /// dev-plan/44 Tier 1: connect the phone-home tunnel from a saved
+    /// `PhoneHomeConfig` (boot auto-reconnect, or the GUI "Phone home"
+    /// toggle). The worker spawns the bridge session and stashes the
+    /// `PhoneHomeHandle`. Unlike LINE/Messenger it does NOT swap the
+    /// permission posture — approvals stay local (the cloud drives the
+    /// agent, so local approval prompts are the safety gate).
+    PhoneHomeConnect(crate::phone_home::PhoneHomeConfig),
+    /// dev-plan/44: IPC `phone_home_disconnect`. Worker cancels the
+    /// session, drops the handle, and deletes the on-disk config.
+    PhoneHomeDisconnect,
+    /// dev-plan/44: IPC `phone_home_pair`. Worker exchanges the stored
+    /// thClaws.cloud CLI token for a binding via the relay's `/ph/pair`,
+    /// saves `.thclaws/phone-home.json`, then connects. Carried out in a
+    /// spawned task (it does a network round-trip) that emits a
+    /// `PhoneHomeConnect` on success.
+    PhoneHomePair,
     /// dev-plan/29 Tier 1: connect the Telegram bridge from a saved
     /// `TelegramConfig` (GUI Connect modal, or boot auto-reconnect). The
     /// worker validates the token via `getMe`, spawns the polling
@@ -754,6 +770,11 @@ pub struct WorkerState {
     /// approver, restored on disconnect. Mirrors `line_pre_*`.
     pub telegram_pre_mode: Option<crate::permissions::PermissionMode>,
     pub telegram_pre_approver: Option<std::sync::Arc<dyn crate::permissions::ApprovalSink>>,
+    /// dev-plan/44 Tier 1: active phone-home tunnel session. `Some` only
+    /// while the bridge WS task is running; `phone_home_disconnect`
+    /// cancels + clears it. No pre-mode/approver stash — phone-home keeps
+    /// approvals local (see `ShellInput::PhoneHomeConnect`).
+    pub phone_home_session: Option<crate::phone_home::PhoneHomeHandle>,
     /// dev-plan/31: active Facebook Page Messenger bridge session. `Some`
     /// only while the relay WS task is running; `messenger_disconnect`
     /// cancels + clears it. Mirrors `line_session`.
@@ -1834,6 +1855,7 @@ async fn run_worker(
         line_session: None,
         line_pre_mode: None,
         line_pre_approver: None,
+        phone_home_session: None,
         telegram_session: None,
         telegram_pre_mode: None,
         telegram_pre_approver: None,
@@ -1888,6 +1910,16 @@ async fn run_worker(
         }
         Ok(_) => {}
         Err(e) => eprintln!("[messenger] failed to load on-disk config: {e}"),
+    }
+
+    // dev-plan/44 Tier 1: auto-reconnect the phone-home tunnel on boot
+    // when a binding is on disk. Mirrors the blocks above.
+    match crate::phone_home::PhoneHomeConfig::load() {
+        Ok(Some(cfg)) if !cfg.binding_token.trim().is_empty() => {
+            let _ = input_tx_self.send(ShellInput::PhoneHomeConnect(cfg));
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("[phone-home] failed to load on-disk config: {e}"),
     }
 
     // Lead inbox poller — parity with repl.rs:1524. Without this, teammates
@@ -2605,6 +2637,128 @@ async fn run_worker(
                     None => telegram_disconnected_payload(),
                 };
                 let _ = events_tx.send(ViewEvent::TelegramStatus(payload.to_string()));
+            }
+            ShellInput::PhoneHomeConnect(ph_cfg) => {
+                // Last connect wins — cancel any prior tunnel.
+                if let Some(prev) = state.phone_home_session.take() {
+                    prev.cancel.cancel();
+                }
+                let handle = crate::phone_home::spawn(ph_cfg, input_tx_self.clone());
+                let server_url = handle.server_url.clone();
+
+                // dev-plan/44 streaming: fan every ViewEvent up the tunnel
+                // so a connected dashboard (/talk) mirrors the live
+                // conversation — local turns included. A dedicated
+                // sequencer keeps pushes ordered (same fix as the LINE
+                // chat-bridge). Lives until the tunnel's cancel fires.
+                {
+                    let fan_client = handle.client.clone();
+                    let fan_cancel = handle.cancel.clone();
+                    let mut event_rx = events_tx.subscribe();
+                    tokio::spawn(async move {
+                        let (tx, mut rx) =
+                            tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
+                        let push_client = fan_client.clone();
+                        tokio::spawn(async move {
+                            while let Some(env) = rx.recv().await {
+                                if let Err(e) = push_client.push_event(env).await {
+                                    eprintln!("[phone-home] event push failed: {e}");
+                                }
+                            }
+                        });
+                        loop {
+                            tokio::select! {
+                                _ = fan_cancel.cancelled() => break,
+                                ev = event_rx.recv() => match ev {
+                                    Ok(ev) => {
+                                        if let Some(env) = view_event_to_chat_envelope(&ev) {
+                                            let _ = tx.send(env);
+                                        }
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                        continue
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
+                        }
+                    });
+                }
+
+                state.phone_home_session = Some(handle);
+                // No permission-posture swap: approvals stay on the local
+                // Ask/Auto/Plan posture so a cloud-driven turn still hits
+                // the user's local approval prompts (dev-plan/44 security
+                // note). A status pill / approval-over-bridge is follow-up;
+                // for now a SlashOutput notice is enough.
+                let _ = events_tx.send(ViewEvent::SlashOutput(format!(
+                    "[thClaws Remote] connected → {server_url} (approvals stay local)"
+                )));
+            }
+            ShellInput::PhoneHomeDisconnect => {
+                if let Some(handle) = state.phone_home_session.take() {
+                    handle.cancel.cancel();
+                }
+                // Best-effort unpair so the relay drops the binding, then
+                // delete the on-disk config so the next boot doesn't
+                // auto-reconnect.
+                if let Ok(Some(cfg)) = crate::phone_home::PhoneHomeConfig::load() {
+                    let client = std::sync::Arc::new(crate::phone_home::build_client(
+                        cfg,
+                        crate::cancel::CancelToken::new(),
+                    ));
+                    tokio::spawn(async move {
+                        if let Err(e) = client.unpair().await {
+                            eprintln!("[phone-home] /unpair failed (continuing): {e}");
+                        }
+                    });
+                }
+                if let Err(e) = crate::phone_home::PhoneHomeConfig::delete() {
+                    eprintln!("[phone-home] delete on-disk config: {e}");
+                }
+                let _ = events_tx.send(ViewEvent::SlashOutput(
+                    "[thClaws Remote] disconnected".into(),
+                ));
+            }
+            ShellInput::PhoneHomePair => {
+                match crate::cloud::token() {
+                    None => {
+                        let _ = events_tx.send(ViewEvent::SlashOutput(
+                            "[thClaws Remote] not enabled: log in to thClaws.cloud first (Settings → thClaws.cloud)".into(),
+                        ));
+                    }
+                    Some(token) => {
+                        let relay_base = std::env::var("THCLAWS_PHONE_HOME_SERVER")
+                            .ok()
+                            .filter(|s| !s.trim().is_empty())
+                            .unwrap_or_else(|| {
+                                crate::phone_home::config::DEFAULT_SERVER_URL.to_string()
+                            });
+                        let machine_label =
+                            std::env::var("HOSTNAME").unwrap_or_else(|_| "thclaws".to_string());
+                        let tx = input_tx_self.clone();
+                        let events = events_tx.clone();
+                        // Network round-trip — spawn so the worker loop
+                        // keeps draining input. On success, connect.
+                        tokio::spawn(async move {
+                            match crate::phone_home::pair(&relay_base, &token, Some(machine_label))
+                                .await
+                            {
+                                Ok(cfg) => {
+                                    let _ = events.send(ViewEvent::SlashOutput(
+                                        "[thClaws Remote] enabled — connecting…".into(),
+                                    ));
+                                    let _ = tx.send(ShellInput::PhoneHomeConnect(cfg));
+                                }
+                                Err(e) => {
+                                    let _ = events.send(ViewEvent::SlashOutput(format!(
+                                        "[thClaws Remote] enable failed: {e}"
+                                    )));
+                                }
+                            }
+                        });
+                    }
+                }
             }
             ShellInput::MessengerConnect(msgr_cfg) => {
                 // New connect always wins — cancel any prior session.
@@ -4699,6 +4853,14 @@ fn format_provider_model(provider: &str, model: &str) -> String {
 fn view_event_to_chat_envelope(ev: &ViewEvent) -> Option<serde_json::Value> {
     use serde_json::json;
     match ev {
+        // The user's own message — so a connected surface (phone-home
+        // /talk) mirrors what was typed locally. The LINE browser SPA has
+        // no `user_message` case so it ignores this; the phone-home /talk
+        // page renders it as a user bubble. (dev-plan/44 streaming)
+        ViewEvent::UserPrompt(text) => Some(json!({
+            "type": "user_message",
+            "text": text,
+        })),
         ViewEvent::AssistantTextDelta(text) => {
             // Apply the same ANSI + tool-narration strip the LINE
             // OA path uses, otherwise the model's echoed

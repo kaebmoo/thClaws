@@ -24,6 +24,7 @@
 //! build their own `IpcContext` flavor and call [`handle_ipc`] uniformly.
 //! The body of [`handle_ipc`] is identical regardless of transport.
 
+use crate::bridge::BridgeConfig;
 use crate::permissions::{
     AgentOrigin, ApprovalDecision, ApprovalRequest, ApprovalSink, GuiApprover,
 };
@@ -1151,6 +1152,63 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 "type": "line_disconnect_ack",
                 "ok": true,
             });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        // ── Phone-home tunnel wiring (dev-plan/44 Tier 1) ──────────
+        // The cloud-token pairing that writes `.thclaws/phone-home.json`
+        // is a follow-up; `phone_home_connect` reconnects an existing
+        // binding (the worker also auto-reconnects one on boot).
+        "phone_home_connect" => {
+            let payload = match crate::phone_home::PhoneHomeConfig::load() {
+                Ok(Some(cfg)) => {
+                    let _ = ctx
+                        .shared
+                        .input_tx
+                        .send(crate::shared_session::ShellInput::PhoneHomeConnect(cfg));
+                    serde_json::json!({ "type": "phone_home_connect_ack", "ok": true })
+                }
+                Ok(None) => serde_json::json!({
+                    "type": "phone_home_connect_ack",
+                    "ok": false,
+                    "error": "no phone-home binding on disk — pair first",
+                }),
+                Err(e) => serde_json::json!({
+                    "type": "phone_home_connect_ack",
+                    "ok": false,
+                    "error": e.to_string(),
+                }),
+            };
+            (ctx.dispatch)(payload.to_string());
+        }
+        "phone_home_disconnect" => {
+            let _ = ctx
+                .shared
+                .input_tx
+                .send(crate::shared_session::ShellInput::PhoneHomeDisconnect);
+            let payload = serde_json::json!({
+                "type": "phone_home_disconnect_ack",
+                "ok": true,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+        "phone_home_pair" => {
+            // Exchange the stored cloud CLI token for a phone-home binding,
+            // then connect. The worker does the network round-trip; we
+            // ack immediately (with a clear error if not logged in).
+            let payload = if crate::cloud::token().is_some() {
+                let _ = ctx
+                    .shared
+                    .input_tx
+                    .send(crate::shared_session::ShellInput::PhoneHomePair);
+                serde_json::json!({ "type": "phone_home_pair_ack", "ok": true, "pending": true })
+            } else {
+                serde_json::json!({
+                    "type": "phone_home_pair_ack",
+                    "ok": false,
+                    "error": "log in to thClaws.cloud first (Settings → thClaws.cloud)",
+                })
+            };
             (ctx.dispatch)(payload.to_string());
         }
 

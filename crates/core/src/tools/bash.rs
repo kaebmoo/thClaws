@@ -222,6 +222,7 @@ async fn run_shell_command(
     // is additive; user shells can still override per-command via
     // `VAR=value cmd` syntax.
     apply_noninteractive_env(&mut cmd);
+    scrub_sensitive_env(&mut cmd);
 
     let mut child = cmd
         .spawn()
@@ -1121,6 +1122,49 @@ fn looks_like_tty_required(stdout: &str, stderr: &str) -> bool {
 /// Most modern CLIs honour at least one of these to skip prompts and
 /// auto-accept defaults. M6.8 B1 — workaround for the lack of a real
 /// PTY in the Bash sandbox.
+/// Keep platform credentials out of the shell's environment so a
+/// `printenv` / `cat /proc/self/environ` can't exfiltrate them. Platform
+/// internals (the gateway access key, the multiuser HMAC secret, the cloud
+/// token) are *always* removed — they're never useful to a user's command
+/// and absent on desktop anyway (no-op). Provider API keys are removed only
+/// in a multiuser/shared session, where the shell belongs to a guest who
+/// must not read the owner's billable credentials; on a single-user desktop
+/// the user's own keys stay available to their commands.
+fn scrub_sensitive_env(cmd: &mut tokio::process::Command) {
+    const ALWAYS: &[&str] = &[
+        "THCLAWS_CLOUD_HMAC_SECRET",
+        "THCLAWS_GATEWAY_API_KEY",
+        "THCLAWS_CLOUD_TOKEN",
+    ];
+    for k in ALWAYS {
+        cmd.env_remove(k);
+    }
+    if crate::workdir::is_multiuser() {
+        const SCOPED: &[&str] = &[
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "OPENROUTER_API_KEY",
+            "DASHSCOPE_API_KEY",
+            "QWENCLOUD_API_KEY",
+            "ZAI_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "MINIMAX_API_KEY",
+            "THAILLM_API_KEY",
+            "XAI_API_KEY",
+            "MOONSHOT_API_KEY",
+            "BRAVE_SEARCH_API_KEY",
+            "BRAVE_API_KEY",
+            "TAVILY_API_KEY",
+            "HAL_API_KEY",
+        ];
+        for k in SCOPED {
+            cmd.env_remove(k);
+        }
+    }
+}
+
 fn apply_noninteractive_env(cmd: &mut tokio::process::Command) {
     // CI=1 is the most-respected signal. npm, pnpm, yarn, vite, jest,
     // ESLint, Prettier, Cypress, etc. all use it.
@@ -1148,6 +1192,34 @@ fn apply_noninteractive_env(cmd: &mut tokio::process::Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrub_removes_platform_secrets_keeps_others() {
+        let mut cmd = crate::util::shell_command_async("true");
+        cmd.env("THCLAWS_GATEWAY_API_KEY", "spend-me")
+            .env("THCLAWS_CLOUD_HMAC_SECRET", "forge-me")
+            .env("KEEP_ME", "1");
+        scrub_sensitive_env(&mut cmd);
+        let std = cmd.as_std();
+        let removed = |key: &str| {
+            std.get_envs()
+                .any(|(k, v)| k == std::ffi::OsStr::new(key) && v.is_none())
+        };
+        assert!(
+            removed("THCLAWS_GATEWAY_API_KEY"),
+            "gateway key must be scrubbed"
+        );
+        assert!(
+            removed("THCLAWS_CLOUD_HMAC_SECRET"),
+            "hmac secret must be scrubbed"
+        );
+        assert!(
+            std.get_envs()
+                .any(|(k, v)| k == std::ffi::OsStr::new("KEEP_ME")
+                    && v == Some(std::ffi::OsStr::new("1"))),
+            "non-secret env must be preserved"
+        );
+    }
     use tempfile::tempdir;
 
     #[test]

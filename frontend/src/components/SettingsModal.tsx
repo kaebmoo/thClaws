@@ -291,7 +291,6 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         </p>
 
         <div className="flex flex-col gap-3">
-          <GatewaySettingsSection />
           <DeployTargetSection />
           <CloudSection />
           <AgentIdentitySection />
@@ -521,74 +520,6 @@ function persistGatewaySettings(use_for: string[]) {
   const current = cachedGatewaySettings?.base_url ?? "";
   applyGatewaySettings({ base_url: current, use_for });
   send({ type: "gateway_settings_set", use_for });
-}
-
-/// Top-of-modal card: access key field for the fixed thClaws Gateway.
-/// Access key persists to the keychain via the existing api_key_set
-/// IPC (provider name "gateway"). The gateway base URL is hard-coded
-/// on the backend (see `providers::thclaws_gateway::GATEWAY_BASE_URL`)
-/// — users only paste their key and flip the per-provider toggles.
-function GatewaySettingsSection() {
-  const settings = useGatewaySettings();
-  const [keyDraft, setKeyDraft] = useState("");
-  const onSaveKey = () => {
-    const trimmed = keyDraft.trim();
-    if (!trimmed) return;
-    send({ type: "api_key_set", provider: "gateway", key: trimmed });
-    setKeyDraft("");
-  };
-  return (
-    <div
-      className="rounded-lg p-3"
-      style={{ background: "var(--bg-tertiary)", border: "1px solid var(--border)" }}
-    >
-      <div className="flex items-center gap-2 mb-1">
-        <LinkIcon size={12} style={{ color: "var(--accent)" }} />
-        <span className="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>
-          thClaws Gateway
-        </span>
-      </div>
-      <p className="text-xs mb-2" style={{ color: "var(--text-secondary)" }}>
-        Route per-provider traffic through <span className="font-mono">{settings.base_url}</span>,
-        then flip "Use thClaws Gateway" on the provider cards below. If you're signed in to
-        thClaws.cloud (Settings → thClaws.cloud), your login is used automatically — the access key
-        below is optional, only needed for a standalone <span className="font-mono">gw_v1_…</span> key.
-      </p>
-      <FieldLabel icon={<KeyRound size={11} />} text="Access key" env="THCLAWS_GATEWAY_API_KEY" />
-      <div className="flex gap-1.5">
-        <input
-          type="password"
-          placeholder="Paste gateway access key (gw_v1_…)"
-          className="flex-1 px-2.5 py-1.5 rounded text-xs font-mono outline-none"
-          style={{
-            background: "var(--bg-primary)",
-            color: "var(--text-primary)",
-            border: "1px solid var(--border)",
-          }}
-          value={keyDraft}
-          onChange={(e) => setKeyDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") onSaveKey();
-          }}
-          autoComplete="off"
-        />
-        <button
-          type="button"
-          onClick={onSaveKey}
-          disabled={!keyDraft.trim()}
-          className="px-2 py-1.5 rounded text-xs"
-          style={{
-            background: keyDraft.trim() ? "var(--accent)" : "var(--bg-primary)",
-            color: keyDraft.trim() ? "var(--accent-fg)" : "var(--text-secondary)",
-            border: "1px solid var(--border)",
-            cursor: keyDraft.trim() ? "pointer" : "not-allowed",
-          }}
-        >
-          Save
-        </button>
-      </div>
-    </div>
-  );
 }
 
 /// Per-provider "Use thClaws Gateway" checkbox in the provider card.
@@ -1036,6 +967,11 @@ function CloudSection() {
   const [urlDraft, setUrlDraft] = useState("");
   const [tokenDraft, setTokenDraft] = useState("");
   const [flash, setFlash] = useState<{ ok: boolean; msg: string } | undefined>(undefined);
+  // dev-plan/44: phone-home pairing status (the ack from the IPC layer;
+  // the actual pair → connect runs on the worker and streams to chat).
+  const [phoneHome, setPhoneHome] = useState<{ pending: boolean; msg?: string }>({
+    pending: false,
+  });
 
   useEffect(() => {
     const unsub = subscribe((msg) => {
@@ -1049,6 +985,10 @@ function CloudSection() {
           env_var_set: !!next.env_var_set,
           token_writable: !!next.token_writable,
         });
+      } else if (msg.type === "phone_home_pair_ack") {
+        const r = msg as { ok?: boolean; error?: string; pending?: boolean };
+        if (r.ok && r.pending) setPhoneHome({ pending: true, msg: "pairing… (see chat)" });
+        else if (!r.ok) setPhoneHome({ pending: false, msg: r.error ?? "pairing failed" });
       } else if (msg.type === "cloud_config_result") {
         const r = msg as {
           url_ok?: boolean;
@@ -1091,6 +1031,10 @@ function CloudSection() {
   const onClearToken = () => {
     send({ type: "cloud_config_set", token: "" });
     setTokenDraft("");
+  };
+  const onPhoneHome = () => {
+    setPhoneHome({ pending: true, msg: "pairing…" });
+    send({ type: "phone_home_pair" });
   };
 
   const urlValue = urlDraft || cfg.url || "";
@@ -1186,6 +1130,46 @@ function CloudSection() {
         />
       </div>
       <FlashLine flash={flash} />
+
+      {/* dev-plan/44: phone home — let thClaws.cloud reach this machine's
+          agent over an outbound tunnel (no public IP / inbound port). */}
+      <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--border)" }}>
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-xs font-semibold" style={{ color: "var(--text-primary)" }}>
+              📡 thClaws Remote
+            </div>
+            <div className="text-xs" style={{ color: "var(--text-secondary)" }}>
+              Let thClaws.cloud reach this machine&apos;s agent — outbound tunnel, no public
+              IP or open port.
+            </div>
+          </div>
+          <button
+            onClick={onPhoneHome}
+            disabled={!cfg.has_token || phoneHome.pending}
+            className="px-2.5 py-1.5 rounded text-xs font-medium whitespace-nowrap"
+            style={{
+              background: cfg.has_token ? "var(--accent)" : "var(--bg-primary)",
+              color: cfg.has_token ? "#fff" : "var(--text-secondary)",
+              border: "1px solid var(--border)",
+              cursor: cfg.has_token && !phoneHome.pending ? "pointer" : "default",
+              opacity: cfg.has_token && !phoneHome.pending ? 1 : 0.6,
+            }}
+            title={
+              cfg.has_token
+                ? "Pair this machine with your thClaws.cloud account"
+                : "Save a thClaws.cloud CLI token above first"
+            }
+          >
+            {phoneHome.pending ? "Enabling…" : "Enable"}
+          </button>
+        </div>
+        {phoneHome.msg && (
+          <div className="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
+            {phoneHome.msg}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

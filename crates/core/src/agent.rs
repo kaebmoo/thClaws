@@ -1586,21 +1586,33 @@ impl Agent {
                     }
 
                     // M6.35 HOOK1: pre_tool_use fires after the approval
-                    // gate but before the tool runs. Fire-and-forget so
-                    // the hook doesn't block dispatch — pre/post strict
-                    // ordering is documented as best-effort, not a
-                    // guarantee, in the user manual.
-                    if let Some(h) = &hooks {
+                    // gate but before the tool runs, as a synchronous GATE —
+                    // a hook that exits 2 denies the call (the tool never
+                    // runs; the model sees the hook's reason). Any other
+                    // outcome allows it (fail-open), so a plain audit hook
+                    // (exit 0) behaves exactly as the old fire-and-forget.
+                    let hook_denied: Option<String> = if let Some(h) = &hooks {
                         let input_str = serde_json::to_string(input)
                             .unwrap_or_else(|_| "<unserializable>".to_string());
-                        crate::hooks::fire_pre_tool_use(h, &name, &input_str);
-                    }
+                        match crate::hooks::fire_pre_tool_use_gate(h, &name, &input_str).await {
+                            crate::hooks::PreToolDecision::Deny(reason) => Some(reason),
+                            crate::hooks::PreToolDecision::Allow => None,
+                        }
+                    } else {
+                        None
+                    };
 
                     // ToolCallStart was yielded at parse time (see the
                     // assembled-event loop above) so the UI shows the
                     // tool queued before the approval modal pops. The
-                    // dispatch site here just runs the call.
-                    let tool_result = tool.call_multimodal(input.clone()).await;
+                    // dispatch site here just runs the call (unless the
+                    // pre_tool_use gate denied it).
+                    let tool_result = match hook_denied {
+                        Some(reason) => {
+                            Err(crate::error::Error::Tool(format!("blocked by policy: {reason}")))
+                        }
+                        None => tool.call_multimodal(input.clone()).await,
+                    };
 
                     let (content, is_error) = match &tool_result {
                         Ok(c) => {

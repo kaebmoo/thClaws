@@ -275,6 +275,66 @@ pub fn fire_pre_tool_use(config: &HooksConfig, tool_name: &str, input: &str) {
     fire(config, HookEvent::PreToolUse, &env);
 }
 
+/// Decision returned by [`fire_pre_tool_use_gate`].
+pub enum PreToolDecision {
+    Allow,
+    /// Deny the tool call; the string is surfaced to the model as the
+    /// reason (the hook's stderr).
+    Deny(String),
+}
+
+/// Run the `pre_tool_use` hook (if any) **synchronously as a gate** and
+/// decide whether the tool call may proceed. Exit code **2** denies the
+/// call (Claude-Code convention) with the hook's stderr as the reason;
+/// every other outcome — no hook configured, success, any other non-zero
+/// code, timeout, or spawn failure — **allows** it (fail-open). This is the
+/// soft enforcement layer for accidents / accountability / policy; a hard
+/// adversary boundary is OS-level confinement, not command screening.
+///
+/// Additive: a hook that exits 0 (or anything but 2) behaves exactly as the
+/// fire-and-forget [`fire_pre_tool_use`] did before — only an explicit
+/// `exit 2` now blocks. Must run inside a tokio runtime.
+pub async fn fire_pre_tool_use_gate(
+    config: &HooksConfig,
+    tool_name: &str,
+    input: &str,
+) -> PreToolDecision {
+    let Some(cmd) = config.get(HookEvent::PreToolUse) else {
+        return PreToolDecision::Allow;
+    };
+    let mut command = crate::util::shell_command_async(cmd);
+    command.env("THCLAWS_HOOK_EVENT", HookEvent::PreToolUse.name());
+    command.env("THCLAWS_TOOL_NAME", tool_name);
+    command.env(
+        "THCLAWS_TOOL_INPUT",
+        truncate_for_env(input, MAX_HOOK_ENV_BYTES),
+    );
+    command.stdin(std::process::Stdio::null());
+    let out = match tokio::time::timeout(config.timeout(), command.output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            report_error(format!("pre_tool_use gate spawn failed: {e} — allowing"));
+            return PreToolDecision::Allow;
+        }
+        Err(_) => {
+            report_error(format!(
+                "pre_tool_use gate timed out after {}s — allowing",
+                config.timeout().as_secs()
+            ));
+            return PreToolDecision::Allow;
+        }
+    };
+    if out.status.code() == Some(2) {
+        let reason = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return PreToolDecision::Deny(if reason.is_empty() {
+            "blocked by pre_tool_use hook".to_string()
+        } else {
+            reason
+        });
+    }
+    PreToolDecision::Allow
+}
+
 /// Fire a post_tool_use (or _failure) hook with tool name and output.
 pub fn fire_post_tool_use(config: &HooksConfig, tool_name: &str, output: &str, is_error: bool) {
     let event = if is_error {
@@ -321,6 +381,53 @@ pub fn fire_compact(config: &HooksConfig, event: HookEvent, message_count: usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn gate_allows_when_no_hook() {
+        let cfg = HooksConfig::default();
+        assert!(matches!(
+            fire_pre_tool_use_gate(&cfg, "bash", "{}").await,
+            PreToolDecision::Allow
+        ));
+    }
+
+    #[tokio::test]
+    async fn gate_allows_on_exit_zero() {
+        let cfg = HooksConfig {
+            pre_tool_use: Some("true".into()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            fire_pre_tool_use_gate(&cfg, "bash", "{}").await,
+            PreToolDecision::Allow
+        ));
+    }
+
+    #[tokio::test]
+    async fn gate_allows_on_other_nonzero() {
+        // Only exit 2 blocks; exit 1 stays allowed (additive with the old
+        // fire-and-forget behaviour).
+        let cfg = HooksConfig {
+            pre_tool_use: Some("exit 1".into()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            fire_pre_tool_use_gate(&cfg, "bash", "{}").await,
+            PreToolDecision::Allow
+        ));
+    }
+
+    #[tokio::test]
+    async fn gate_denies_on_exit_two_with_stderr_reason() {
+        let cfg = HooksConfig {
+            pre_tool_use: Some("echo nope 1>&2; exit 2".into()),
+            ..Default::default()
+        };
+        match fire_pre_tool_use_gate(&cfg, "bash", "{}").await {
+            PreToolDecision::Deny(reason) => assert!(reason.contains("nope"), "reason={reason}"),
+            PreToolDecision::Allow => panic!("exit 2 must deny"),
+        }
+    }
 
     #[test]
     fn get_returns_none_for_unconfigured_hooks() {

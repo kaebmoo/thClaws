@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.69.0] - 2026-06-20
+
+### Added
+- **`pre_tool_use` hooks can now block a tool call.** A hook that exits `2` denies the call — the tool never runs and the hook's stderr is shown to the model as the reason; any other exit code still allows it (existing audit-only hooks are unchanged). This turns the audit hook into an enforceable gate — e.g. confine `bash` to the working folder instead of only logging it. Reference policy: `examples/hooks/audit-bash-confine.sh`.
+
+### Changed
+- **`bash` no longer exposes platform credentials to the shell.** Platform secrets (the gateway access key, the multiuser identity secret, the cloud token) are always stripped from a command's environment; in a shared/multiuser session the owner's provider API keys are stripped too — a `printenv` in `bash` can no longer read them.
+
+### Security
+- Hardening for thClaws.cloud hosted + shared workspaces: HttpOnly session cookies (no workspace-subdomain token theft), credential stripping before the runner, per-workspace identity secrets, per-workspace daily spend caps, and gateway per-user rate limiting.
+
 ## [0.68.0] - 2026-06-19
 
 ### Added
