@@ -165,6 +165,16 @@ pub trait Tool: Send + Sync {
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         None
     }
+
+    /// Declared output JSON Schema for a named subagent, if any (from the
+    /// def's `output_schema`). Default `None`. The `Task` tool
+    /// (`SubAgentTool`) overrides this so a workflow
+    /// `thclaws.subagent({agent})` call that omits a per-call `schema`
+    /// still gets schema validation — the schema lives in one place (the
+    /// agent def) instead of being duplicated in the workflow JS.
+    fn subagent_output_schema(&self, _agent: &str) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 /// Process-global set of open tool gates. Session-sticky: once a gate is

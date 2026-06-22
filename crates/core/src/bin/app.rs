@@ -327,6 +327,14 @@ enum Command {
         #[arg(long, global = true, value_name = "URL")]
         cloud_url: Option<String>,
     },
+    /// Package or validate an agent folder headlessly (dev-plan/47.5).
+    /// `pack` produces the same fused tarball `/cloud publish` uploads;
+    /// `validate` lints the folder before publish. Lets scripts/CI reuse
+    /// the canonical packer instead of re-deriving the strip rules.
+    Agent {
+        #[command(subcommand)]
+        cmd: AgentCmd,
+    },
     /// GUI Shell authoring (dev-plan/39 Tier 2) — scaffold a new shell
     /// from a vendored template, preview locally with hot-reload, lint
     /// the manifest, or pack into a single-file HTML for publish.
@@ -334,6 +342,27 @@ enum Command {
     Shell {
         #[command(subcommand)]
         cmd: ShellCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentCmd {
+    /// Pack an agent folder into the canonical fused tarball (identity +
+    /// catalog manifest) — the exact bytes `/cloud publish` uploads.
+    Pack {
+        /// Agent folder (must contain AGENTS.md + manifest.json).
+        #[arg(default_value = ".")]
+        path: std::path::PathBuf,
+        /// Output file. Defaults to <path>/<id>-<version>.tar.gz.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
+    /// Validate an agent folder before publish: manifest + identity,
+    /// subagent output/input schemas, workflow scripts, and a trial pack.
+    /// Exits non-zero on any error.
+    Validate {
+        #[arg(default_value = ".")]
+        path: std::path::PathBuf,
     },
 }
 
@@ -710,6 +739,10 @@ async fn main() {
         }
         Some(Command::Cloud { cmd, cloud_url }) => {
             let code = run_cloud_subcommand(cmd, cloud_url).await;
+            std::process::exit(code);
+        }
+        Some(Command::Agent { cmd }) => {
+            let code = run_agent_subcommand(cmd);
             std::process::exit(code);
         }
         #[cfg(feature = "gui")]
@@ -1133,6 +1166,48 @@ fn run_messenger_subcommand(cmd: MessengerCmd) -> i32 {
                  Run `thclaws messenger status` to confirm the binding is detected."
             );
             0
+        }
+    }
+}
+
+fn run_agent_subcommand(cmd: AgentCmd) -> i32 {
+    use thclaws_core::cloud::agent_cli;
+    match cmd {
+        AgentCmd::Pack { path, out } => match agent_cli::pack_to_file(&path, out) {
+            Ok((out_path, res)) => {
+                eprintln!(
+                    "✓ packed {} → {} ({} file(s), {} stripped, {:.1} KB)",
+                    path.display(),
+                    out_path.display(),
+                    res.included.len(),
+                    res.stripped.len(),
+                    res.bytes.len() as f64 / 1024.0
+                );
+                0
+            }
+            Err(e) => {
+                eprintln!("✗ pack failed: {e}");
+                1
+            }
+        },
+        AgentCmd::Validate { path } => {
+            let report = agent_cli::validate_folder(&path);
+            for i in &report.info {
+                eprintln!("  {i}");
+            }
+            for w in &report.warnings {
+                eprintln!("⚠ {w}");
+            }
+            for e in &report.errors {
+                eprintln!("✗ {e}");
+            }
+            if report.ok() {
+                eprintln!("✓ {} validates", path.display());
+                0
+            } else {
+                eprintln!("✗ {} — {} error(s)", path.display(), report.errors.len());
+                1
+            }
         }
     }
 }

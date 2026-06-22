@@ -65,6 +65,26 @@ pub struct AgentDef {
     /// Permission mode override.
     #[serde(default)]
     pub permission_mode: Option<String>,
+    /// Declared output JSON Schema. When a workflow `thclaws.subagent({agent})`
+    /// call omits a per-call `schema`, the worker's output is validated against
+    /// this — one source of truth instead of duplicating the schema in the
+    /// workflow JS. In frontmatter it's either single-line inline JSON or a
+    /// path (relative to the def's `.md`) to a `.json` schema file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<serde_json::Value>,
+    /// Declared input JSON Schema — documentation + a hook for
+    /// `thclaws agent validate`. Same frontmatter encoding as `output_schema`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<serde_json::Value>,
+    /// Glob allow-list confining this agent's file writes. Empty = inherit
+    /// (writes anywhere the parent permits). When non-empty, the file-write
+    /// tools (Write/Edit/office create+edit) refuse a target outside these
+    /// globs — mechanical write-scoping instead of a prompt promise. Globs
+    /// are workspace-relative (e.g. `.thclaws/kms/**`). NOTE: this scopes
+    /// the file-write tools, not `Bash`; a writer that also has Bash can
+    /// still write via the shell.
+    #[serde(default)]
+    pub write_paths: Vec<String>,
 }
 
 fn default_max_iterations() -> usize {
@@ -86,6 +106,9 @@ impl Default for AgentDef {
             color: None,
             isolation: None,
             permission_mode: None,
+            output_schema: None,
+            input_schema: None,
+            write_paths: vec![],
         }
     }
 }
@@ -245,7 +268,7 @@ impl AgentDefsConfig {
             ),
         ];
         for (fallback_name, raw) in BUILTINS {
-            if let Some(agent) = Self::parse_agent_md_str(raw, fallback_name) {
+            if let Some(agent) = Self::parse_agent_md_str(raw, fallback_name, None) {
                 self.agents.push(agent);
             }
         }
@@ -258,14 +281,21 @@ impl AgentDefsConfig {
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown");
-        Self::parse_agent_md_str(&raw, fallback)
+        Self::parse_agent_md_str(&raw, fallback, path.parent())
     }
 
     /// Parse an agent .md body (frontmatter + instructions) from an
     /// in-memory string. `fallback_name` is used when the frontmatter
     /// has no `name:` key — for disk loads this is the file stem; for
-    /// embedded built-ins it's a hard-coded name.
-    fn parse_agent_md_str(raw: &str, fallback_name: &str) -> Option<AgentDef> {
+    /// embedded built-ins it's a hard-coded name. `base_dir` is the
+    /// directory the `.md` lives in, used to resolve `output_schema` /
+    /// `input_schema` paths; `None` for embedded built-ins (inline JSON
+    /// only).
+    fn parse_agent_md_str(
+        raw: &str,
+        fallback_name: &str,
+        base_dir: Option<&Path>,
+    ) -> Option<AgentDef> {
         let (frontmatter, body) = crate::memory::parse_frontmatter(raw);
 
         let name = frontmatter
@@ -325,6 +355,31 @@ impl AgentDefsConfig {
             .map(|s| split_list(s))
             .unwrap_or_default();
 
+        // `output_schema` / `input_schema`: single-line inline JSON
+        // (`{...}`/`[...]`) or a path (relative to `base_dir`) to a
+        // `.json` file. Unresolvable / malformed values parse to `None`
+        // here; `thclaws agent validate` surfaces them as errors.
+        let resolve_schema = |keys: &[&str]| -> Option<serde_json::Value> {
+            let v = keys.iter().find_map(|k| frontmatter.get(*k))?.trim();
+            if v.is_empty() {
+                return None;
+            }
+            if v.starts_with('{') || v.starts_with('[') {
+                serde_json::from_str(v).ok()
+            } else {
+                let p = base_dir?.join(v);
+                serde_json::from_str(&std::fs::read_to_string(&p).ok()?).ok()
+            }
+        };
+        let output_schema = resolve_schema(&["output_schema", "outputSchema"]);
+        let input_schema = resolve_schema(&["input_schema", "inputSchema"]);
+
+        let write_paths = frontmatter
+            .get("writePaths")
+            .or_else(|| frontmatter.get("write_paths"))
+            .map(|s| split_list(s))
+            .unwrap_or_default();
+
         Some(AgentDef {
             name,
             description,
@@ -338,6 +393,9 @@ impl AgentDefsConfig {
             color,
             isolation,
             permission_mode,
+            output_schema,
+            input_schema,
+            write_paths,
         })
     }
 
@@ -349,6 +407,15 @@ impl AgentDefsConfig {
             Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
             Err(_) => Self::default(),
         }
+    }
+
+    /// Parse a single agent `.md` file (frontmatter + body) into an
+    /// [`AgentDef`], resolving `output_schema` / `input_schema` paths
+    /// relative to the file's directory. Public so `thclaws agent
+    /// validate` can lint a folder's defs without loading the whole
+    /// config from the standard dirs.
+    pub fn parse_md_file(path: &Path) -> Option<AgentDef> {
+        Self::parse_agent_md(path)
     }
 
     pub fn get(&self, name: &str) -> Option<&AgentDef> {
@@ -453,6 +520,19 @@ impl AgentDef {
         }
         if let Some(i) = &self.isolation {
             fm.push_str(&format!("isolation: {i}\n"));
+        }
+        if let Some(s) = &self.output_schema {
+            if let Ok(j) = serde_json::to_string(s) {
+                fm.push_str(&format!("output_schema: {j}\n"));
+            }
+        }
+        if let Some(s) = &self.input_schema {
+            if let Ok(j) = serde_json::to_string(s) {
+                fm.push_str(&format!("input_schema: {j}\n"));
+            }
+        }
+        if !self.write_paths.is_empty() {
+            fm.push_str(&format!("writePaths: {}\n", self.write_paths.join(", ")));
         }
         fm.push_str("---\n\n");
         fm.push_str(&self.instructions);
@@ -1042,9 +1122,12 @@ new instructions
             color: Some("cyan".into()),
             isolation: None,
             permission_mode: Some("auto".into()),
+            output_schema: Some(serde_json::json!({"type": "object"})),
+            input_schema: None,
+            write_paths: vec![".thclaws/kms/**".into()],
         };
         let md = def.to_markdown();
-        let parsed = AgentDefsConfig::parse_agent_md_str(&md, "fallback").unwrap();
+        let parsed = AgentDefsConfig::parse_agent_md_str(&md, "fallback", None).unwrap();
         assert_eq!(parsed.name, "reviewer");
         assert_eq!(parsed.description, "Read-only review");
         assert_eq!(parsed.model.as_deref(), Some("claude-haiku-4-5"));
@@ -1055,7 +1138,40 @@ new instructions
         assert_eq!(parsed.max_iterations, 20);
         assert_eq!(parsed.color.as_deref(), Some("cyan"));
         assert_eq!(parsed.permission_mode.as_deref(), Some("auto"));
+        // 47.1: output_schema round-trips as single-line inline JSON.
+        assert_eq!(
+            parsed.output_schema,
+            Some(serde_json::json!({"type": "object"}))
+        );
+        // 47.2: writePaths round-trips.
+        assert_eq!(parsed.write_paths, vec![".thclaws/kms/**".to_string()]);
         assert!(parsed.instructions.contains("Flag issues."));
+    }
+
+    /// 47.1: a path-based `output_schema` is resolved relative to the
+    /// def's `.md` directory and parsed into the AgentDef.
+    #[test]
+    fn output_schema_path_resolves_relative_to_md_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        let schemas = dir.path().join("schemas");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::create_dir_all(&schemas).unwrap();
+        std::fs::write(
+            schemas.join("planner.json"),
+            r#"{"type":"object","required":["subtopics"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            agents.join("planner.md"),
+            "---\nname: planner\noutput_schema: ../schemas/planner.json\n---\nplan\n",
+        )
+        .unwrap();
+        let def = AgentDefsConfig::parse_md_file(&agents.join("planner.md")).unwrap();
+        assert_eq!(
+            def.output_schema,
+            Some(serde_json::json!({"type": "object", "required": ["subtopics"]}))
+        );
     }
 
     #[test]

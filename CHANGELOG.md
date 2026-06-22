@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.72.0] - 2026-06-23
+
+### Added
+- **Agent-authoring ergonomics.** Subagent definitions can declare an `output_schema` / `input_schema` (single-line inline JSON or a path to a `.json` file); a workflow `thclaws.subagent({agent})` call that omits a per-call `schema` now validates against the def's schema automatically — one source of truth instead of duplicating it in the workflow JS. `WorkflowRun({args})` passes structured input to a pre-authored workflow as a global `args`, replacing the `TASK.md` side-channel. `thclaws.log(msg)` adds a workflow narrator line for observability. A `writePaths` glob allow-list mechanically confines a subagent's file writes (Write/Edit/office tools) to its lane. New `thclaws agent pack` / `thclaws agent validate` build + lint an agent tarball offline — byte-identical to what `/cloud publish` uploads, so scripts/CI never re-derive the strip rules.
+- **Workflow subagent calls fail loud on the wrong surface.** Inside a running workflow, `thclaws.subagent(...)` now errors clearly when the surface has no `Task` tool (e.g. `-p` / `/v1`) instead of silently returning a stub the script would mistake for a real result.
+
+### Fixed
+- **Hosted workspaces no longer collide on the same name.** A workspace's route was keyed on the email local-part, which isn't unique — two users sharing a local-part (`name@a.com` + `name@b.com`), or a delete+recreate that left a stale route behind, could surface as "no available server". Routes are now keyed on the unique user id, and workspace deletion cleans up every route it created.
+
 ## [0.70.0] - 2026-06-20
 
 ### Fixed

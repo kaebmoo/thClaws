@@ -23,6 +23,119 @@ use std::sync::{Arc, RwLock};
 pub const TOOL_NAME: &str = "Task";
 pub const DEFAULT_MAX_DEPTH: usize = 3;
 
+/// File-write tools that 47.2 `writePaths` scoping wraps. Each takes a
+/// target path under one of the keys in [`WRITE_PATH_KEYS`]; the wrapper
+/// refuses a target outside the agent def's globs before delegating.
+const WRITE_TOOL_NAMES: &[&str] = &[
+    "Write",
+    "Edit",
+    "DocxCreate",
+    "DocxEdit",
+    "PptxCreate",
+    "PptxEdit",
+    "XlsxCreate",
+    "XlsxEdit",
+    "PdfCreate",
+    "EpubCreate",
+    "NotebookEdit",
+];
+const WRITE_PATH_KEYS: &[&str] = &["path", "file_path", "notebook_path", "out", "output_path"];
+
+/// Wraps a file-write tool with a glob allow-list (`AgentDef::write_paths`).
+/// Delegates everything to the inner tool except that `call` first checks
+/// the target path against the globs — a write outside them is refused,
+/// mechanically, so a subagent can't scribble beyond its lane. Composes
+/// with the existing workspace sandbox (this is a secondary, narrower scope).
+struct PathScopedWriteTool {
+    inner: Arc<dyn Tool>,
+    globs: Arc<globset::GlobSet>,
+    patterns: Vec<String>,
+}
+
+impl PathScopedWriteTool {
+    fn check(&self, input: &Value) -> Result<()> {
+        let Some(raw) = WRITE_PATH_KEYS
+            .iter()
+            .find_map(|k| input.get(*k).and_then(|v| v.as_str()))
+        else {
+            // No recognised path arg — let the inner tool validate its
+            // own input rather than guessing.
+            return Ok(());
+        };
+        let cwd = crate::workdir::current_workdir();
+        let p = std::path::Path::new(raw);
+        let abs = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            cwd.join(p)
+        };
+        let rel = abs
+            .strip_prefix(&cwd)
+            .map(|r| r.to_path_buf())
+            .unwrap_or(abs);
+        let cand = rel.to_string_lossy().replace('\\', "/");
+        if self.globs.is_match(&cand) {
+            Ok(())
+        } else {
+            Err(Error::Tool(format!(
+                "write to '{raw}' denied — this subagent's writePaths confine it to {:?}. \
+                 Write only inside those globs (the agent def scopes file writes).",
+                self.patterns
+            )))
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for PathScopedWriteTool {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+    fn description(&self) -> &'static str {
+        self.inner.description()
+    }
+    fn input_schema(&self) -> Value {
+        self.inner.input_schema()
+    }
+    fn requires_approval(&self, input: &Value) -> bool {
+        self.inner.requires_approval(input)
+    }
+    fn parallelizable(&self) -> bool {
+        self.inner.parallelizable()
+    }
+    fn requires_env(&self) -> &'static [&'static str] {
+        self.inner.requires_env()
+    }
+    fn requires_gate(&self) -> Option<&'static str> {
+        self.inner.requires_gate()
+    }
+    async fn call(&self, input: Value) -> Result<String> {
+        self.check(&input)?;
+        self.inner.call(input).await
+    }
+    async fn call_multimodal(&self, input: Value) -> Result<crate::types::ToolResultContent> {
+        self.check(&input)?;
+        self.inner.call_multimodal(input).await
+    }
+}
+
+/// Build a [`globset::GlobSet`] from `writePaths`. Invalid globs are
+/// skipped (validate surfaces them); `None` if nothing usable compiled.
+fn build_write_globset(patterns: &[String]) -> Option<globset::GlobSet> {
+    let mut builder = globset::GlobSetBuilder::new();
+    let mut any = false;
+    for p in patterns {
+        if let Ok(g) = globset::Glob::new(p) {
+            builder.add(g);
+            any = true;
+        }
+    }
+    if !any {
+        return None;
+    }
+    builder.build().ok()
+}
+
 /// Mutable state shared between a `ProductionAgentFactory` and its
 /// owning worker (CLI `run_repl` locals, GUI `WorkerState`).
 ///
@@ -265,6 +378,29 @@ impl AgentFactory for ProductionAgentFactory {
             }
         }
 
+        // 47.2: per-subagent write-path scoping (`AgentDef::write_paths`).
+        // When the def declares globs, wrap each present file-write tool so
+        // a target outside the globs is refused before the inner tool runs —
+        // mechanical write-scoping, not a prompt promise. Opt-in: empty list
+        // = inherit (write wherever the parent allows). Scopes file-write
+        // tools, not Bash.
+        if let Some(def) = agent_def {
+            if !def.write_paths.is_empty() {
+                if let Some(set) = build_write_globset(&def.write_paths) {
+                    let set = Arc::new(set);
+                    for tname in WRITE_TOOL_NAMES {
+                        if let Some(inner) = tools.get(tname) {
+                            tools.register(Arc::new(PathScopedWriteTool {
+                                inner,
+                                globs: set.clone(),
+                                patterns: def.write_paths.clone(),
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+
         // H1/M1: `base_tools` is cloned from the shared snapshot, which —
         // after ANY mid-session refresh (`/mcp add`, `/kms use`,
         // `/reload-prompt`, or the GUI's `McpReady` fan-out) — re-clones
@@ -406,6 +542,15 @@ impl Tool for SubAgentTool {
     /// the model's explicit parallel choice, same as parallel Bash would be.)
     fn parallelizable(&self) -> bool {
         true
+    }
+
+    /// 47.1: expose a named agent's declared `output_schema` so the
+    /// workflow runtime can apply it when a `thclaws.subagent({agent})`
+    /// call omits an explicit per-call `schema`.
+    fn subagent_output_schema(&self, agent: &str) -> Option<serde_json::Value> {
+        self.agent_defs
+            .get(agent)
+            .and_then(|d| d.output_schema.clone())
     }
 
     fn description(&self) -> &'static str {
@@ -1167,5 +1312,48 @@ mod tests {
         let tool = SubAgentTool::new(factory);
         let err = tool.call(json!({"prompt": "go"})).await.unwrap_err();
         assert!(format!("{err}").contains("empty response"));
+    }
+
+    /// 47.2: a `PathScopedWriteTool` allows writes inside its globs and
+    /// refuses writes outside them, before the inner tool ever runs.
+    #[tokio::test]
+    async fn write_paths_scoping_allows_inside_and_refuses_outside() {
+        struct OkWrite;
+        #[async_trait]
+        impl Tool for OkWrite {
+            fn name(&self) -> &'static str {
+                "Write"
+            }
+            fn description(&self) -> &'static str {
+                "mock"
+            }
+            fn input_schema(&self) -> Value {
+                json!({})
+            }
+            async fn call(&self, _input: Value) -> Result<String> {
+                Ok("wrote".into())
+            }
+        }
+        let set = build_write_globset(&[".thclaws/kms/**".to_string()]).unwrap();
+        let scoped = PathScopedWriteTool {
+            inner: Arc::new(OkWrite),
+            globs: Arc::new(set),
+            patterns: vec![".thclaws/kms/**".into()],
+        };
+        // Inside the allow-list → delegates to the inner tool.
+        let ok = scoped
+            .call(json!({"path": ".thclaws/kms/ai/page.md", "content": "x"}))
+            .await
+            .unwrap();
+        assert_eq!(ok, "wrote");
+        // Outside → refused before the inner tool runs.
+        let err = scoped
+            .call(json!({"path": "src/main.rs", "content": "x"}))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("writePaths"),
+            "expected writePaths denial, got: {err}"
+        );
     }
 }

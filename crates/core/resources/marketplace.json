@@ -80,6 +80,46 @@
       "license_tier": "open",
       "install_url": "https://github.com/thClaws/marketplace.git#main:agents/meal-planner.md",
       "homepage": "https://github.com/thClaws/marketplace/tree/main/agents/meal-planner.md"
+    },
+    {
+      "name": "research-researcher",
+      "short_description": "Topic → distinct search angles with concrete query phrases",
+      "description": "Turns a research topic into a set of distinct search angles, each with concrete, diverse query phrases — the planning step that makes web research thorough instead of one-shot. Avoids angles you mark as already covered. Read-only. Spawn via Task(agent: \"research-researcher\") or /agent research-researcher.",
+      "category": "research",
+      "license": "Apache-2.0",
+      "license_tier": "open",
+      "install_url": "https://github.com/thClaws/marketplace.git#main:agents/research-researcher.md",
+      "homepage": "https://github.com/thClaws/marketplace/tree/main/agents/research-researcher.md"
+    },
+    {
+      "name": "research-synthesizer",
+      "short_description": "Sources → one coherent, fully-cited write-up",
+      "description": "Turns a set of sources into one coherent write-up where every substantive claim maps to a numbered [N] source — the synthesis step of a research pipeline. Reads the sources, cites only what they support, and refuses fabricated citations. Spawn via Task(agent: \"research-synthesizer\") or /agent research-synthesizer.",
+      "category": "research",
+      "license": "Apache-2.0",
+      "license_tier": "open",
+      "install_url": "https://github.com/thClaws/marketplace.git#main:agents/research-synthesizer.md",
+      "homepage": "https://github.com/thClaws/marketplace/tree/main/agents/research-synthesizer.md"
+    },
+    {
+      "name": "research-reviewer",
+      "short_description": "Adversarial fact-check of a cited write-up",
+      "description": "Adversarial peer-reviewer for a cited write-up: checks each [N] claim against its source, flags overstatements, gaps, and contradictions, and returns a structured ship/revise/rework verdict with blocking issues. Read-only. Spawn via Task(agent: \"research-reviewer\") or /agent research-reviewer.",
+      "category": "research",
+      "license": "Apache-2.0",
+      "license_tier": "open",
+      "install_url": "https://github.com/thClaws/marketplace.git#main:agents/research-reviewer.md",
+      "homepage": "https://github.com/thClaws/marketplace/tree/main/agents/research-reviewer.md"
+    },
+    {
+      "name": "research-summarizer",
+      "short_description": "Several related docs → one one-page briefing",
+      "description": "Condenses several related documents or research pages into a single one-page briefing: key findings with source attribution, where the sources agree and disagree, and the open threads. Synthesises only what's in the inputs. Read-only. Spawn via Task(agent: \"research-summarizer\") or /agent research-summarizer.",
+      "category": "research",
+      "license": "Apache-2.0",
+      "license_tier": "open",
+      "install_url": "https://github.com/thClaws/marketplace.git#main:agents/research-summarizer.md",
+      "homepage": "https://github.com/thClaws/marketplace/tree/main/agents/research-summarizer.md"
     }
   ]
 }

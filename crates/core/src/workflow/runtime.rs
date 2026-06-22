@@ -27,7 +27,22 @@ impl WorkflowSandbox {
         let mut ctx = Context::default();
         register_thclaws(&mut ctx)?;
         strip_dangerous_globals(&mut ctx)?;
+        // 47.3: always define the `args` global (null until a caller sets
+        // it via `set_args`), so a script can `if (args) …` without a
+        // ReferenceError whether or not structured input was passed.
+        ctx.register_global_property(js_string!("args"), JsValue::null(), Attribute::all())?;
         Ok(Self { ctx })
+    }
+
+    /// 47.3: install the structured `args` global the script reads —
+    /// the typed-input channel `WorkflowRun({script_path, args})` uses
+    /// instead of a `.thclaws/TASK.md` side-channel. Any JSON value.
+    pub fn set_args(&mut self, value: &serde_json::Value) -> JsResult<()> {
+        let js = JsValue::from_json(value, &mut self.ctx)?;
+        self.ctx
+            .global_object()
+            .set(js_string!("args"), js, false, &mut self.ctx)?;
+        Ok(())
     }
 
     /// Run a workflow script. Sync scripts (no `await` / `async` /
@@ -497,11 +512,45 @@ fn try_replay(prompt: &str) -> Option<String> {
 fn register_thclaws(ctx: &mut Context) -> JsResult<()> {
     let subagent_fn = NativeFunction::from_fn_ptr(subagent);
     let include_fn = NativeFunction::from_fn_ptr(include);
+    let log_fn = NativeFunction::from_fn_ptr(workflow_log);
     let thclaws_obj = ObjectInitializer::new(ctx)
         .function(subagent_fn, js_string!("subagent"), 1)
         .function(include_fn, js_string!("include"), 1)
+        .function(log_fn, js_string!("log"), 1)
         .build();
     ctx.register_global_property(js_string!("thclaws"), thclaws_obj, Attribute::READONLY)
+}
+
+/// Host implementation of `thclaws.log(msg)` — a narrator line for
+/// workflow observability. `console` is stripped from the sandbox, so
+/// this is the blessed channel for a script to surface progress between
+/// stages. Prints to stdout (REPL + headless authoring/debugging) and,
+/// under the GUI, emits a one-line chat indicator the same shape workers
+/// use. Returns `undefined`; never throws (a missing arg logs empty).
+fn workflow_log(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let msg = args
+        .get_or_undefined(0)
+        .to_string(ctx)
+        .map(|s| s.to_std_string_escaped())
+        .unwrap_or_default();
+    use std::io::Write as _;
+    println!("  · {msg}");
+    let _ = std::io::stdout().flush();
+    #[cfg(feature = "gui")]
+    {
+        let label = format!("log: {}", crate::tool_display::sanitize_label_field(&msg));
+        send_workflow_event(crate::shared_session::ViewEvent::ToolCallStart {
+            name: "WorkflowLog".to_string(),
+            label,
+            input: serde_json::json!({}),
+        });
+        send_workflow_event(crate::shared_session::ViewEvent::ToolCallResult {
+            name: "WorkflowLog".to_string(),
+            output: msg,
+            ui_resource: None,
+        });
+    }
+    Ok(JsValue::undefined())
 }
 
 /// Install (or clear with `None`) the base directory that
@@ -574,7 +623,7 @@ fn include(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsV
 fn subagent(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let prompt = extract_prompt(args, ctx);
     let budget = extract_budget(args, ctx);
-    let schema = extract_schema(args, ctx);
+    let per_call_schema = extract_schema(args, ctx);
     let retry = extract_retry(args, ctx);
     let caps = extract_caps(args, ctx);
     // `agent: "name"` picks a subagent definition from
@@ -583,6 +632,17 @@ fn subagent(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<Js
     // an unknown name surfaces as a worker failure (Task tool
     // validates against AgentDefsConfig).
     let agent_name = extract_agent_name(args, ctx);
+
+    let task_tool = WORKFLOW_TASK_TOOL.with(|c| c.borrow().clone());
+
+    // 47.1: when the call omits an explicit `schema`, fall back to the
+    // named agent's declared `output_schema` (from its `.md`), so the
+    // contract lives in one place (the def) instead of being duplicated
+    // in the workflow JS. An explicit per-call `schema` still wins.
+    let schema = per_call_schema.or_else(|| {
+        let name = agent_name.as_ref()?;
+        task_tool.as_ref()?.subagent_output_schema(name)
+    });
 
     // Stage K: serve from the replay cache when this call's prompt
     // matches the next pending entry. No worker_start/worker_done
@@ -614,12 +674,21 @@ fn subagent(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<Js
         }
     }
 
-    let task_tool = WORKFLOW_TASK_TOOL.with(|c| c.borrow().clone());
-
     let Some(tool) = task_tool else {
-        // Stage A fallback: no Task tool wired (tests, GUI refusal path)
-        // — echo the prompt so callers get a deterministic placeholder
-        // instead of an error.
+        // 47.6 surface guard: inside a REAL workflow run (usage sink set)
+        // with no Task tool, the current surface can't spawn subagents
+        // (e.g. `-p` / `/v1`, where Task isn't registered). Fail LOUD
+        // rather than returning a stub the script would treat as a real
+        // worker result — the silent-role-play footgun the best-practice
+        // guide warns about. Outside a workflow run (sandbox eval in
+        // tests / the GUI refusal preview) keep the deterministic stub.
+        if is_inside_workflow() {
+            return Err(js_error(
+                "thclaws.subagent: no Task tool on this surface — subagent calls aren't \
+                 available here (this is the `-p` / `/v1` footgun). Run the workflow on \
+                 `--cli`, `--serve`, or the GUI, where the Task tool is registered.",
+            ));
+        }
         return Ok(JsValue::from(js_string!(
             format!("(stub for: {prompt})").as_str()
         )));
@@ -1573,6 +1642,100 @@ paths.map((p, i) => `${p} — ${summaries[i]}`).join("\n");"#;
         .unwrap();
 
         assert_eq!(result.unwrap(), "2:a,b");
+    }
+
+    /// 47.4: `thclaws.log()` is callable, returns undefined, and doesn't
+    /// disturb the script's result (it's a side-effecting narrator).
+    #[test]
+    fn log_is_callable_and_returns_undefined() {
+        let mut sb = WorkflowSandbox::new().unwrap();
+        let out = sb
+            .run(r#"const r = thclaws.log("stage 1 done"); `${r === undefined}`"#)
+            .unwrap();
+        assert_eq!(out, "true");
+    }
+
+    /// 47.3: `args` defaults to null, and `set_args` exposes structured
+    /// input the script reads directly.
+    #[test]
+    fn args_global_defaults_null_and_set_args_exposes_input() {
+        let mut sb = WorkflowSandbox::new().unwrap();
+        assert_eq!(sb.run("String(args)").unwrap(), "null");
+
+        let mut sb2 = WorkflowSandbox::new().unwrap();
+        sb2.set_args(&serde_json::json!({"query": "obon", "n": 3}))
+            .unwrap();
+        assert_eq!(sb2.run(r#"`${args.query}:${args.n}`"#).unwrap(), "obon:3");
+    }
+
+    /// 47.1: a `thclaws.subagent({agent})` call with NO per-call schema
+    /// picks up the agent def's declared `output_schema` (surfaced via
+    /// the Task tool's `subagent_output_schema`) and returns parsed JSON.
+    #[tokio::test]
+    async fn agent_output_schema_applied_when_call_omits_schema() {
+        struct SchemaAgentTask;
+        #[async_trait]
+        impl Tool for SchemaAgentTask {
+            fn name(&self) -> &'static str {
+                "Task"
+            }
+            fn description(&self) -> &'static str {
+                "schema-on-def mock"
+            }
+            fn input_schema(&self) -> Value {
+                json!({})
+            }
+            fn subagent_output_schema(&self, agent: &str) -> Option<Value> {
+                (agent == "planner").then(|| {
+                    json!({
+                        "type": "object",
+                        "properties": {"goal": {"type": "string"}},
+                        "required": ["goal"]
+                    })
+                })
+            }
+            async fn call(&self, _input: Value) -> crate::Result<String> {
+                Ok(r#"{"goal": "map the topic"}"#.into())
+            }
+        }
+        let mock: Arc<dyn Tool> = Arc::new(SchemaAgentTask);
+        // No `schema:` on the call — it must come from the agent def.
+        let script = r#"
+            const r = thclaws.subagent({ agent: "planner", prompt: "plan it" });
+            r.goal
+        "#
+        .to_string();
+        let result: std::result::Result<String, String> = tokio::task::spawn_blocking(move || {
+            set_task_tool(Some(mock));
+            let res = (|| -> std::result::Result<String, String> {
+                let mut sb = WorkflowSandbox::new().map_err(|e| e.to_string())?;
+                sb.run(&script).map_err(|e| e.to_string())
+            })();
+            set_task_tool(None);
+            res
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.unwrap(), "map the topic");
+    }
+
+    /// 47.6: inside a real workflow run (usage sink set) with no Task
+    /// tool wired, `thclaws.subagent` fails loud instead of returning a
+    /// stub the script would mistake for a real worker result.
+    #[test]
+    fn subagent_fails_loud_when_no_task_tool_inside_workflow() {
+        set_usage_sink(true);
+        set_task_tool(None);
+        let mut sb = WorkflowSandbox::new().unwrap();
+        let err = sb
+            .run(r#"thclaws.subagent({prompt: "x"})"#)
+            .unwrap_err()
+            .to_string();
+        set_usage_sink(false);
+        assert!(
+            err.contains("no Task tool") || err.contains("footgun"),
+            "expected a loud surface error, got: {err}"
+        );
     }
 
     /// `thclaws.include` resolves relative paths under the captured

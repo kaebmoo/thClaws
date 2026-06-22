@@ -120,6 +120,13 @@ impl Tool for WorkflowRunTool {
                                     file to execute verbatim (skips the authoring step). \
                                     Use for agent-shipped workflows, e.g. \
                                     '.thclaws/workflows/draft-all-parallel.js'."
+                },
+                "args": {
+                    "description": "Structured input exposed to the script as the global \
+                                    `args` (any JSON value — object/array/string/etc.). Use \
+                                    this to parameterize a pre-authored workflow instead of a \
+                                    TASK.md side-channel, e.g. {\"query\":\"…\",\"kms\":\"…\"}. \
+                                    The script reads it directly: `const q = args.query;`."
                 }
             },
             "required": []
@@ -173,6 +180,8 @@ impl Tool for WorkflowRunTool {
         // as the run, then unwind on Drop / explicit clear.
         let task_tool = self.task_tool.clone();
         let script_for_thread = script;
+        // 47.3: structured input forwarded into the sandbox as `args`.
+        let args_for_thread = input.get("args").cloned();
         let outcome: std::result::Result<
             (
                 std::result::Result<String, String>,
@@ -185,6 +194,9 @@ impl Tool for WorkflowRunTool {
             let res = (|| -> std::result::Result<String, String> {
                 let mut sandbox =
                     crate::workflow::WorkflowSandbox::new().map_err(|e| e.to_string())?;
+                if let Some(av) = args_for_thread.as_ref() {
+                    sandbox.set_args(av).map_err(|e| e.to_string())?;
+                }
                 sandbox.run(&script_for_thread).map_err(|e| e.to_string())
             })();
             let usages = crate::workflow::take_all_usages();
