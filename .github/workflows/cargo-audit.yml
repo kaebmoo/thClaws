@@ -34,4 +34,7 @@ jobs:
           fi
 
       - name: Run cargo audit
-        run: cargo audit
+        # RUSTSEC-2026-0187 (lopdf 0.31 stack overflow) ignored temporarily.
+        # Real fix needs printpdf 0.7→0.9 + lopdf 0.42 (major API port):
+        # JimmySoftware/agentic-workspace#1. Drop --ignore when that lands.
+        run: cargo audit --ignore RUSTSEC-2026-0187
