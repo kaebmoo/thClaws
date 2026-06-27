@@ -646,6 +646,15 @@ pub enum SlashCommand {
         name: String,
         fix: bool,
     },
+    /// One-shot maintenance umbrella: structural fixes + source
+    /// reconciliation against live sessions + stale refresh +
+    /// contradiction reconciliation, in a single staged pass via the
+    /// built-in `kms-maintain` subagent. Dry-run by default; `--apply`
+    /// executes. GUI-only (dispatches a side channel).
+    KmsMaintain {
+        name: String,
+        apply: bool,
+    },
     /// Schema migration. Defaults to dry-run (prints the plan) so the
     /// user can review before any writes; `--apply` executes the chain.
     KmsMigrate {
@@ -2956,6 +2965,34 @@ fn parse_kms_subcommand(args: &str) -> SlashCommand {
                 ),
             }
         }
+        "maintain" | "tidy" => {
+            // `/kms maintain <name> [--apply]` — staged maintenance
+            // pipeline; dry-run by default, --apply executes.
+            let mut name: Option<String> = None;
+            let mut apply = false;
+            for tok in rest.split_whitespace() {
+                match tok {
+                    "--apply" | "--execute" => apply = true,
+                    "--dry-run" | "--plan" => apply = false,
+                    other if !other.starts_with("--") => {
+                        if name.is_none() {
+                            name = Some(other.to_string());
+                        }
+                    }
+                    other => {
+                        return SlashCommand::Unknown(format!(
+                            "unknown flag '{other}' — usage: /kms maintain <name> [--apply]"
+                        ));
+                    }
+                }
+            }
+            match name {
+                Some(n) => SlashCommand::KmsMaintain { name: n, apply },
+                None => SlashCommand::Unknown(
+                    "usage: /kms maintain <name> [--apply]".into(),
+                ),
+            }
+        }
         "dump" | "capture" => {
             // `/kms dump <name> <text...>` — rest of the line after the
             // KMS name is the dump body. Multi-line paste is fine.
@@ -3254,7 +3291,7 @@ fn parse_kms_subcommand(args: &str) -> SlashCommand {
             }
         }
         other => SlashCommand::Unknown(format!(
-            "unknown kms subcommand: '{other}' (try: /kms, /kms new …, /kms use …, /kms off …, /kms show …, /kms ingest …, /kms dump …, /kms challenge …, /kms html …, /kms merge …, /kms drop …, /kms link …, /kms lint …, /kms wrap-up …, /kms reconcile …, /kms migrate …, /kms export-okf …, /kms import-okf …, /kms file-answer …)"
+            "unknown kms subcommand: '{other}' (try: /kms, /kms new …, /kms use …, /kms off …, /kms show …, /kms ingest …, /kms dump …, /kms challenge …, /kms html …, /kms merge …, /kms drop …, /kms link …, /kms lint …, /kms wrap-up …, /kms reconcile …, /kms maintain …, /kms migrate …, /kms export-okf …, /kms import-okf …, /kms file-answer …)"
         )),
     }
 }
@@ -9411,6 +9448,17 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                          kms-reconcile agent as a side channel.{COLOR_RESET}"
                     );
                 }
+                SlashCommand::KmsMaintain { name, .. } => {
+                    let Some(_k) = crate::kms::resolve(&name) else {
+                        println!("{COLOR_YELLOW}no KMS named '{name}'{COLOR_RESET}");
+                        continue;
+                    };
+                    println!(
+                        "{COLOR_YELLOW}/kms maintain is only available in GUI mode \
+                         (thclaws or thclaws --serve). It dispatches the built-in \
+                         kms-maintain agent as a side channel.{COLOR_RESET}"
+                    );
+                }
                 // dev-plan/36 follow-up: `/kms search <name|*> <query>`
                 // — operator-facing one-shot search. Routes through
                 // the shared `run_slash_search` helper so format +
@@ -12856,6 +12904,47 @@ mod tests {
         assert!(matches!(
             parse_slash("/kms resolve notes"),
             Some(SlashCommand::KmsReconcile { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_slash_kms_maintain_basic() {
+        match parse_slash("/kms maintain notes") {
+            Some(SlashCommand::KmsMaintain { name, apply }) => {
+                assert_eq!(name, "notes");
+                assert!(!apply); // dry-run by default
+            }
+            other => panic!("expected KmsMaintain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_slash_kms_maintain_apply_and_alias() {
+        assert!(matches!(
+            parse_slash("/kms maintain notes --apply"),
+            Some(SlashCommand::KmsMaintain { apply: true, .. })
+        ));
+        // order-insensitive
+        assert!(matches!(
+            parse_slash("/kms maintain --apply notes"),
+            Some(SlashCommand::KmsMaintain { apply: true, .. })
+        ));
+        // `tidy` alias
+        assert!(matches!(
+            parse_slash("/kms tidy notes"),
+            Some(SlashCommand::KmsMaintain { apply: false, .. })
+        ));
+    }
+
+    #[test]
+    fn parse_slash_kms_maintain_rejects_missing_name_and_bad_flag() {
+        assert!(matches!(
+            parse_slash("/kms maintain"),
+            Some(SlashCommand::Unknown(_))
+        ));
+        assert!(matches!(
+            parse_slash("/kms maintain notes --bogus"),
+            Some(SlashCommand::Unknown(_))
         ));
     }
 

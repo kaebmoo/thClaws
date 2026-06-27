@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.79.0] - 2026-06-28
+
+Rounds out guest gating for the cloud, hardens the approval box UI with multi-line support and path redaction, and closes the capture-to-retrieve loop in the knowledge base for a self-maintaining /kms.
+
+### Added
+- **Self-maintaining knowledge base.** The KMS capture→retrieve loop is now closed with `/kms maintain` and linked auto-retrieval, aligning with the dream redesign.
+- **Multi-line approval box and path redaction.** The Key: value approval prompt supports multi-line values and redacts sensitive paths when presenting actions to the user.
+- **All-chapters deck export.** The tutorial deck builder adds `md-to-pptx --combine` for an all-chapters PowerPoint export.
+
+### Changed
+- **Guest gating in the cloud.** Non-whitelisted or unauthenticated users are now admitted as gated ‘guest’ users in the cloud, restricting CLI token access, purchases, and exposing a gated coupon redeem flow. The guest state is made explicit in the UI.
+
+### Fixed
+- **Tutorial screenshots.** Updates tutorial documentation with real screenshots for the approval box and memory flow sequence.
+- **HAL tool registration in tests.** HAL tools are now registered explicitly in visibility tests to ensure test coverage consistency.
+
 ## [0.78.0] - 2026-06-27
 
 Adds a HAL tools opt-in flag, fixes HAL availability over the gateway and the /model picker, hardens OpenAI-compatible tool-call pairing, and continues tutorial screenshot wiring.

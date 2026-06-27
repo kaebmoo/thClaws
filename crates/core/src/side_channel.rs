@@ -146,6 +146,10 @@ pub async fn spawn_side_channel(
 
     let id_for_task = id.clone();
     let agent_name_for_task = agent_name.clone();
+    // Kept separate from `agent_name_for_task` (moved into the Done
+    // event) so we can still test it after the match to decide whether
+    // to refresh the KMS sidebar.
+    let agent_name_for_refresh = agent_name.clone();
     let events_tx_for_task = events_tx.clone();
     let cancel_for_task = cancel.clone();
 
@@ -205,6 +209,17 @@ pub async fn spawn_side_channel(
                     result_text: full_text,
                 });
             }
+        }
+
+        // A finished `dream` run has written/updated KMS pages (digests
+        // + topic pages), so push a `kms_update` to refresh the sidebar
+        // without a manual /reload — same pattern research-job
+        // completion uses. Fire on any outcome: a run that errored or
+        // was cancelled may still have written pages before stopping.
+        if agent_name_for_refresh == "dream" {
+            let _ = events_tx_for_task.send(ViewEvent::KmsUpdate(
+                crate::kms::build_update_payload().to_string(),
+            ));
         }
 
         // Always remove from registry on exit, regardless of outcome.

@@ -797,7 +797,7 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                             "type": "approval_request",
                             "id": req.id,
                             "tool_name": req.tool_name,
-                            "input": req.input,
+                            "input": crate::tool_display::redact_json_value(&req.input),
                             "summary": req.summary,
                             "originator": req.originator,
                         });
@@ -810,7 +810,7 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                     "type": "approval_request",
                     "id": req.id,
                     "tool_name": req.tool_name,
-                    "input": req.input,
+                    "input": crate::tool_display::redact_json_value(&req.input),
                     "summary": req.summary,
                     "originator": req.originator,
                 });

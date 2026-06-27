@@ -266,6 +266,10 @@ impl AgentDefsConfig {
                 "kms-reconcile",
                 include_str!("default_prompts/kms-reconcile.md"),
             ),
+            (
+                "kms-maintain",
+                include_str!("default_prompts/kms-maintain.md"),
+            ),
         ];
         for (fallback_name, raw) in BUILTINS {
             if let Some(agent) = Self::parse_agent_md_str(raw, fallback_name, None) {
@@ -1013,6 +1017,26 @@ plugin-only reviewer
         // Procedure-defining keywords from the body.
         assert!(reconcile.instructions.contains("History"));
         assert!(reconcile.instructions.contains("Conflict"));
+    }
+
+    #[test]
+    fn seed_builtins_includes_kms_maintain() {
+        let mut config = AgentDefsConfig::default();
+        config.seed_builtins();
+        let maintain = config
+            .get("kms-maintain")
+            .expect("built-in kms-maintain agent should be seeded");
+        assert_eq!(maintain.name, "kms-maintain");
+        assert!(!maintain.instructions.is_empty());
+        // KMS surface + Glob (needed to read the live session set for the
+        // source-reconciliation stage). Still no KmsDelete — maintain never
+        // deletes a page, only scrubs dead refs inside one.
+        assert!(maintain.tools.iter().any(|t| t == "KmsRead"));
+        assert!(maintain.tools.iter().any(|t| t == "KmsWrite"));
+        assert!(maintain.tools.iter().any(|t| t == "Glob"));
+        assert!(maintain.tools.iter().any(|t| t == "TodoWrite"));
+        assert!(!maintain.tools.iter().any(|t| t == "KmsDelete"));
+        assert!(!maintain.tools.iter().any(|t| t == "Bash"));
     }
 
     #[test]

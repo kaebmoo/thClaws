@@ -2655,6 +2655,61 @@ pub async fn dispatch(
                 }
             }
         }
+        SlashCommand::KmsMaintain { name, apply } => {
+            // Umbrella maintenance: compute the structural report in Rust
+            // (same inputs the linker gets), then dispatch one kms-maintain
+            // agent to run the staged pipeline (structural → source-reconcile
+            // → stale → contradictions). Dry-run by default.
+            let Some(k) = crate::kms::resolve(&name) else {
+                emit(events_tx, format!("no KMS named '{name}'"));
+                return;
+            };
+            if state.config.kms_active.is_empty() {
+                // Subagent inherits the parent's tool registry; KMS tools
+                // register only when kms_active is non-empty.
+                emit(
+                    events_tx,
+                    format!(
+                        "/kms maintain {name}: no KMS attached to this session. \
+                         Run `/kms use {name}` first so KMS tools are registered."
+                    ),
+                );
+                return;
+            }
+            let lint = match crate::kms::lint(&k) {
+                Ok(r) => r,
+                Err(e) => {
+                    emit(events_tx, format!("maintain failed (lint): {e}"));
+                    return;
+                }
+            };
+            let stale = match crate::kms::scan_stale_markers(&k) {
+                Ok(s) => s,
+                Err(e) => {
+                    emit(events_tx, format!("maintain failed (stale scan): {e}"));
+                    return;
+                }
+            };
+            let prompt = compose_kms_maintain_prompt(&name, &lint, &stale, apply);
+            match crate::side_channel::spawn_side_channel(
+                "kms-maintain".to_string(),
+                prompt,
+                state.agent_factory.clone(),
+                state.agent_defs.clone(),
+                events_tx.clone(),
+            )
+            .await
+            {
+                Ok(id) => emit(
+                    events_tx,
+                    format!(
+                        "✓ kms-maintain dispatched (id: {id}, {})",
+                        if apply { "--apply" } else { "dry-run" }
+                    ),
+                ),
+                Err(e) => emit(events_tx, format!("/kms maintain: {e}")),
+            }
+        }
         SlashCommand::KmsHtml { name, .. } => {
             // Same shape as KmsDump / KmsChallenge — handled by the
             // turn-rewrite in shared_session.rs. This arm only fires
@@ -3467,12 +3522,13 @@ pub async fn dispatch(
             // "all sessions" scope.
 
             // Ensure the project-scope `dreams` KMS exists before the
-            // agent runs. Pass 4 of the dream procedure writes its
-            // summary page there (NOT to the user's active KMSes) so
-            // run-audit logs don't contaminate the actual knowledge
-            // vault. `kms::create` is idempotent — returns the
-            // existing ref if already present, so calling on every
-            // /dream is safe and side-effect-free after the first.
+            // agent runs. The dream procedure writes per-session
+            // digests (Pass 2b) and the run summary (Pass 4) there
+            // (NOT to the user's active KMSes) so session/audit content
+            // doesn't contaminate the curated topic vaults. `kms::create`
+            // is idempotent — returns the existing ref if already
+            // present, so calling on every /dream is safe and
+            // side-effect-free after the first.
             // Best-effort: if creation somehow fails (permissions,
             // disk full), the agent's KmsWrite will surface a clear
             // error later in Pass 4 — surface it to the user as a
@@ -3493,7 +3549,7 @@ pub async fn dispatch(
             };
             let prompt = if focus.trim().is_empty() {
                 format!(
-                    "Consolidate the active KMS by mining recent sessions. Follow your standard four-pass procedure.{scope_note}"
+                    "Consolidate the project's knowledge by mining recent sessions into per-session digests and canonical topic pages. Follow your standard multi-pass procedure.{scope_note}"
                 )
             } else {
                 format!("{focus}{scope_note}")
@@ -4686,6 +4742,47 @@ pub(crate) fn compose_kms_reconcile_prompt(name: &str, focus: Option<&str>, appl
          \n\
          Work through the four-pass procedure from your operating manual (claims, entities, decisions, source-freshness). Use TodoWrite to track progress. Stop after one pass and produce the final **Auto-resolved** / **Flagged for user** / **Stale pages updated** report."
     )
+}
+
+/// Compose the brief for the `kms-maintain` umbrella agent: the
+/// structural lint report + stale-marker list (the same inputs the
+/// linker gets) plus the apply/dry-run mode. The agent's own manual
+/// carries the five-stage procedure; this just feeds it the data and
+/// the mode.
+pub(crate) fn compose_kms_maintain_prompt(
+    name: &str,
+    lint: &crate::kms::LintReport,
+    stale: &[crate::kms::StaleEntry],
+    apply: bool,
+) -> String {
+    let mode_clause = if apply {
+        "**Apply mode** — execute fixes across all stages. Preserve history (never silently drop a claim) and never delete a page — the most you remove is a dead reference inside a page."
+    } else {
+        "**Dry-run mode** — make NO `KmsWrite`/`KmsAppend` calls. Report what you *would* change across every stage, then stop. The user re-runs with `--apply` to execute."
+    };
+    let mut out = format!(
+        "You are maintaining the KMS named `{name}`. Pass `kms: \"{name}\"` to every KMS tool call.\n\n{mode_clause}\n\n"
+    );
+    out.push_str("## Structural report (lint)\n\n");
+    out.push_str(&crate::kms::format_lint_report(name, lint));
+    out.push_str("\n\n## Stale markers\n\n");
+    if stale.is_empty() {
+        out.push_str("- none\n");
+    } else {
+        for entry in stale {
+            out.push_str(&format!(
+                "- `{}`: source `{}` re-ingested on {}\n",
+                entry.page_stem, entry.source_alias, entry.date
+            ));
+        }
+    }
+    out.push_str(
+        "\nWork your five-stage operating procedure in order (structural fixes → \
+         source reconciliation against live sessions → stale refresh → contradiction \
+         reconciliation → orphans). Use TodoWrite to track stages, and finish with the \
+         staged final report.\n",
+    );
+    out
 }
 
 // `format_schedule_preset_list` and `format_migration_report` moved to

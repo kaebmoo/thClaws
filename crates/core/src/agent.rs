@@ -635,6 +635,119 @@ pub fn build_todos_reminder() -> Option<String> {
     ))
 }
 
+/// Strip tantivy query-syntax metacharacters so a raw user message can be
+/// used as a search query without `QueryParser` choking on stray `:`/`(`/
+/// `?` etc. Turns the message into a safe bag-of-words.
+#[cfg(feature = "kms_search_index")]
+fn sanitize_kms_query(q: &str) -> String {
+    let cleaned: String = q
+        .chars()
+        .map(|c| match c {
+            '+' | '-' | '&' | '|' | '!' | '(' | ')' | '{' | '}' | '[' | ']' | '^' | '"' | '~'
+            | '*' | '?' | ':' | '\\' | '/' => ' ',
+            other => other,
+        })
+        .collect();
+    // Cap length — the Thai segmenter handles long input but there's no
+    // point feeding a whole paragraph; the first ~200 chars carry the topic.
+    cleaned
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(200)
+        .collect()
+}
+
+/// Deterministic pre-retrieval (RAG, lightweight): before the model answers,
+/// search the active KMS for the user's message and splice a short **pointer
+/// list** of the matching canonical topic pages (name + one-line topic) into
+/// the system prompt. This removes the dependence on the model *choosing* to
+/// call `KmsSearch` — weak/economy models (and even strong ones, for "casual"
+/// phrasings) routinely skip the mandatory-consult instruction and answer from
+/// training data. Naming the relevant pages reliably triggers a `KmsRead`; we
+/// inject pointers, not full bodies, so the per-turn token cost is ~200 bytes
+/// instead of multiple KB (the model pulls only what it needs). Returns `None`
+/// (no injection) when there's no active KMS, the message is too short, or
+/// nothing clears the relevance floor — so greetings / coding turns / off-topic
+/// asks don't pull noise. Provenance (`sess-*`) and audit (`dream-*`) pages are
+/// skipped; only canonical topic pages are surfaced.
+#[cfg(feature = "kms_search_index")]
+pub fn build_kms_context_reminder(query: &str) -> Option<String> {
+    // Below the BM25 score floor we treat a hit as coincidental, not a real
+    // topic match (e.g. a one-word overlap). Tuned against observed scores:
+    // a direct topic match lands ~10-20, the audit page ~1-2.
+    const SCORE_FLOOR: f32 = 4.0;
+    const MAX_PAGES: usize = 3;
+
+    let q = sanitize_kms_query(query);
+    if q.chars().count() < 4 {
+        return None;
+    }
+    let active = crate::config::AppConfig::load().ok()?.kms_active;
+    if active.is_empty() {
+        return None;
+    }
+
+    // (score, kms_name, page, label) for canonical topic pages above the floor.
+    let mut hits: Vec<(f32, String, String, String)> = Vec::new();
+    for name in &active {
+        let Some(kref) = crate::kms::resolve(name) else {
+            continue;
+        };
+        let Ok(idx) = crate::kms_search_index::get_or_open(&kref.root) else {
+            continue;
+        };
+        let Ok(found) = idx.search(&q, &[], None, 5) else {
+            continue;
+        };
+        for h in found {
+            if h.score < SCORE_FLOOR {
+                continue;
+            }
+            // Skip provenance/audit pages — only canonical topic pages are
+            // the answer surface (digests are thin stubs, dream-* is audit).
+            if h.page.starts_with("sess-") || h.page.starts_with("dream-") {
+                continue;
+            }
+            // Prefer the page's one-line `topic:` as the pointer label, then
+            // its title, then the page stem.
+            let label = h
+                .topic
+                .clone()
+                .or_else(|| h.title.clone())
+                .unwrap_or_else(|| h.page.clone());
+            hits.push((h.score, name.clone(), h.page, label));
+        }
+    }
+    if hits.is_empty() {
+        return None;
+    }
+    hits.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    hits.truncate(MAX_PAGES);
+
+    let mut list = String::new();
+    for (_score, name, page, label) in &hits {
+        list.push_str(&format!("- `KMS: {name}/{page}` — {label}\n"));
+    }
+    Some(format!(
+        "## Relevant KMS pages (auto-matched to this message)\n\n\
+         The user's knowledge base has the following page(s) matching the current \
+         message. **Before answering, `KmsRead` the most relevant one(s) and answer \
+         from them** — the user populated the KMS specifically so answers come from \
+         here, not from training data or a fresh web search. Cite the page you used \
+         (`KMS: <name>/<page>`). If none of them actually cover the question, ignore \
+         this block and answer normally.\n\n{list}"
+    ))
+}
+
+/// No-op when the BM25 search index feature is off — auto-retrieval needs
+/// ranked scores to gate on, which only the indexed path provides.
+#[cfg(not(feature = "kms_search_index"))]
+pub fn build_kms_context_reminder(_query: &str) -> Option<String> {
+    None
+}
+
 /// Collect (position, title, output) tuples for completed steps that
 /// have a populated `output` field, for steps prior to `current_step_id`.
 /// Used by both the per-step continuation prompt and the system
@@ -972,12 +1085,26 @@ impl Agent {
         // state every turn (plan mode active? plan submitted but not
         // approved? existing todos.md from a prior session?). Cheap —
         // just a string concat per turn.
+        // Query for deterministic KMS pre-retrieval: the user's text for
+        // this turn. Computed before `user_content` is moved into history.
+        let kms_query: String = user_content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
         let system = {
             let base = self.system.clone();
             let mode = crate::permissions::current_mode();
             let active_plan = crate::tools::plan_state::get();
             let plan_reminder = build_plan_reminder(mode, active_plan.as_ref());
             let todos_reminder = build_todos_reminder();
+            // Deterministic pre-retrieval: pull relevant KMS pages for this
+            // message so the model answers from stored knowledge without
+            // having to decide to call KmsSearch first.
+            let kms_reminder = build_kms_context_reminder(&kms_query);
             // Chain reminders. Plan reminder dominates when active —
             // it has the strongest per-turn discipline and would be
             // redundant with todos guidance. Otherwise surface todos
@@ -986,6 +1113,14 @@ impl Agent {
                 (Some(p), Some(t)) => Some(format!("{p}\n\n{t}")),
                 (Some(p), None) => Some(p),
                 (None, Some(t)) => Some(t),
+                (None, None) => None,
+            };
+            // Retrieved KMS context is independent of plan/todos — always
+            // append it when present.
+            let chained = match (chained, kms_reminder) {
+                (Some(c), Some(k)) => Some(format!("{c}\n\n{k}")),
+                (Some(c), None) => Some(c),
+                (None, Some(k)) => Some(k),
                 (None, None) => None,
             };
             match chained {
@@ -2193,6 +2328,24 @@ mod tests {
     use futures::stream;
     use std::collections::VecDeque;
     use tempfile::tempdir;
+
+    #[cfg(feature = "kms_search_index")]
+    #[test]
+    fn sanitize_kms_query_strips_metachars_and_caps() {
+        // tantivy query metacharacters must not survive into the query.
+        let q = sanitize_kms_query("what is foo:bar? (test) +x -y *z");
+        assert!(!q.contains(':'));
+        assert!(!q.contains('?'));
+        assert!(!q.contains('('));
+        assert!(!q.contains('+'));
+        assert!(!q.contains('*'));
+        // whitespace collapsed to single spaces, content preserved
+        assert!(q.contains("foo bar"));
+        assert!(q.contains("test"));
+        // length cap
+        let long = "ก".repeat(500);
+        assert!(sanitize_kms_query(&long).chars().count() <= 200);
+    }
 
     // ── Image redaction ────────────────────────────────────────────────
 

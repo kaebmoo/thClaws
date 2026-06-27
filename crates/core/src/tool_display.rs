@@ -103,6 +103,30 @@ fn redact_secrets(s: &str) -> String {
     for pat in redaction_patterns() {
         out = pat.regex.replace_all(&out, pat.replacement).into_owned();
     }
+    redact_paths(&out)
+}
+
+/// Replace absolute filesystem paths with relative/short forms so the
+/// user's working directory and home directory don't leak into labels,
+/// previews, or approval prompts. The working dir collapses to `.` and
+/// the home dir to `~`. cwd is tried first since it is usually the
+/// longer (more specific) prefix and may live under home.
+fn redact_paths(s: &str) -> String {
+    let mut out = s.to_string();
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(cwd) = cwd.to_str() {
+            if cwd.len() > 1 {
+                out = out.replace(cwd, ".");
+            }
+        }
+    }
+    if let Some(home) = crate::util::home_dir() {
+        if let Some(home) = home.to_str() {
+            if home.len() > 1 {
+                out = out.replace(home, "~");
+            }
+        }
+    }
     out
 }
 
@@ -564,6 +588,17 @@ mod tests {
         assert!(!web.contains("abc"));
         assert!(!grep.contains("secret"));
         assert!(!question.contains("sk-123"));
+    }
+
+    #[test]
+    fn redact_collapses_home_dir() {
+        let Some(home) = crate::util::home_dir() else {
+            return;
+        };
+        let home = home.to_str().unwrap();
+        let result = redact_secrets(&format!("rm {home}/.ssh/id_rsa"));
+        assert_eq!(result, "rm ~/.ssh/id_rsa");
+        assert!(!result.contains(home));
     }
 
     #[test]

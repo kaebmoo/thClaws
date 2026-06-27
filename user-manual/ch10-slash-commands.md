@@ -98,6 +98,7 @@ tried first.
 | `/kms use NAME` | Attach a KMS to this project's chats |
 | `/kms off NAME` | Detach a KMS |
 | `/kms show NAME` | Print the KMS's `index.md` |
+| `/kms maintain NAME [--apply]` | One-command maintenance: structural fixes + source reconciliation vs live sessions + stale refresh + contradiction reconciliation, in one staged pass. Dry-run by default. GUI-only. Alias: `tidy` |
 | `/kms html NAME [OUT]` | Generate a single-file interactive HTML site from a KMS (v0.8.5+). Agent reads the KMS via tools, designs components, writes `<OUT>/index.html` (default `./<NAME>-site/`) in your workspace |
 | `/kms export-okf NAME [OUT]` | Export a KMS as an Open Knowledge Format (OKF) bundle to `./NAME-okf/` (or `OUT`) for portable interchange |
 | `/kms import-okf BUNDLE NAME [--project]` | Create a new KMS from an OKF bundle folder (default scope is user) |
