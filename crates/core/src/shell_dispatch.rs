@@ -2511,6 +2511,16 @@ pub async fn dispatch(
             }
             Err(e) => emit(events_tx, format!("/kms merge failed: {e}")),
         },
+        SlashCommand::KmsConsolidate { dst, scope, drop } => {
+            match crate::kms::consolidate(&dst, scope, drop) {
+                Ok(report) => {
+                    emit(events_tx, report.summary_lines().join("\n"));
+                    // dst created and/or sources dropped → refresh the sidebar.
+                    broadcast_kms_update(events_tx);
+                }
+                Err(e) => emit(events_tx, format!("/kms consolidate failed: {e}")),
+            }
+        }
         SlashCommand::KmsExportOkf { name, output_dir } => {
             let out = output_dir.unwrap_or_else(|| format!("{name}-okf"));
             match crate::kms::export_okf(&name, std::path::Path::new(&out)) {

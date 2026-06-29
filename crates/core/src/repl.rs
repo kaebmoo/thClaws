@@ -584,6 +584,15 @@ pub enum SlashCommand {
         src: String,
         dst: String,
     },
+    /// `/kms consolidate <dst> [--user|--project] [--drop]` — merge every
+    /// writable KMS into `<dst>` (created if missing); Shared/read-only KMSes
+    /// are skipped. With `--drop`, source KMSes are removed afterwards so only
+    /// `<dst>` remains; otherwise sources are kept for you to verify + drop.
+    KmsConsolidate {
+        dst: String,
+        scope: crate::kms::KmsScope,
+        drop: bool,
+    },
     /// Delete a KMS from disk. Dry-run by default — prints the
     /// pages/sources count that *would* be removed and stops.
     /// `--force` actually removes the directory tree.
@@ -3131,6 +3140,30 @@ fn parse_kms_subcommand(args: &str) -> SlashCommand {
                     }
                 }
                 _ => SlashCommand::Unknown("usage: /kms merge <src> <dst>".into()),
+            }
+        }
+        "consolidate" | "merge-all" | "unify" => {
+            // `/kms consolidate <dst> [--user|--project] [--drop]` — fold every
+            // writable KMS into <dst> (created if missing).
+            let mut name: Option<String> = None;
+            let mut scope = crate::kms::KmsScope::Project;
+            let mut drop = false;
+            for tok in rest.split_whitespace() {
+                match tok {
+                    "--user" => scope = crate::kms::KmsScope::User,
+                    "--project" => scope = crate::kms::KmsScope::Project,
+                    "--drop" => drop = true,
+                    other if !other.starts_with("--") && name.is_none() => {
+                        name = Some(other.to_string())
+                    }
+                    _ => {}
+                }
+            }
+            match name {
+                Some(dst) => SlashCommand::KmsConsolidate { dst, scope, drop },
+                None => SlashCommand::Unknown(
+                    "usage: /kms consolidate <dst> [--user|--project] [--drop]".into(),
+                ),
             }
         }
         "link" | "autolink" | "cross-link" => {
@@ -9845,6 +9878,18 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         }
                         Err(e) => {
                             println!("{COLOR_YELLOW}/kms merge failed: {e}{COLOR_RESET}");
+                        }
+                    }
+                }
+                SlashCommand::KmsConsolidate { dst, scope, drop } => {
+                    match crate::kms::consolidate(&dst, scope, drop) {
+                        Ok(report) => {
+                            for line in report.summary_lines() {
+                                println!("{COLOR_DIM}{line}{COLOR_RESET}");
+                            }
+                        }
+                        Err(e) => {
+                            println!("{COLOR_YELLOW}/kms consolidate failed: {e}{COLOR_RESET}");
                         }
                     }
                 }

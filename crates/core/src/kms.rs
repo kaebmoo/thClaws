@@ -2083,6 +2083,124 @@ pub struct MergeReport {
     pub combined: Vec<String>,
 }
 
+/// Outcome of [`consolidate`] — every writable KMS folded into one.
+#[derive(Debug, Default)]
+pub struct ConsolidateReport {
+    pub dst: String,
+    /// True if `dst` didn't exist and was created for this consolidation.
+    pub created_dst: bool,
+    /// (source name, its merge report) for each KMS merged into `dst`.
+    pub merged: Vec<(String, MergeReport)>,
+    /// Sources removed afterwards (only when `drop` was set).
+    pub dropped: Vec<String>,
+    /// Read-only (Shared) KMSes skipped — never merged or dropped.
+    pub skipped_shared: Vec<String>,
+}
+
+impl ConsolidateReport {
+    /// Human-readable summary, shared by the CLI + GUI dispatch.
+    pub fn summary_lines(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.merged.is_empty() {
+            out.push(format!(
+                "/kms consolidate: nothing to merge into '{}' (no other writable KMS found).",
+                self.dst
+            ));
+            if !self.skipped_shared.is_empty() {
+                out.push(format!(
+                    "  skipped read-only: {}",
+                    self.skipped_shared.join(", ")
+                ));
+            }
+            return out;
+        }
+        let sum = |f: fn(&MergeReport) -> u32| self.merged.iter().map(|(_, r)| f(r)).sum::<u32>();
+        out.push(format!(
+            "consolidated {} KMS(es) into '{}'{}: {} page(s) copied ({} renamed, {} combined), {} source(s).",
+            self.merged.len(),
+            self.dst,
+            if self.created_dst { " (created)" } else { "" },
+            sum(|r| r.pages_copied),
+            sum(|r| r.pages_renamed),
+            sum(|r| r.pages_combined),
+            sum(|r| r.sources_copied),
+        ));
+        for (name, r) in &self.merged {
+            out.push(format!(
+                "  ← {name}: {} page(s), {} source(s)",
+                r.pages_copied, r.sources_copied
+            ));
+        }
+        if !self.skipped_shared.is_empty() {
+            out.push(format!(
+                "  skipped read-only: {}",
+                self.skipped_shared.join(", ")
+            ));
+        }
+        if !self.dropped.is_empty() {
+            out.push(format!("  dropped sources: {}", self.dropped.join(", ")));
+        } else {
+            let drops = self
+                .merged
+                .iter()
+                .map(|(n, _)| format!("/kms drop {n} --force"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            out.push(format!(
+                "  sources left intact — verify, then drop: {drops}"
+            ));
+        }
+        out.push(format!(
+            "  then `/kms reindex {}` (or just search it — a stale index auto-rebuilds).",
+            self.dst
+        ));
+        out
+    }
+}
+
+/// Merge every *writable* KMS (Project + User scope) into `dst`, creating `dst`
+/// in `scope` if it doesn't already exist. Shared/read-only KMSes are skipped.
+/// When `drop` is set, each merged source is removed afterwards, leaving just
+/// `dst` (otherwise sources are kept intact for the caller to verify + drop).
+///
+/// Thin orchestration over [`merge_into`] (per-source) — same rename-on-collision
+/// + aggregator-combine + link-rewrite semantics apply to each source.
+pub fn consolidate(dst_name: &str, scope: KmsScope, drop: bool) -> Result<ConsolidateReport> {
+    let sources = list_all();
+    let created_dst = resolve(dst_name).is_none();
+    if created_dst {
+        create(dst_name, scope)?;
+    }
+    let mut report = ConsolidateReport {
+        dst: dst_name.to_string(),
+        created_dst,
+        ..Default::default()
+    };
+    let mut seen = std::collections::HashSet::new();
+    for k in sources {
+        if k.name == dst_name {
+            continue;
+        }
+        if matches!(k.scope, KmsScope::Shared) {
+            report.skipped_shared.push(k.name);
+            continue;
+        }
+        if !seen.insert(k.name.clone()) {
+            continue; // name shadowed across scopes — merge once
+        }
+        let mr = merge_into(&k.name, dst_name)?;
+        report.merged.push((k.name, mr));
+    }
+    if drop {
+        for (name, _) in &report.merged {
+            if remove(name).is_ok() {
+                report.dropped.push(name.clone());
+            }
+        }
+    }
+    Ok(report)
+}
+
 /// Pages whose stem starts with `_` are aggregator/summary pages
 /// (e.g. `_summary.md`, `_journal.md`) — they collect content over
 /// time rather than describing one bounded topic. When two KMSes both
@@ -5598,6 +5716,42 @@ mod tests {
         assert!(dst.root.join("sources/s1.md").exists());
         // src is untouched.
         assert!(src.pages_dir().join("a.md").exists());
+    }
+
+    #[test]
+    fn consolidate_merges_all_writable_into_a_new_dst() {
+        let _home = scoped_home();
+        let a = create("alpha", KmsScope::Project).unwrap();
+        let b = create("beta", KmsScope::Project).unwrap();
+        std::fs::write(a.pages_dir().join("a.md"), "# A\n").unwrap();
+        std::fs::write(a.index_path(), "- [a](pages/a.md)\n").unwrap();
+        std::fs::write(b.pages_dir().join("b.md"), "# B\n").unwrap();
+        std::fs::write(b.index_path(), "- [b](pages/b.md)\n").unwrap();
+
+        let report = consolidate("master", KmsScope::Project, false).unwrap();
+        assert!(report.created_dst);
+        assert_eq!(report.merged.len(), 2);
+        assert!(report.dropped.is_empty(), "no --drop keeps sources");
+        let master = resolve("master").unwrap();
+        assert!(master.pages_dir().join("a.md").exists());
+        assert!(master.pages_dir().join("b.md").exists());
+        assert!(resolve("alpha").is_some() && resolve("beta").is_some());
+    }
+
+    #[test]
+    fn consolidate_with_drop_leaves_only_dst() {
+        let _home = scoped_home();
+        let a = create("alpha", KmsScope::Project).unwrap();
+        std::fs::write(a.pages_dir().join("a.md"), "# A\n").unwrap();
+        std::fs::write(a.index_path(), "- [a](pages/a.md)\n").unwrap();
+        create("master", KmsScope::Project).unwrap();
+
+        let report = consolidate("master", KmsScope::Project, true).unwrap();
+        assert!(!report.created_dst);
+        assert_eq!(report.merged.len(), 1);
+        assert_eq!(report.dropped, vec!["alpha".to_string()]);
+        assert!(resolve("alpha").is_none(), "source dropped");
+        assert!(resolve("master").unwrap().pages_dir().join("a.md").exists());
     }
 
     #[test]

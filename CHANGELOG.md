@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.82.0] — 2026-06-30
+
+Consolidates all KMS stores with a new `/kms consolidate` command and documents cloud workspace sync in the tutorial capstone.
+
+### Added
+- **KMS consolidate command.** `/kms consolidate` now folds every writable knowledge base into a single unified KMS for streamlined organization.
+- **Cloud Workspace Sync tutorial.** Adds Chapter 23 to the tutorial covering `/cloud push|pull` workflows, completing the Capstone with up-to-date cloud sync guidance.
+
 ## [0.81.0] — 2026-06-30
 
 Introduces seamless desktop–cloud workspace sync with resilient push/pull flows, and polishes cloud onboarding with broader user auto-grants.
