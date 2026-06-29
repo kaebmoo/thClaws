@@ -24,7 +24,7 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest::Client;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -226,99 +226,6 @@ impl GeminiProvider {
         out
     }
 
-    fn sanitize_tool_schema_for_gemini(schema: &Value) -> Value {
-        fn string_array(value: &Value) -> Option<Value> {
-            let arr = value.as_array()?;
-            if arr.iter().all(Value::is_string) {
-                Some(value.clone())
-            } else {
-                None
-            }
-        }
-
-        fn int64_string(value: &Value) -> Option<Value> {
-            match value {
-                Value::String(_) => Some(value.clone()),
-                Value::Number(n) if n.is_i64() || n.is_u64() => Some(Value::String(n.to_string())),
-                _ => None,
-            }
-        }
-
-        fn sanitize_schema(value: &Value) -> Value {
-            let Some(obj) = value.as_object() else {
-                return value.clone();
-            };
-
-            let mut out = Map::new();
-            let schema_type = obj.get("type").and_then(Value::as_str);
-            for (key, child) in obj {
-                match key.as_str() {
-                    "type" | "format" | "title" | "description" | "pattern" => {
-                        if child.is_string() {
-                            out.insert(key.clone(), child.clone());
-                        }
-                    }
-                    "nullable" => {
-                        if child.is_boolean() {
-                            out.insert(key.clone(), child.clone());
-                        }
-                    }
-                    "enum" => {
-                        if schema_type.map(|t| t.eq_ignore_ascii_case("string")) != Some(false) {
-                            if let Some(v) = string_array(child) {
-                                out.insert(key.clone(), v);
-                            }
-                        }
-                    }
-                    "properties" => {
-                        if let Some(props) = child.as_object() {
-                            let mut sanitized_props = Map::new();
-                            for (prop_name, prop_schema) in props {
-                                sanitized_props
-                                    .insert(prop_name.clone(), sanitize_schema(prop_schema));
-                            }
-                            out.insert(key.clone(), Value::Object(sanitized_props));
-                        }
-                    }
-                    "required" | "propertyOrdering" => {
-                        if let Some(v) = string_array(child) {
-                            out.insert(key.clone(), v);
-                        }
-                    }
-                    "items" => {
-                        out.insert(key.clone(), sanitize_schema(child));
-                    }
-                    "anyOf" => {
-                        if let Some(arr) = child.as_array() {
-                            out.insert(
-                                key.clone(),
-                                Value::Array(arr.iter().map(sanitize_schema).collect()),
-                            );
-                        }
-                    }
-                    "maxItems" | "minItems" | "minProperties" | "maxProperties" | "minLength"
-                    | "maxLength" => {
-                        if let Some(v) = int64_string(child) {
-                            out.insert(key.clone(), v);
-                        }
-                    }
-                    "minimum" | "maximum" => {
-                        if child.is_number() {
-                            out.insert(key.clone(), child.clone());
-                        }
-                    }
-                    "example" | "default" => {
-                        out.insert(key.clone(), child.clone());
-                    }
-                    _ => {}
-                }
-            }
-            Value::Object(out)
-        }
-
-        sanitize_schema(schema)
-    }
-
     fn build_body(req: &StreamRequest) -> Value {
         let contents = Self::messages_to_gemini(req);
         let mut body = json!({
@@ -367,11 +274,10 @@ impl GeminiProvider {
                 .tools
                 .iter()
                 .map(|t| {
-                    let parameters = Self::sanitize_tool_schema_for_gemini(&t.input_schema);
                     json!({
                         "name": t.name,
                         "description": t.description,
-                        "parameters": parameters,
+                        "parameters": sanitize_schema_for_gemini(&t.input_schema),
                     })
                 })
                 .collect();
@@ -379,6 +285,90 @@ impl GeminiProvider {
         }
         body
     }
+}
+
+/// The Schema fields Gemini's `functionDeclarations` accepts (a strict
+/// OpenAPI-3.0 subset, per ai.google.dev). Anything else 400s the whole
+/// request — `Unknown name "<kw>" … Cannot find field` — and built-in +
+/// MCP tool schemas carry plenty (`$schema`, `additionalProperties`,
+/// `propertyNames`, refs, combinators, …). An allowlist is robust where a
+/// denylist whack-a-moles: an unknown keyword can at worst loosen the
+/// schema, never error.
+const GEMINI_ALLOWED_KEYS: &[&str] = &[
+    "type",
+    "format",
+    "title",
+    "description",
+    "nullable",
+    "default",
+    "enum",
+    "items",
+    "properties",
+    "required",
+    "propertyOrdering",
+    "minimum",
+    "maximum",
+    "minItems",
+    "maxItems",
+    "minLength",
+    "maxLength",
+    "minProperties",
+    "maxProperties",
+    "pattern",
+    "example",
+    "anyOf",
+];
+
+/// Make a JSON-Schema tool parameter object acceptable to Gemini's
+/// `functionDeclarations`, which otherwise 400s and breaks Gemini for
+/// tool-using sessions (the default). Keep only [`GEMINI_ALLOWED_KEYS`]
+/// (dropping unsupported JSON-Schema keywords), and drop any non-string
+/// `enum` (Gemini's `enum` is string-only — the epub/pdf tools'
+/// `enum:[0,1,2]` errored). Property `type` + `description` still guide the
+/// model and the tool receives native types. OpenAI / Anthropic keep the
+/// original schema (they accept it).
+fn sanitize_schema_for_gemini(v: &Value) -> Value {
+    let Value::Object(map) = v else {
+        return v.clone();
+    };
+    let mut out = serde_json::Map::new();
+    for (k, val) in map {
+        if !GEMINI_ALLOWED_KEYS.contains(&k.as_str()) {
+            continue;
+        }
+        let cleaned = match k.as_str() {
+            // `properties`: a map of property NAME → sub-schema. Keep the
+            // names (don't allowlist-filter them); sanitize each value.
+            "properties" => match val {
+                Value::Object(props) => Value::Object(
+                    props
+                        .iter()
+                        .map(|(name, sch)| (name.clone(), sanitize_schema_for_gemini(sch)))
+                        .collect(),
+                ),
+                _ => val.clone(),
+            },
+            // Single sub-schema.
+            "items" => sanitize_schema_for_gemini(val),
+            // Array of sub-schemas.
+            "anyOf" => match val {
+                Value::Array(arr) => {
+                    Value::Array(arr.iter().map(sanitize_schema_for_gemini).collect())
+                }
+                _ => val.clone(),
+            },
+            // Gemini's enum is string-only — drop if any value isn't a string.
+            "enum" => match val.as_array() {
+                Some(arr) if arr.iter().all(Value::is_string) => val.clone(),
+                _ => continue,
+            },
+            // Scalars / value arrays (type, description, required, default,
+            // min*/max*, …): keep verbatim.
+            _ => val.clone(),
+        };
+        out.insert(k.clone(), cleaned);
+    }
+    Value::Object(out)
 }
 
 #[async_trait]
@@ -518,7 +508,7 @@ impl Provider for GeminiProvider {
                     let event_bytes: Vec<u8> = buffer.drain(..boundary + sep_len).collect();
                     let event_text = String::from_utf8_lossy(&event_bytes);
                     let trimmed = event_text
-                        .trim_end_matches(['\n', '\r']);
+                        .trim_end_matches(|c: char| c == '\n' || c == '\r');
                     for event in parse_sse_event(trimmed, &mut state)? {
                         if let ProviderEvent::TextDelta(ref s) = event {
                             raw.push(s);
@@ -828,6 +818,45 @@ mod tests {
     use super::*;
     use crate::providers::{assemble, collect_turn};
     use crate::types::Message;
+
+    #[test]
+    fn sanitize_schema_drops_non_string_enum_keeps_string_enum() {
+        // Mirrors the epub/pdf tools: an integer enum 400s Gemini.
+        let schema = json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "outline_depth": {
+                    "type": "integer",
+                    "enum": [0, 1, 2],
+                    "description": "0 = none, 1 = H1, 2 = H1+H2",
+                },
+                "font": { "type": "string", "enum": ["sans", "serif"] },
+                "tags": {
+                    "type": "array",
+                    "items": { "type": "object", "additionalProperties": false },
+                },
+            },
+        });
+        let out = sanitize_schema_for_gemini(&schema);
+        // Unsupported JSON-Schema keywords stripped (top-level + nested).
+        assert!(out.get("$schema").is_none());
+        assert!(out.get("additionalProperties").is_none());
+        assert!(out["properties"]["tags"]["items"]
+            .get("additionalProperties")
+            .is_none());
+        let props = &out["properties"];
+        // Non-string enum dropped; type + description preserved.
+        assert!(props["outline_depth"].get("enum").is_none());
+        assert_eq!(props["outline_depth"]["type"], "integer");
+        assert_eq!(
+            props["outline_depth"]["description"],
+            "0 = none, 1 = H1, 2 = H1+H2"
+        );
+        // All-string enum preserved.
+        assert_eq!(props["font"]["enum"], json!(["sans", "serif"]));
+    }
 
     fn parse_all(events: &[&str]) -> Vec<ProviderEvent> {
         let mut state = ParseState::default();
@@ -1223,72 +1252,6 @@ mod tests {
         assert_eq!(
             body["tools"][0]["functionDeclarations"][0]["parameters"]["type"],
             "object"
-        );
-    }
-
-    #[test]
-    fn build_body_sanitizes_tool_schema_for_gemini() {
-        use crate::types::ToolDef;
-        let req = StreamRequest {
-            model: "gemini-2.0-flash".into(),
-            system: None,
-            messages: vec![Message::user("x")],
-            tools: vec![ToolDef {
-                name: "BadSchema".into(),
-                description: "schema with JSON Schema fields Gemini rejects".into(),
-                input_schema: json!({
-                    "$schema": "https://json-schema.org/draft/2020-12/schema",
-                    "type": "object",
-                    "additionalProperties": false,
-                    "propertyNames": {"pattern": "^[a-z_]+$"},
-                    "properties": {
-                        "outline_depth": {
-                            "type": "integer",
-                            "enum": [0, 1, 2]
-                        },
-                        "mode": {
-                            "type": "string",
-                            "enum": ["fast", "careful"]
-                        },
-                        "nested": {
-                            "type": "object",
-                            "additionalProperties": false,
-                            "properties": {
-                                "items": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "additionalProperties": false
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    "required": ["outline_depth"]
-                }),
-            }],
-            max_tokens: 100,
-            thinking_budget: None,
-            stream_chunk_timeout_override: None,
-        };
-        let body = GeminiProvider::build_body(&req);
-        let params = &body["tools"][0]["functionDeclarations"][0]["parameters"];
-
-        assert!(params.get("$schema").is_none());
-        assert!(params.get("additionalProperties").is_none());
-        assert!(params.get("propertyNames").is_none());
-        assert!(params["properties"]["outline_depth"].get("enum").is_none());
-        assert_eq!(
-            params["properties"]["mode"]["enum"],
-            json!(["fast", "careful"])
-        );
-        assert!(params["properties"]["nested"]
-            .get("additionalProperties")
-            .is_none());
-        assert!(
-            params["properties"]["nested"]["properties"]["items"]["items"]
-                .get("additionalProperties")
-                .is_none()
         );
     }
 

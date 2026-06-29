@@ -7,6 +7,169 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.80.0] — 2026-06-29
+
+Strengthens PDF and KMS ingest for Thai documents, advances agent publishing via source-level visibility and batch tooling, and brings tutorial documentation current with capstone and GUI coverage.
+
+### Added
+- **Vision-based PDF ingestion in /kms.** `/kms ingest <name> <file.pdf> --vision` enables robust extraction of content from scanned and image-heavy PDFs.
+- **Agent publishing batch/changelog flow.** `publish.py --changed` updates only modified agents, streamlining batch publishes with tighter log output.
+- **Built-in image tool integration for agent image-generator.** Agents can now leverage native image tools for generation tasks.
+
+### Changed
+- **Private-by-default visibility and owner re-publish in cloud API.** Published sources default to private status; owners can explicitly re-publish.
+- **Credential-aware default model selection + always-on gateway.** The engine picks a sensible default model based on credentials and enables the gateway by default.
+- **Source-level platform publish identity in cloud API.** The publishing flow now uses source-level identity for audit trails and clarity.
+
+### Fixed
+- **Thai PDF ingest quality and normalization.** Improves text extraction fidelity for Thai PDFs, repairing sara-am clusters and normalizing text reuse; vision param properly switches to OCR when needed.
+- **GUI shell and capstone documentation.** Updates tutorial slides with screenshots for chapter 20 (capstone), ch17 (LINE/Telegram), ch18 (GUI shells), and the Folder instructions editor.
+- **Agent listing robustness.** Batch slugging and contact-sheet handling for agents now safely accommodate Thai and non-Latin characters.
+- **Artifact cleanup on cloud publish.** Ensures runtime artifacts are stripped during cloud publish, matching Rust and Python code paths.
+- **Installer settings preservation.** Maintains local installer settings when calling `/cloud get`.
+- **Subagent pin fallback.** Ensures fallback to the session model when cross-provider pins are unavailable.
+
+## [0.79.0] - 2026-06-28
+
+Rounds out guest gating for the cloud, hardens the approval box UI with multi-line support and path redaction, and closes the capture-to-retrieve loop in the knowledge base for a self-maintaining /kms.
+
+### Added
+- **Self-maintaining knowledge base.** The KMS capture→retrieve loop is now closed with `/kms maintain` and linked auto-retrieval, aligning with the dream redesign.
+- **Multi-line approval box and path redaction.** The Key: value approval prompt supports multi-line values and redacts sensitive paths when presenting actions to the user.
+- **All-chapters deck export.** The tutorial deck builder adds `md-to-pptx --combine` for an all-chapters PowerPoint export.
+
+### Changed
+- **Guest gating in the cloud.** Non-whitelisted or unauthenticated users are now admitted as gated ‘guest’ users in the cloud, restricting CLI token access, purchases, and exposing a gated coupon redeem flow. The guest state is made explicit in the UI.
+
+### Fixed
+- **Tutorial screenshots.** Updates tutorial documentation with real screenshots for the approval box and memory flow sequence.
+- **HAL tool registration in tests.** HAL tools are now registered explicitly in visibility tests to ensure test coverage consistency.
+
+## [0.78.0] - 2026-06-27
+
+Adds a HAL tools opt-in flag, fixes HAL availability over the gateway and the /model picker, hardens OpenAI-compatible tool-call pairing, and continues tutorial screenshot wiring.
+
+### Added
+- **HAL tools opt-in.** New Settings → Optional features toggle enables the HAL tools (YouTubeTranscript, WebScrape); off by default, registered per surface like the media tools.
+- **Tutorial screenshot updates.** Wires ch04b/c/d screenshot sequences (s03–s06), aligns ch04c HAL narration, and splits ch04b slide 5→5+5b.
+
+### Changed
+- **/model picker for two-model providers.** The picker now opens for providers with exactly two models (e.g. DeepSeek), not only three or more.
+
+### Fixed
+- **HAL tools available over the gateway.** HAL tools now appear when the gateway is active (desktop proxy or cloud pod) even with no local HAL_API_KEY — availability uses the same config-aware signal as gateway routing.
+- **OpenAI-compatible tool-call pairing.** Dedups duplicate tool_call ids and keeps each turn's tool results adjacent to their assistant call, fixing intermittent "insufficient tool messages following tool_calls" errors from strict endpoints (DeepSeek, …).
+- **HAL row icon.** Uses the FileText icon; the Youtube icon isn't exported by this lucide-react version, which broke the frontend build.
+
+## [0.77.0] - 2026-06-26
+
+Adds auto-image resize for vision, gateway-side payload bounding, monorepo orientation docs, and stability+behavior fixes across agent, team, and serve-server. Several agent tutorial chapters expanded.
+
+### Added
+- **Auto-image downscaling for vision use.** Oversized images passed to vision models are now automatically downscaled to fit under the 5MB payload limit instead of erroring.
+- **Gateway image payload bounding.** Outgoing image payloads are now capped at the gateway 5MB body constraint, enforcing the limit before upload.
+- **Root CLAUDE.md with monorepo orientation and deploy flow.** Adds a centralized guide for contributors and internal releases.
+- **Toggle-finder-hidden utility.** Exposes a quick util to toggle visibility of hidden files in Finder.
+- **User tutorial expansion.** New/expanded agent team/collaboration chapters (ch04b/c/d, ch16), updated screenshots in ch13/14/15, and a markdown-to-PPTX generator.
+
+### Changed
+- **PdfRead vision fallback for Thai text.** Garbled Thai text from PDFs now routes to the vision-OCR fallback before extracting content, further increasing extraction fidelity.
+
+### Fixed
+- **OpenAI error labeling.** Prevents mislabeling a size-capped 4xx error as "model not vision-capable" when the issue is actually request size.
+- **Silence confine dead-code warning on non-Linux.** Suppresses noisy compiler warnings regarding unused code in confine_runtime_failed.
+- **Confine fallback logic.** Falls back to unconfined mode cleanly if the OS confiner can't enforce sandbox boundaries.
+- **Serve tool-approval prompt delivery.** Tool approval prompts now deliver correctly over WebSockets, unblocking the turn for multiuser or hosted net.
+- **Serve multiuser safety net + override.** Ensures auto-approval always applies in hosted/multiuser workspaces and issues an explicit notice when locally overridden.
+- **Agent Teams audit fixes.** Stability audit resolves 32 items and closes the 3 deferred audit findings (F29/F30/F31), significantly improving Teams reliability.
+- **Media-job log compaction.** Appends and compacts media-jobs.jsonl content to one entry per terminal job state via atomic tmp-rename, preventing log bloat.
+
+## [0.75.0] - 2026-06-25
+
+### Added
+- **Files tab file management.** Drag files from your computer onto the tree to upload them into the project, and right-click any file or folder to **Rename** or **Delete**. All sandbox-checked — upload and rename refuse to clobber an existing name, delete is recursive for folders — and the context menus now show a clear hover highlight on every theme.
+- **Per-turn token/cost footer in the GUI.** The Chat and Terminal tabs show the `[tokens: …in/…out · …s · $… session]` line after each completed turn, matching the CLI REPL.
+
+### Changed
+- **Desktop launches into a clean session.** A fresh app launch no longer silently inherits the previous conversation's history. The "land back in your last work" auto-resume now applies only to the `--serve`/web surface (reopening a browser tab) and to reconnecting to an actively-busy agent.
+- **Deleting the active session activates the most recent remaining session** instead of minting a blank one; a fresh session is minted only when nothing is left.
+- **Settings:** removed the retired "Deploy target" section.
+
+### Fixed
+- **PDF previews render inline again.** The desktop file-asset handler was serving PDFs as `application/octet-stream`, blanking the in-app viewer; it now sends the correct `application/pdf` (and `application/epub+zip`).
+- **Thai text extracted from PDFs.** `PdfRead` re-attaches Thai vowel/tone marks that `pdftotext -layout` orphaned behind spurious spaces (script-level rules, no word lists), and routes a badly-garbled Thai text layer to the vision-OCR path so the model transcribes the rendered glyphs instead of a broken font's wrong characters.
+- **media-job log compaction** (thanks @modtanoii). The append-only `media-jobs.jsonl` is compacted to one entry per job when the job reaches a terminal state, via an atomic tmp-rename write.
+
+## [0.74.0] - 2026-06-24
+
+### Changed
+- **Gateway proxy is now a single toggle.** The desktop "use the thClaws Gateway" control is one flag (`gatewayProxy`) instead of a per-provider list. On: every gateway-routable provider routes through the gateway for **featured** (priced) models; off: pure BYOK. This fixes the per-provider list bugs — the proxy could get stuck on, re-enable itself on `/reload`, or keep routing after being switched off (the old code re-expanded a partial list to all providers on every load). The Settings checkbox sits on the **Featured (gateway-routable)** section header and is enabled only when a CLI access token is present.
+- **Settings API-key modal groups providers like `/providers`** — "Featured (gateway-routable)" vs "Additional (bring your own key)", each provider showing its representative model — so it's obvious which providers the proxy covers.
+
+### Fixed
+- **Every credential check now honors the proxy.** A proxy-only user (CLI token, no BYOK key) hit "no API key" in several places even on a featured model the gateway can serve: provider routing, the sidebar ready-badge, **loading a session** recorded against a featured model, **spawning a teammate**, and the **skill-recommended-model** resolver. All now treat a gateway-servable model as ready, falling back to BYOK only when the gateway can't serve it (non-featured model → no gateway 400).
+- **Session model switches persist + restore correctly.** Switching model mid-session is written to the session log immediately (a `model` event) instead of only when the next chat turn lands, and a restore reads the **latest** model from the log rather than the creation model in the header — so a switched session reopens on the right provider.
+- **Stopped session-log bloat from null snapshots.** `plan`/`goal` snapshots are no longer rewritten as `null` on every turn when none was ever set; only real set/clear transitions are recorded.
+
+## [0.73.0] - 2026-06-23
+
+### Added
+- **OS-level Bash confinement (`bash.sandbox`, on by default).** Bash commands (and everything they spawn) now run inside an OS-enforced filesystem boundary — writes confined to the workspace + `/tmp` + package-manager caches, secret dotfiles read-denied — so a malicious or mistaken command can't write outside the project no matter how it's obfuscated. macOS Seatbelt (`sandbox-exec`) + Linux **Landlock** (needs no user namespace, so it works where bubblewrap is AppArmor-blocked; bwrap fallback). Probed at runtime: a host where no confiner can enforce falls back to command-screening with a warning rather than breaking commands. Modes `workspace` (default) / `strict` / `off`; applies to subagent + workflow Bash. A sandbox-denied write appends an actionable hint to the Bash output.
+- **`thclaws.parallel([specs])` — genuine workflow fan-out.** Runs subagent specs concurrently (capped at `min(16, cores-2)`); plain `Promise.all` over `thclaws.subagent` stays serial. **Settles** rather than rejects — a failed worker becomes its spec's `fallback` (default `null`) so partial results are kept. Per-future caps are task-local-isolated (no KMS-grant bleed). Plus `thclaws.pollUntil(fn, {interval, timeout, until})` for the submit→poll→done async-job shape.
+- **Headless agent tooling.** `thclaws agent new <dir> --pattern static-pipeline|batch-fanout|dynamic` scaffolds a best-practice agent that validates green out of the box; `thclaws agent run <dir> [--workflow X --args {…}] [--dry-tools]` executes an agent's workflow headlessly (Task + MCP registered) for behavioral smoke-testing. `thclaws agent validate` deepened: `py_compile`s `.thclaws/scripts/*.py`, cross-checks MCP/skill requirements, warns on `writePaths`+`Bash`.
+
+### Changed
+- **`pre_tool_use` hook gate hardened.** The full, untruncated command is now piped to the gate on **stdin** (`THCLAWS_TOOL_INPUT_ON_STDIN=1`) so a screening hook isn't bypassed by a >8 KB command; new `hooks.fail_closed` makes a gate timeout/error **deny** instead of allow. The gate runs upstream of `bash.sandbox` — complementary layers (policy screening + a hard write floor).
+- **KMS sidebar auto-refreshes** after a tool-using turn — a KMS an agent/workflow just created or wrote shows up without a `/reload`.
+
+## [0.72.0] - 2026-06-23
+
+### Added
+- **Agent-authoring ergonomics.** Subagent definitions can declare an `output_schema` / `input_schema` (single-line inline JSON or a path to a `.json` file); a workflow `thclaws.subagent({agent})` call that omits a per-call `schema` now validates against the def's schema automatically — one source of truth instead of duplicating it in the workflow JS. `WorkflowRun({args})` passes structured input to a pre-authored workflow as a global `args`, replacing the `TASK.md` side-channel. `thclaws.log(msg)` adds a workflow narrator line for observability. A `writePaths` glob allow-list mechanically confines a subagent's file writes (Write/Edit/office tools) to its lane. New `thclaws agent pack` / `thclaws agent validate` build + lint an agent tarball offline — byte-identical to what `/cloud publish` uploads, so scripts/CI never re-derive the strip rules.
+- **Workflow subagent calls fail loud on the wrong surface.** Inside a running workflow, `thclaws.subagent(...)` now errors clearly when the surface has no `Task` tool (e.g. `-p` / `/v1`) instead of silently returning a stub the script would mistake for a real result.
+
+### Fixed
+- **Hosted workspaces no longer collide on the same name.** A workspace's route was keyed on the email local-part, which isn't unique — two users sharing a local-part (`name@a.com` + `name@b.com`), or a delete+recreate that left a stale route behind, could surface as "no available server". Routes are now keyed on the unique user id, and workspace deletion cleans up every route it created.
+
+## [0.70.0] - 2026-06-20
+
+### Fixed
+- **Gateway-proxied providers no longer show "No API Key".** When you route a provider through the LLM gateway (per-provider proxy toggle + CLI token) without entering your own key, the sidebar used to keep showing "no API key" even though calls worked — and the provider could be silently swapped to a local model. The readiness check now recognises a live gateway route, so a proxied provider reads as ready.
+- **MiniMax appears in the API-key settings.** MiniMax had full provider support but was missing from the API-key modal, so there was no way to enter `MINIMAX_API_KEY` from the UI. It now shows up alongside the other providers.
+- **Gateway providers no longer go stale on desktop.** Once you've enabled the gateway, newly-shipped gateway-routable providers (e.g. z.ai, xAI, Moonshot, MiniMax) now route through it automatically instead of falling back to bring-your-own-key ("set ZAI_API_KEY"). Previously the desktop kept the snapshot of routable providers saved when you first enabled the gateway; only cloud workspaces refreshed it. (BYOK-only setups — where you never enabled the gateway — are unaffected.)
+- **Cleaner system prompt when Agent Teams are off.** With `teamEnabled` unset there's now no mention of teams anywhere in the prompt: the base prompt no longer says "coordinating teammates…" (it keeps the unattended/headless awareness), and the Collaboration-primitives section drops the "Agent Teams — disabled (`teamEnabled: false`)" notice, listing only the two primitives that *are* available (Subagent + WorkflowRun). Naming a disabled feature (and the config flag) was inviting models to reason about it and conflate it with the always-available `Task` subagent tool (one model concluded "there's no Task tool because teamEnabled is false", which is nonsense — the `Task` subagent is unrelated to Agent Teams).
+- **`/goal continue` loops can no longer run away.** An auto-continuing goal now has a hard backstop: past an absolute iteration cap (100 firings) or a 1.5× overrun of the token/time budget, the goal is auto-blocked and the loop stops — regardless of whether the model marks it terminal. Previously the only automatic stop was the model itself calling `MarkGoalComplete`/`MarkGoalBlocked` (the budget was a soft prompt nudge), so an unattended loop could burn unbounded cost.
+
+### Added
+- **Parallel tool calls run concurrently.** When the model emits two or more independent, read-only tool calls in one turn — several `Read`/`Grep`/`Glob`/`Ls`, or a fan-out of `Task` subagents — they now run **concurrently** instead of one-at-a-time. Wall-clock drops from the sum of their durations to the slowest single one (a big win for parallel research/audit subagents). Mutating tools (`Write`/`Edit`/`Bash`) still run strictly in order.
+
+## [0.69.0] - 2026-06-20
+
+### Added
+- **`pre_tool_use` hooks can now block a tool call.** A hook that exits `2` denies the call — the tool never runs and the hook's stderr is shown to the model as the reason; any other exit code still allows it (existing audit-only hooks are unchanged). This turns the audit hook into an enforceable gate — e.g. confine `bash` to the working folder instead of only logging it. Reference policy: `examples/hooks/audit-bash-confine.sh`.
+
+### Changed
+- **`bash` no longer exposes platform credentials to the shell.** Platform secrets (the gateway access key, the multiuser identity secret, the cloud token) are always stripped from a command's environment; in a shared/multiuser session the owner's provider API keys are stripped too — a `printenv` in `bash` can no longer read them.
+
+### Security
+- Hardening for thClaws.cloud hosted + shared workspaces: HttpOnly session cookies (no workspace-subdomain token theft), credential stripping before the runner, per-workspace identity secrets, per-workspace daily spend caps, and gateway per-user rate limiting.
+
+## [0.68.0] - 2026-06-19
+
+### Added
+- **Marketplace now covers four types — skills · MCP · plugins · subagents.** Subagents (agent defs) are a new installable catalog type: `/subagent marketplace | search | info | install` pulls a single `.md` agent def into `.thclaws/agents/`. A unified **`/marketplace`** command opens a GUI browser with a tab per type, search, and one-click install.
+- **Author agent defs in the GUI — `/agent new` / `/agent edit`.** GUI-only commands open a modal to edit an agent's YAML frontmatter and system prompt, saving a project override at `.thclaws/agents/<name>.md`.
+- **Gated tool groups + GUI Shell authoring tools.** Tools can be registered but hidden until a skill opens their gate; the GUI-shell authoring tools are now surfaced lazily via the bundled `gui-shell` skill instead of a ~3KB always-on system-prompt block.
+
+### Changed
+- **Gateway overlay → `gateway.thclaws.cloud` + CLI-token auth.** The thClaws Gateway base URL is the consolidated `gateway.thclaws.cloud`, and a thClaws.cloud login (CLI token) is now accepted directly — no separate `gw_v1_` key needed when you're signed in.
+
+### Fixed
+- **Native Gemini provider no longer 400s on tool schemas** ([#172](https://github.com/thClaws/thClaws/issues/172)). Tool schemas are sanitized to Gemini's `Schema` subset before sending — strips `$schema` / `additionalProperties` / `propertyNames` (recursively), drops non-string `enum`s (e.g. `[0,1,2]`), keeps string enums.
+- **WYSIWYG `.md` editor preserves HTML comments and images** on edit/save. Wrapper markers like `<!-- img:foo -->` and `![alt](src)` survive the round-trip (custom comment node + Image extension) instead of being silently dropped.
+- **Chat no longer yanks you to the bottom while reading history** ([#170](https://github.com/thClaws/thClaws/issues/170)). Streamed tokens only auto-scroll when you're already pinned to the bottom.
+- **Compact running indicator** ([#171](https://github.com/thClaws/thClaws/issues/171)). The RunningChip is now a narrow dot + elapsed time (a static dot when idle); session id and progress move to the hover tooltip so it no longer pushes header items off-screen.
+
 ## [0.67.0] - 2026-06-17
 
 ### Added

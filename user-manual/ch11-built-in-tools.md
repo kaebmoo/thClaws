@@ -220,9 +220,33 @@ reaches for during long planning turns. See them mid-turn with
 | Tool | Approval | Summary |
 |---|---|---|
 | `Task` | prompt | Spawn a sub-agent for an isolated sub-problem |
+| `WorkflowRun` | prompt | Author + run a JavaScript workflow that fans work across many subagents |
 
-Sub-agents get their own tool registry and can recurse up to depth 3.
-Details in [Chapter 15](ch15-subagents.md).
+Sub-agents get their own tool registry and can recurse up to depth 3
+([Chapter 15](ch15-subagents.md)). `WorkflowRun` is the model-driven entry
+to workflows ([Chapter 25](ch25-workflows.md)).
+
+## Memory
+
+| Tool | Approval | Summary |
+|---|---|---|
+| `MemoryRead` | auto | Read one entry from the persistent file-based memory |
+| `MemoryWrite` | prompt | Create or replace a memory entry (frontmatter + body) |
+| `MemoryAppend` | prompt | Append to an existing memory entry |
+
+Cross-session memory that persists who you are and how you like to work —
+see [Chapter 8](ch08-memory-and-agents-md.md).
+
+## Goals (autonomous `/goal` mode)
+
+| Tool | Approval | Summary |
+|---|---|---|
+| `RecordGoalProgress` | auto | Log a step of progress toward the active goal |
+| `MarkGoalComplete` | auto | Declare the goal done — ends the autonomous loop |
+| `MarkGoalBlocked` | auto | Flag the goal as blocked (needs your input) |
+
+Registered only while a `/goal` autonomous run is active; the loop uses
+them to report progress and decide when to stop.
 
 ## Knowledge base (KMS)
 
@@ -249,6 +273,43 @@ Every MCP server's tools are discovered at startup and registered with
 names qualified by server: `weather__get_forecast`,
 `github__list_issues`, etc. All prompt for approval. Details in
 [Chapter 14](ch14-mcp.md).
+
+## Gated tools — GUI Shell
+
+Some tools are **registered but hidden** until a skill opens their *gate*.
+While closed they cost **zero tokens** — the model never sees their names —
+and they surface only when actually needed. The GUI-Shell authoring tools
+(for building a custom HTML frontend, [Chapter 26](ch26-gui-shells.md)) work
+this way:
+
+| Tool | Approval | Summary |
+|---|---|---|
+| `GuiShellCreate` | prompt | Scaffold a new GUI Shell (manifest + entry HTML) under `.thclaws/gui-shell/<id>/` |
+| `GuiShellWriteFile` | prompt | Write/overwrite a file inside a GUI Shell — path-jailed to its own directory |
+| `GuiShellList` | auto | List the installed GUI Shells |
+| `GuiShellRemove` | prompt | Delete a GUI Shell |
+
+### How the gate opens
+
+1. **Each gated tool declares a gate.** `Tool::requires_gate()` returns
+   `Some("gui-shell")`, so the **per-turn tool filter hides it** — the same
+   mechanism `requires_env` uses for service-key tools. The four `GuiShell*`
+   tools are invisible to the model and add nothing to the system prompt.
+2. **A skill owns the gate.** The bundled **`gui-shell` skill** declares
+   `tool-gate: gui-shell` in its frontmatter ([Chapter 12](ch12-skills.md)).
+3. **Invoking the skill opens it.** The skill triggers when you ask to
+   "build a UI / dashboard / custom frontend …"; when the model calls it,
+   `SkillTool::call` runs `activate_gate("gui-shell")`.
+4. **It takes effect next turn.** Gates are **process-global and
+   session-sticky** — once open, they stay open for the session. The
+   per-turn filter re-checks gates on the next request, so the `GuiShell*`
+   tools become visible and callable **without rebuilding the agent or
+   registry**.
+
+So the model can't reach the GUI-Shell tools out of nowhere — it has to go
+through the skill first, which is exactly what surfaces them. This
+gated-tool-group mechanism is reusable: future tool groups can be lazily
+surfaced the same way (a skill opens the gate → the group appears).
 
 ## Reading the tool stream
 

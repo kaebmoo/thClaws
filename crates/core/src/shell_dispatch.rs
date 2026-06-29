@@ -470,10 +470,12 @@ pub async fn dispatch(
                 );
                 // GUI side: also broadcast a model_picker_open event so
                 // the existing ModelPickerModal opens with the active
-                // provider's catalogue. Skipped for tiny catalogues
-                // (<3 entries — no choice to make) and runtime-loaded
-                // backends (Ollama / LMStudio) whose model lists come
-                // from the live runtime, not the catalogue. Closes #25.
+                // provider's catalogue. Skipped only when there's nothing
+                // to choose (<2 entries) and for runtime-loaded backends
+                // (Ollama / LMStudio) whose model lists come from the live
+                // runtime, not the catalogue. (Was <3, which wrongly hid the
+                // picker for 2-model providers like DeepSeek — flash/pro is a
+                // real choice.) Closes #25.
                 let runtime_loaded = matches!(prov, "ollama" | "ollama-anthropic" | "lmstudio");
                 if !runtime_loaded {
                     let cat = crate::model_catalogue::EffectiveCatalogue::load();
@@ -489,7 +491,7 @@ pub async fn dispatch(
                             e.input_per_mtok.is_some() && e.output_per_mtok.is_some()
                         });
                     }
-                    if models.len() >= 3 {
+                    if models.len() >= 2 {
                         let _ = crate::providers::ProviderKind::detect(&state.config.model);
                         let model_rows: Vec<serde_json::Value> = models
                             .iter()
@@ -1181,13 +1183,15 @@ pub async fn dispatch(
             budget_tokens,
             budget_time_secs,
             auto_continue,
+            require_paths,
         } => {
             let new_goal = crate::goal_state::GoalState::new(
                 objective.clone(),
                 budget_tokens,
                 budget_time_secs,
                 auto_continue,
-            );
+            )
+            .with_require_paths(require_paths);
             crate::goal_state::set(Some(new_goal));
             // Live-register the three goal-lifecycle tools (Phase C1):
             //   RecordGoalProgress  — mid-loop audit checkpoint, status stays Active
@@ -1655,6 +1659,150 @@ pub async fn dispatch(
                 ),
             }
         }
+        SlashCommand::SubagentMarketplace { refresh } => {
+            if refresh {
+                if let Err(e) = crate::marketplace::refresh_from_remote().await {
+                    emit(events_tx, format!("refresh failed: {e}"));
+                }
+            }
+            let mp = crate::marketplace::load();
+            let age_suffix = match crate::marketplace::cache_age_label() {
+                Some(label) => format!(", {label}"),
+                None => String::new(),
+            };
+            let mut out = format!(
+                "marketplace ({}, {} subagent(s){age_suffix})\n",
+                mp.source,
+                mp.subagents.len(),
+            );
+            for s in &mp.subagents {
+                let tags = crate::marketplace::entry_tags(s);
+                out.push_str(&format!("  {:<24}{tags} — {}\n", s.name, s.short_line()));
+            }
+            out.push_str("install with: /subagent install <name>   |   browse all: /marketplace");
+            emit(events_tx, out);
+        }
+        SlashCommand::SubagentSearch(query) => {
+            let mp = crate::marketplace::load();
+            let hits = mp.search_subagent(&query);
+            if hits.is_empty() {
+                emit(
+                    events_tx,
+                    format!("no matches for '{query}' — try /subagent marketplace"),
+                );
+            } else {
+                let mut out = format!("{} match(es) for '{query}':\n", hits.len());
+                for s in hits {
+                    out.push_str(&format!("  {:<24} — {}\n", s.name, s.short_line()));
+                }
+                emit(events_tx, out);
+            }
+        }
+        SlashCommand::SubagentInfo(name) => {
+            let mp = crate::marketplace::load();
+            match mp.find_subagent(&name) {
+                Some(s) => {
+                    let mut out = format!("name:        {}\n", s.name);
+                    out.push_str(&format!("description: {}\n", s.description));
+                    if !s.category.is_empty() {
+                        out.push_str(&format!("category:    {}\n", s.category));
+                    }
+                    out.push_str(&format!(
+                        "license:     {} ({})\n",
+                        s.license, s.license_tier
+                    ));
+                    if !s.homepage.is_empty() {
+                        out.push_str(&format!("homepage:    {}\n", s.homepage));
+                    }
+                    match (s.license_tier.as_str(), s.install_url.as_ref()) {
+                        ("linked-only", _) => out.push_str(&format!(
+                            "install:     not redistributable — install from {}",
+                            if s.homepage.is_empty() {
+                                "the upstream repo"
+                            } else {
+                                &s.homepage
+                            }
+                        )),
+                        (_, Some(url)) => out.push_str(&format!(
+                            "install:     /subagent install {} (resolves to {url})",
+                            s.name
+                        )),
+                        (_, None) => out.push_str("install:     no install_url in catalogue"),
+                    }
+                    emit(events_tx, out);
+                }
+                None => emit(
+                    events_tx,
+                    format!("no subagent named '{name}' in marketplace — try /subagent search"),
+                ),
+            }
+        }
+        SlashCommand::SubagentInstall { arg, name, project } => {
+            let (effective_url, abort_msg) =
+                crate::agent_defs::resolve_subagent_install_target(&arg);
+            if let Some(msg) = abort_msg {
+                emit(events_tx, msg);
+                return;
+            }
+            match crate::agent_defs::install_subagent_from_url(
+                &effective_url,
+                name.as_deref(),
+                project,
+            )
+            .await
+            {
+                Ok(report) => {
+                    // Reload the worker's def snapshot so a `/subagent
+                    // <name>` side-channel can spawn it right away (matches
+                    // the `AgentDefsChanged` handler). Model-driven Task
+                    // picks up the new def on the next session.
+                    let plugin_agent_dirs = crate::plugins::plugin_agent_dirs();
+                    let mut reloaded =
+                        crate::agent_defs::AgentDefsConfig::load_with_extra(&plugin_agent_dirs);
+                    reloaded.apply_builtin_subagent_overrides(&state.config);
+                    state.agent_defs = reloaded;
+                    let mut out = report.join("\n");
+                    out.push_str(
+                        "\n(spawn now via /subagent <name>; model-driven Task sees it next session)",
+                    );
+                    emit(events_tx, out);
+                }
+                Err(e) => emit(events_tx, format!("subagent install failed: {e}")),
+            }
+        }
+        SlashCommand::Marketplace { refresh } => {
+            if refresh {
+                if let Err(e) = crate::marketplace::refresh_from_remote().await {
+                    emit(events_tx, format!("refresh failed: {e}"));
+                }
+            }
+            let mp = crate::marketplace::load();
+            // Installed-name sets for the [installed ✓] badges. Skills
+            // from the live SkillStore; subagents from the loaded defs
+            // (built-in or disk). MCP / plugin badges are a follow-up.
+            let installed_skills: Vec<String> = state
+                .skill_store
+                .lock()
+                .map(|s| s.skills.keys().cloned().collect())
+                .unwrap_or_default();
+            let installed_subagents: Vec<String> = state
+                .agent_defs
+                .names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let payload = serde_json::json!({
+                "type": "marketplace_open",
+                "source": mp.source,
+                "cacheAge": crate::marketplace::cache_age_label(),
+                "catalog": mp,
+                "installed": {
+                    "skills": installed_skills,
+                    "subagents": installed_subagents,
+                },
+            });
+            let _ = events_tx.send(ViewEvent::MarketplaceOpen(payload.to_string()));
+        }
         SlashCommand::McpMarketplace { refresh } => {
             if refresh {
                 if let Err(e) = crate::marketplace::refresh_from_remote().await {
@@ -2071,6 +2219,10 @@ pub async fn dispatch(
             file,
             alias,
             force,
+            // `--vision` is intercepted as an agent turn-rewrite in
+            // shared_session::handle_line before dispatch, so this arm only
+            // ever runs the deterministic text-extraction path.
+            vision: _,
         } => {
             // M6.25 BUG #8: PDF ingest via pdftotext.
             let Some(k) = crate::kms::resolve(&name) else {
@@ -2505,6 +2657,61 @@ pub async fn dispatch(
                         Err(e) => emit(events_tx, format!("/kms wrap-up --fix: {e}")),
                     }
                 }
+            }
+        }
+        SlashCommand::KmsMaintain { name, apply } => {
+            // Umbrella maintenance: compute the structural report in Rust
+            // (same inputs the linker gets), then dispatch one kms-maintain
+            // agent to run the staged pipeline (structural → source-reconcile
+            // → stale → contradictions). Dry-run by default.
+            let Some(k) = crate::kms::resolve(&name) else {
+                emit(events_tx, format!("no KMS named '{name}'"));
+                return;
+            };
+            if state.config.kms_active.is_empty() {
+                // Subagent inherits the parent's tool registry; KMS tools
+                // register only when kms_active is non-empty.
+                emit(
+                    events_tx,
+                    format!(
+                        "/kms maintain {name}: no KMS attached to this session. \
+                         Run `/kms use {name}` first so KMS tools are registered."
+                    ),
+                );
+                return;
+            }
+            let lint = match crate::kms::lint(&k) {
+                Ok(r) => r,
+                Err(e) => {
+                    emit(events_tx, format!("maintain failed (lint): {e}"));
+                    return;
+                }
+            };
+            let stale = match crate::kms::scan_stale_markers(&k) {
+                Ok(s) => s,
+                Err(e) => {
+                    emit(events_tx, format!("maintain failed (stale scan): {e}"));
+                    return;
+                }
+            };
+            let prompt = compose_kms_maintain_prompt(&name, &lint, &stale, apply);
+            match crate::side_channel::spawn_side_channel(
+                "kms-maintain".to_string(),
+                prompt,
+                state.agent_factory.clone(),
+                state.agent_defs.clone(),
+                events_tx.clone(),
+            )
+            .await
+            {
+                Ok(id) => emit(
+                    events_tx,
+                    format!(
+                        "✓ kms-maintain dispatched (id: {id}, {})",
+                        if apply { "--apply" } else { "dry-run" }
+                    ),
+                ),
+                Err(e) => emit(events_tx, format!("/kms maintain: {e}")),
             }
         }
         SlashCommand::KmsHtml { name, .. } => {
@@ -2947,7 +3154,14 @@ pub async fn dispatch(
                     let mut out = String::from("Team:\n");
                     for a in &agents {
                         let task = a.current_task.as_deref().unwrap_or("-");
-                        out.push_str(&format!("  {} — {} (task: {})\n", a.agent, a.status, task));
+                        // A stale heartbeat means the teammate crashed / never
+                        // booted — show that instead of a frozen "idle".
+                        let shown = if a.status != "stopped" && a.is_stale() {
+                            "unresponsive".to_string()
+                        } else {
+                            a.status.clone()
+                        };
+                        out.push_str(&format!("  {} — {} (task: {})\n", a.agent, shown, task));
                     }
                     emit(events_tx, out);
                 }
@@ -3026,9 +3240,10 @@ pub async fn dispatch(
                     emit(
                         events_tx,
                         format!(
-                            "/schedule run '{id_for_msg}': exit={exit} duration={}.{:03}s log={}",
+                            "/schedule run '{id_for_msg}': exit={exit} duration={}.{:03}s → result={} (log={})",
                             outcome.duration.as_secs(),
                             outcome.duration.subsec_millis(),
+                            outcome.result_path.display(),
                             outcome.log_path.display(),
                         ),
                     );
@@ -3200,7 +3415,7 @@ pub async fn dispatch(
                     events_tx,
                     format!("✓ spawned background agent '{name}' (id: {id})"),
                 ),
-                Err(e) => emit(events_tx, format!("/agent: {e}")),
+                Err(e) => emit(events_tx, format!("/subagent: {e}")),
             }
         }
         SlashCommand::AgentsList => {
@@ -3217,13 +3432,80 @@ pub async fn dispatch(
         }
         SlashCommand::AgentCancel(id) => {
             if crate::side_channel::cancel_side_channel(&id) {
-                emit(events_tx, format!("/agent cancel '{id}': signal sent"));
+                emit(events_tx, format!("/subagent cancel '{id}': signal sent"));
             } else {
                 emit(
                     events_tx,
-                    format!("/agent cancel '{id}': no such active agent (try /agents)"),
+                    format!("/subagent cancel '{id}': no such active agent (try /subagent list)"),
                 );
             }
+        }
+        SlashCommand::AgentNew(name) => {
+            let Some(name) = crate::agent_defs::sanitize_agent_name(&name) else {
+                emit(
+                    events_tx,
+                    "/subagent new: name must be non-empty letters, digits, '-' or '_'".into(),
+                );
+                return;
+            };
+            if crate::agent_defs::AgentDefsConfig::find_on_disk(&name).is_some() {
+                emit(
+                    events_tx,
+                    format!("/subagent new: '{name}' already exists — use /subagent edit {name}"),
+                );
+                return;
+            }
+            let payload = serde_json::json!({
+                "type": "agent_editor_open",
+                "mode": "new",
+                "name": name,
+                "body": agent_starter_template(&name),
+            });
+            let _ = events_tx.send(ViewEvent::AgentEditorOpen(payload.to_string()));
+        }
+        SlashCommand::AgentEdit(name) => {
+            let Some(name) = crate::agent_defs::sanitize_agent_name(&name) else {
+                emit(
+                    events_tx,
+                    "/subagent edit: name must be non-empty letters, digits, '-' or '_'".into(),
+                );
+                return;
+            };
+            // Prefer the raw on-disk file (preserves the user's exact
+            // YAML + formatting). Fall back to reconstructing from the
+            // loaded def so built-ins (translator, dream, …) open with
+            // their real content — saving lands a project override.
+            let body = match crate::agent_defs::AgentDefsConfig::find_on_disk(&name) {
+                Some(path) => match std::fs::read_to_string(&path) {
+                    Ok(raw) => raw,
+                    Err(e) => {
+                        emit(
+                            events_tx,
+                            format!("/subagent edit: can't read {}: {e}", path.display()),
+                        );
+                        return;
+                    }
+                },
+                None => {
+                    match state.agent_defs.get(&name) {
+                        Some(def) => def.to_markdown(),
+                        None => {
+                            emit(
+                            events_tx,
+                            format!("/subagent edit: no such agent '{name}' (try /subagent new {name})"),
+                        );
+                            return;
+                        }
+                    }
+                }
+            };
+            let payload = serde_json::json!({
+                "type": "agent_editor_open",
+                "mode": "edit",
+                "name": name,
+                "body": body,
+            });
+            let _ = events_tx.send(ViewEvent::AgentEditorOpen(payload.to_string()));
         }
         SlashCommand::Dream {
             focus,
@@ -3242,12 +3524,13 @@ pub async fn dispatch(
             // "all sessions" scope.
 
             // Ensure the project-scope `dreams` KMS exists before the
-            // agent runs. Pass 4 of the dream procedure writes its
-            // summary page there (NOT to the user's active KMSes) so
-            // run-audit logs don't contaminate the actual knowledge
-            // vault. `kms::create` is idempotent — returns the
-            // existing ref if already present, so calling on every
-            // /dream is safe and side-effect-free after the first.
+            // agent runs. The dream procedure writes per-session
+            // digests (Pass 2b) and the run summary (Pass 4) there
+            // (NOT to the user's active KMSes) so session/audit content
+            // doesn't contaminate the curated topic vaults. `kms::create`
+            // is idempotent — returns the existing ref if already
+            // present, so calling on every /dream is safe and
+            // side-effect-free after the first.
             // Best-effort: if creation somehow fails (permissions,
             // disk full), the agent's KmsWrite will surface a clear
             // error later in Pass 4 — surface it to the user as a
@@ -3268,7 +3551,7 @@ pub async fn dispatch(
             };
             let prompt = if focus.trim().is_empty() {
                 format!(
-                    "Consolidate the active KMS by mining recent sessions. Follow your standard four-pass procedure.{scope_note}"
+                    "Consolidate the project's knowledge by mining recent sessions into per-session digests and canonical topic pages. Follow your standard multi-pass procedure.{scope_note}"
                 )
             } else {
                 format!("{focus}{scope_note}")
@@ -3505,7 +3788,16 @@ async fn switch_model(
         emit(events_tx, format!("rebuild failed: {e}"));
         return;
     }
-    state.session.model = state.config.model.clone();
+    // Append a `model` event so the switch persists to the JSONL immediately
+    // (not only when the next chat turn writes an assistant line) and a restore
+    // recovers it. Updates the in-memory label too.
+    if let Some(store) = state.session_store.as_ref() {
+        let path = store.path_for(&state.session.id);
+        let model = state.config.model.clone();
+        let _ = state.session.record_model_to(&path, &model);
+    } else {
+        state.session.model = state.config.model.clone();
+    }
 
     // Persist the model choice to project settings so a restart lands
     // on the same provider/model.
@@ -3675,6 +3967,25 @@ fn doctor_report(state: &WorkerState) -> String {
 
 fn emit(events_tx: &broadcast::Sender<ViewEvent>, text: String) {
     let _ = events_tx.send(ViewEvent::SlashOutput(text));
+}
+
+/// Starter `.md` body for `/agent new` — a commented frontmatter
+/// skeleton plus a system-prompt stub. Mirrors the field set the
+/// parser understands (see [`crate::agent_defs`]).
+fn agent_starter_template(name: &str) -> String {
+    format!(
+        "---\n\
+         name: {name}\n\
+         description: \n\
+         tools: Read, Glob, Grep\n\
+         permissionMode: ask\n\
+         maxTurns: 20\n\
+         color: cyan\n\
+         ---\n\n\
+         You are the {name} agent.\n\n\
+         Describe the task this agent should focus on, what to return, and \
+         anything it must not do.\n"
+    )
 }
 
 /// dev-plan/32 Tier 3 `/workflow run` for the GUI / chat surface.
@@ -4435,25 +4746,56 @@ pub(crate) fn compose_kms_reconcile_prompt(name: &str, focus: Option<&str>, appl
     )
 }
 
+/// Compose the brief for the `kms-maintain` umbrella agent: the
+/// structural lint report + stale-marker list (the same inputs the
+/// linker gets) plus the apply/dry-run mode. The agent's own manual
+/// carries the five-stage procedure; this just feeds it the data and
+/// the mode.
+pub(crate) fn compose_kms_maintain_prompt(
+    name: &str,
+    lint: &crate::kms::LintReport,
+    stale: &[crate::kms::StaleEntry],
+    apply: bool,
+) -> String {
+    let mode_clause = if apply {
+        "**Apply mode** — execute fixes across all stages. Preserve history (never silently drop a claim) and never delete a page — the most you remove is a dead reference inside a page."
+    } else {
+        "**Dry-run mode** — make NO `KmsWrite`/`KmsAppend` calls. Report what you *would* change across every stage, then stop. The user re-runs with `--apply` to execute."
+    };
+    let mut out = format!(
+        "You are maintaining the KMS named `{name}`. Pass `kms: \"{name}\"` to every KMS tool call.\n\n{mode_clause}\n\n"
+    );
+    out.push_str("## Structural report (lint)\n\n");
+    out.push_str(&crate::kms::format_lint_report(name, lint));
+    out.push_str("\n\n## Stale markers\n\n");
+    if stale.is_empty() {
+        out.push_str("- none\n");
+    } else {
+        for entry in stale {
+            out.push_str(&format!(
+                "- `{}`: source `{}` re-ingested on {}\n",
+                entry.page_stem, entry.source_alias, entry.date
+            ));
+        }
+    }
+    out.push_str(
+        "\nWork your five-stage operating procedure in order (structural fixes → \
+         source reconciliation against live sessions → stale refresh → contradiction \
+         reconciliation → orphans). Use TodoWrite to track stages, and finish with the \
+         staged final report.\n",
+    );
+    out
+}
+
 // `format_schedule_preset_list` and `format_migration_report` moved to
 // their data-owning modules (schedule_presets / kms) in M6.38.3. See
 // the comment above `format_lint_report`'s removal for rationale.
 
-/// M6.25 BUG #4: alias-sanitizer used by /kms file-answer. Same rules
-/// as `kms::sanitize_alias` (which is private to that module).
+/// M6.25 BUG #4: alias-sanitizer used by /kms file-answer. Delegates to
+/// the canonical `kms::sanitize_alias` so Thai/non-Latin titles survive
+/// here too (they used to fold to empty).
 fn sanitize_alias_for_dispatch(raw: &str) -> String {
-    let cleaned: String = raw
-        .trim()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    cleaned.trim_matches('_').to_string()
+    crate::kms::sanitize_alias(raw)
 }
 
 /// Same shape as [`broadcast_kms_update`], for the MCP-server list. Read

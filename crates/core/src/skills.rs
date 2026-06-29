@@ -165,6 +165,15 @@ pub struct SkillDef {
     /// model supports what.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<SkillModelSpec>,
+    /// Optional tool gate this skill opens when invoked. Parsed from the
+    /// `tool-gate:` frontmatter key. When set, `SkillTool::call` calls
+    /// `crate::tools::activate_gate(<value>)`, making every tool whose
+    /// `requires_gate()` matches become visible to the model — lets a
+    /// skill lazily surface a whole tool group (e.g. `gui-shell`) that's
+    /// otherwise hidden, instead of carrying its docs in the system
+    /// prompt. See `dev-plan/43`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_gate: Option<String>,
     pub dir: PathBuf,
     /// Body access goes through [`Self::content`]. Serialization
     /// always materializes to a string so cached SkillDef snapshots
@@ -228,6 +237,7 @@ impl SkillDef {
             description,
             when_to_use,
             model: None,
+            tool_gate: None,
             dir,
             content: SkillContent::Eager(content),
         }
@@ -451,10 +461,16 @@ impl SkillStore {
     /// produce a clearly-broken path the user can spot — pure-prompt
     /// skills don't reference `{skill_dir}` at all.
     fn seed_builtins(&mut self) {
-        const BUILTINS: &[(&str, &str)] = &[(
-            "extract-and-save",
-            include_str!("default_prompts/skills/extract-and-save.md"),
-        )];
+        const BUILTINS: &[(&str, &str)] = &[
+            (
+                "extract-and-save",
+                include_str!("default_prompts/skills/extract-and-save.md"),
+            ),
+            (
+                "gui-shell",
+                include_str!("default_prompts/skills/gui-shell.md"),
+            ),
+        ];
         for (fallback_name, raw) in BUILTINS {
             if let Some(skill) = parse_builtin_skill(fallback_name, raw) {
                 self.skills.insert(skill.name.clone(), skill);
@@ -529,6 +545,11 @@ impl SkillStore {
         let model = frontmatter
             .get("model")
             .and_then(|raw| parse_skill_model(raw));
+        let tool_gate = frontmatter
+            .get("tool-gate")
+            .or_else(|| frontmatter.get("tool_gate"))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
 
         // Canonicalize once at index time so the `{skill_dir}`
         // substitution inside the lazy body load doesn't have to —
@@ -547,6 +568,7 @@ impl SkillStore {
             description,
             when_to_use,
             model,
+            tool_gate,
             dir: abs_dir.clone(),
             // Body is read on demand by `SkillDef::content()`. Only
             // the path + abs_dir are captured at boot.
@@ -586,6 +608,11 @@ fn parse_builtin_skill(fallback_name: &str, raw: &str) -> Option<SkillDef> {
     let model = frontmatter
         .get("model")
         .and_then(|raw| parse_skill_model(raw));
+    let tool_gate = frontmatter
+        .get("tool-gate")
+        .or_else(|| frontmatter.get("tool_gate"))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     let synthetic_dir = PathBuf::from(format!("<builtin>/{name}"));
     let body_with_subst = body.replace("{skill_dir}", &synthetic_dir.to_string_lossy());
@@ -595,6 +622,7 @@ fn parse_builtin_skill(fallback_name: &str, raw: &str) -> Option<SkillDef> {
         description,
         when_to_use,
         model,
+        tool_gate,
         dir: synthetic_dir,
         content: SkillContent::Eager(body_with_subst),
     })
@@ -660,7 +688,7 @@ fn enforce_scripts_policy(skill_dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn is_zip_url(url: &str) -> bool {
+pub(crate) fn is_zip_url(url: &str) -> bool {
     // Strip query/fragment before checking the extension so
     // `?token=...` or `#frag` don't mask the `.zip` suffix.
     let without_query = url.split(['?', '#']).next().unwrap_or(url);
@@ -811,7 +839,7 @@ fn target_root(project_scope: bool) -> Result<PathBuf> {
     }
 }
 
-async fn download_zip(url: &str) -> Result<Vec<u8>> {
+pub(crate) async fn download_zip(url: &str) -> Result<Vec<u8>> {
     // Cap the download at 64 MiB. Real skills are orders of magnitude
     // smaller; anything bigger is almost certainly the wrong URL.
     const MAX_BYTES: u64 = 64 * 1024 * 1024;
@@ -856,7 +884,7 @@ async fn download_zip(url: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn extract_zip(bytes: &[u8], dest: &Path) -> Result<()> {
+pub(crate) fn extract_zip(bytes: &[u8], dest: &Path) -> Result<()> {
     let cursor = std::io::Cursor::new(bytes);
     let mut archive =
         zip::ZipArchive::new(cursor).map_err(|e| Error::Tool(format!("open zip: {e}")))?;
@@ -900,7 +928,7 @@ fn extract_zip(bytes: &[u8], dest: &Path) -> Result<()> {
 
 /// If `dir` contains exactly one child directory and no files, return that
 /// child. Covers the common `archive-v1/...` wrapper pattern in zips.
-fn single_wrapper_subdir(dir: &Path) -> Option<PathBuf> {
+pub(crate) fn single_wrapper_subdir(dir: &Path) -> Option<PathBuf> {
     let mut subdirs = Vec::new();
     let mut has_files = false;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
@@ -1292,12 +1320,18 @@ mod install_tests {
 
 pub struct SkillTool {
     store: std::sync::Arc<std::sync::Mutex<SkillStore>>,
+    /// Per-subagent allow-list. `None` = no restriction (the parent /
+    /// default agent sees every installed skill). `Some(set)` = a
+    /// subagent scoped via `AgentDef::skills` — loading any name outside
+    /// the set is refused.
+    allowed: Option<std::sync::Arc<std::collections::HashSet<String>>>,
 }
 
 impl SkillTool {
     pub fn new(store: SkillStore) -> Self {
         Self {
             store: std::sync::Arc::new(std::sync::Mutex::new(store)),
+            allowed: None,
         }
     }
 
@@ -1307,7 +1341,20 @@ impl SkillTool {
     /// store without needing to find and mutate the tool through the
     /// registry.
     pub fn new_from_handle(store: std::sync::Arc<std::sync::Mutex<SkillStore>>) -> Self {
-        Self { store }
+        Self {
+            store,
+            allowed: None,
+        }
+    }
+
+    /// Scope this tool to an allow-list of skill names (per-subagent,
+    /// from `AgentDef::skills`). The store handle is shared unchanged.
+    pub fn with_allowed(
+        mut self,
+        allowed: std::sync::Arc<std::collections::HashSet<String>>,
+    ) -> Self {
+        self.allowed = Some(allowed);
+        self
     }
 
     /// Clone of the internal store handle. Lets the REPL re-populate the
@@ -1361,6 +1408,25 @@ impl Tool for SkillTool {
 
     async fn call(&self, input: Value) -> Result<String> {
         let name = crate::tools::req_str(&input, "name")?;
+
+        // Per-subagent scoping: refuse skills outside this agent's
+        // allow-list (AgentDef::skills) before touching the shared store.
+        if let Some(allowed) = &self.allowed {
+            if !allowed.contains(name) {
+                let mut names: Vec<&str> = allowed.iter().map(String::as_str).collect();
+                names.sort_unstable();
+                return Err(Error::Tool(format!(
+                    "skill '{}' is not available to this agent. Allowed: {}",
+                    name,
+                    if names.is_empty() {
+                        "none".to_string()
+                    } else {
+                        names.join(", ")
+                    }
+                )));
+            }
+        }
+
         let store = self.store.lock().unwrap();
 
         let skill = store.get(name).ok_or_else(|| {
@@ -1388,6 +1454,16 @@ impl Tool for SkillTool {
         // notices on every invocation. Idempotent: pip install with
         // already-installed deps is a no-op + cached.
         append_skill_runtime_hints(&mut result, &skill.dir);
+
+        // Open the tool gate this skill declares (if any), making the
+        // gated tool group visible to the model from the next turn. The
+        // gate is process-global and session-sticky (dev-plan/43).
+        if let Some(gate) = skill.tool_gate.as_deref() {
+            crate::tools::activate_gate(gate);
+            result.push_str(&format!(
+                "\n\n_(The `{gate}` tools are now available for this session.)_\n"
+            ));
+        }
 
         // Resolve the effective model recommendation. settings.json
         // may carry a per-skill override (e.g.
@@ -1420,6 +1496,10 @@ impl Tool for SkillTool {
         }
 
         Ok(result)
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
     }
 }
 
@@ -1523,11 +1603,24 @@ fn suggest_interpreter(path: &Path) -> Option<&'static str> {
 
 pub struct SkillListTool {
     store: std::sync::Arc<std::sync::Mutex<SkillStore>>,
+    allowed: Option<std::sync::Arc<std::collections::HashSet<String>>>,
 }
 
 impl SkillListTool {
     pub fn new_from_handle(store: std::sync::Arc<std::sync::Mutex<SkillStore>>) -> Self {
-        Self { store }
+        Self {
+            store,
+            allowed: None,
+        }
+    }
+
+    /// Scope listing to a per-subagent allow-list (`AgentDef::skills`).
+    pub fn with_allowed(
+        mut self,
+        allowed: std::sync::Arc<std::collections::HashSet<String>>,
+    ) -> Self {
+        self.allowed = Some(allowed);
+        self
     }
 }
 
@@ -1550,7 +1643,16 @@ impl Tool for SkillListTool {
     }
     async fn call(&self, _input: Value) -> Result<String> {
         let store = self.store.lock().unwrap();
-        let mut entries: Vec<&SkillDef> = store.skills.values().collect();
+        let mut entries: Vec<&SkillDef> = store
+            .skills
+            .values()
+            .filter(|s| {
+                self.allowed
+                    .as_ref()
+                    .map(|a| a.contains(&s.name))
+                    .unwrap_or(true)
+            })
+            .collect();
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         if entries.is_empty() {
             return Ok("No skills installed. Use /skill marketplace to browse, \
@@ -1579,11 +1681,24 @@ impl Tool for SkillListTool {
 
 pub struct SkillSearchTool {
     store: std::sync::Arc<std::sync::Mutex<SkillStore>>,
+    allowed: Option<std::sync::Arc<std::collections::HashSet<String>>>,
 }
 
 impl SkillSearchTool {
     pub fn new_from_handle(store: std::sync::Arc<std::sync::Mutex<SkillStore>>) -> Self {
-        Self { store }
+        Self {
+            store,
+            allowed: None,
+        }
+    }
+
+    /// Scope search to a per-subagent allow-list (`AgentDef::skills`).
+    pub fn with_allowed(
+        mut self,
+        allowed: std::sync::Arc<std::collections::HashSet<String>>,
+    ) -> Self {
+        self.allowed = Some(allowed);
+        self
     }
 }
 
@@ -1620,6 +1735,11 @@ impl Tool for SkillSearchTool {
         let q = query.to_lowercase();
         let mut hits: Vec<(u8, &SkillDef)> = Vec::new();
         for s in store.skills.values() {
+            if let Some(a) = &self.allowed {
+                if !a.contains(&s.name) {
+                    continue;
+                }
+            }
             if s.name.to_lowercase().contains(&q) {
                 hits.push((0, s));
             } else if s.description.to_lowercase().contains(&q) {
@@ -1892,6 +2012,20 @@ mod tests {
         assert!(matches!(skill.content, SkillContent::Eager(_)));
         // Body content is non-empty and recognizable.
         assert!(skill.content().contains("Extract"));
+    }
+
+    #[test]
+    fn seed_builtins_includes_gui_shell_with_tool_gate() {
+        let mut store = SkillStore::default();
+        store.seed_builtins();
+        let skill = store
+            .get("gui-shell")
+            .expect("gui-shell should be seeded as a built-in");
+        assert_eq!(skill.name, "gui-shell");
+        // The `tool-gate:` frontmatter must parse so SkillTool::call can
+        // open the gate that surfaces GuiShellCreate etc.
+        assert_eq!(skill.tool_gate.as_deref(), Some("gui-shell"));
+        assert!(skill.content().contains("GuiShellCreate"));
     }
 
     #[test]
@@ -2248,6 +2382,61 @@ mod tests {
         );
         assert_eq!(s.content(), "BODY");
         assert!(matches!(s.content, SkillContent::Eager(_)));
+    }
+
+    /// Per-subagent allow-list scopes load (Skill), list (SkillList),
+    /// and search (SkillSearch) to exactly the named skills.
+    #[tokio::test]
+    async fn skill_allow_list_scopes_load_list_search() {
+        let mut store = SkillStore::default();
+        store.skills.insert(
+            "pdf".into(),
+            SkillDef::new_eager(
+                "pdf".into(),
+                "work with pdf".into(),
+                "".into(),
+                PathBuf::from("/tmp"),
+                "PDF BODY".into(),
+            ),
+        );
+        store.skills.insert(
+            "xlsx".into(),
+            SkillDef::new_eager(
+                "xlsx".into(),
+                "work with xlsx".into(),
+                "".into(),
+                PathBuf::from("/tmp"),
+                "XLSX BODY".into(),
+            ),
+        );
+        let handle = std::sync::Arc::new(std::sync::Mutex::new(store));
+        let allowed = std::sync::Arc::new(
+            ["pdf".to_string()]
+                .into_iter()
+                .collect::<std::collections::HashSet<String>>(),
+        );
+
+        let skill = SkillTool::new_from_handle(handle.clone()).with_allowed(allowed.clone());
+        assert!(skill
+            .call(json!({"name": "pdf"}))
+            .await
+            .unwrap()
+            .contains("PDF BODY"));
+        let err = skill.call(json!({"name": "xlsx"})).await.unwrap_err();
+        assert!(
+            format!("{err}").contains("not available to this agent"),
+            "got: {err}"
+        );
+
+        let list = SkillListTool::new_from_handle(handle.clone()).with_allowed(allowed.clone());
+        let out = list.call(json!({})).await.unwrap();
+        assert!(out.contains("pdf"));
+        assert!(!out.contains("xlsx"), "xlsx must be hidden: {out}");
+
+        let search = SkillSearchTool::new_from_handle(handle).with_allowed(allowed);
+        let out = search.call(json!({"query": "work with"})).await.unwrap();
+        assert!(out.contains("pdf"));
+        assert!(!out.contains("xlsx"), "xlsx must be hidden: {out}");
     }
 
     #[test]

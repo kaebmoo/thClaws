@@ -69,6 +69,7 @@ pub mod codex_auth_store;
 pub mod commands;
 pub mod compaction;
 pub mod config;
+pub mod confine;
 pub mod context;
 #[cfg(feature = "cost_bridge")]
 pub mod cost_bridge;
@@ -103,6 +104,8 @@ pub mod kms;
 // Both gated behind the `kms_search_index` Cargo feature (opt-in
 // forever per D3) so users / operators without KMSes don't pay the
 // tantivy + dict binary-size cost.
+/// Shared bridge transport primitives (LINE / Messenger / phone-home) — dev-plan/44.
+pub mod bridge;
 #[cfg(feature = "kms_search_index")]
 pub mod kms_search_index;
 pub mod line;
@@ -117,6 +120,9 @@ pub mod model_catalogue;
 pub mod multi_tenant;
 pub mod oauth;
 pub mod permissions;
+/// Phone-home channel — local engine dials out to thClaws.cloud over the
+/// shared bridge transport (dev-plan/44 Tier 1).
+pub mod phone_home;
 pub mod plugins;
 pub mod policy;
 pub mod prompts;

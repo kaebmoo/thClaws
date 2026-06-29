@@ -558,10 +558,12 @@ fn request_gui_shutdown(
         }
     }
     let _ = shared.input_tx.send(ShellInput::SaveAndQuit);
-    // Kill any spawned teammate processes.
-    let _ = std::process::Command::new("pkill")
-        .args(["-f", "team-agent"])
-        .status();
+    // Kill ONLY this session's teammate processes (scoped by absolute
+    // --team-dir). The old broad `pkill -f team-agent` killed teammates of
+    // other thClaws sessions/projects. Teammates run in tmux-server-owned
+    // panes, so they are NOT reclaimed when the GUI process exits — the
+    // explicit scoped kill is required.
+    crate::team::kill_my_teammates();
     // Snapshot browser cookies and kill the engine-managed Chromium so
     // it doesn't orphan — a surviving orphan breaks the next launch's
     // playwright-mcp CDP attach ("Browser context management is not
@@ -795,7 +797,7 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                             "type": "approval_request",
                             "id": req.id,
                             "tool_name": req.tool_name,
-                            "input": req.input,
+                            "input": crate::tool_display::redact_json_value(&req.input),
                             "summary": req.summary,
                             "originator": req.originator,
                         });
@@ -808,7 +810,7 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                     "type": "approval_request",
                     "id": req.id,
                     "tool_name": req.tool_name,
-                    "input": req.input,
+                    "input": crate::tool_display::redact_json_value(&req.input),
                     "summary": req.summary,
                     "originator": req.originator,
                 });
@@ -913,6 +915,12 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                                 "gif" => "image/gif",
                                 "webp" => "image/webp",
                                 "ico" => "image/x-icon",
+                                // PDFs render in an <iframe src=/file-asset>;
+                                // the WebView only invokes its built-in PDF
+                                // viewer when the Content-Type is correct —
+                                // octet-stream gave a blank/black pane.
+                                "pdf" => "application/pdf",
+                                "epub" => "application/epub+zip",
                                 "woff" => "font/woff",
                                 "woff2" => "font/woff2",
                                 "ttf" => "font/ttf",

@@ -136,6 +136,12 @@ pub enum ShellInput {
     /// Lighter than [`Self::ReloadConfig`] (no provider rebuild) — only
     /// touches `state.system_prompt`.
     InstructionsChanged,
+    /// The user just saved an agent def via the GUI's `/agent new` /
+    /// `/agent edit` editor. Reload `state.agent_defs` from disk so a
+    /// newly-created agent is immediately spawnable via `/agent <name>`
+    /// in the same session. The model-driven Task tool keeps the def
+    /// snapshot it captured at init (refreshes on next session).
+    AgentDefsChanged,
     /// Widget-initiated tool call from an embedded MCP App. The
     /// originating widget called `app.callServerTool({name, arguments})`;
     /// we look up the qualified tool in the registry, run it, and
@@ -184,6 +190,22 @@ pub enum ShellInput {
         text: String,
         respond: tokio::sync::oneshot::Sender<String>,
     },
+    /// dev-plan/44 Tier 1: connect the phone-home tunnel from a saved
+    /// `PhoneHomeConfig` (boot auto-reconnect, or the GUI "Phone home"
+    /// toggle). The worker spawns the bridge session and stashes the
+    /// `PhoneHomeHandle`. Unlike LINE/Messenger it does NOT swap the
+    /// permission posture — approvals stay local (the cloud drives the
+    /// agent, so local approval prompts are the safety gate).
+    PhoneHomeConnect(crate::phone_home::PhoneHomeConfig),
+    /// dev-plan/44: IPC `phone_home_disconnect`. Worker cancels the
+    /// session, drops the handle, and deletes the on-disk config.
+    PhoneHomeDisconnect,
+    /// dev-plan/44: IPC `phone_home_pair`. Worker exchanges the stored
+    /// thClaws.cloud CLI token for a binding via the relay's `/ph/pair`,
+    /// saves `.thclaws/phone-home.json`, then connects. Carried out in a
+    /// spawned task (it does a network round-trip) that emits a
+    /// `PhoneHomeConnect` on success.
+    PhoneHomePair,
     /// dev-plan/29 Tier 1: connect the Telegram bridge from a saved
     /// `TelegramConfig` (GUI Connect modal, or boot auto-reconnect). The
     /// worker validates the token via `getMe`, spawns the polling
@@ -282,6 +304,11 @@ pub enum ViewEvent {
         revision: u32,
     },
     TurnDone,
+    /// Per-turn token/cost footer (GUI parity with the CLI REPL's
+    /// `[tokens: …in/…out · …s · $… session]` line). Carries the plain
+    /// text; the chat surface renders it as a dim footer line and the
+    /// terminal surface prints it dim. Emitted just before `TurnDone`.
+    TurnUsage(String),
     /// The process-wide agent_activity busy state transitioned. The
     /// event-translator turns this into a `gui_busy_changed` IPC
     /// envelope carrying the current `busy_meta()` so the workspace
@@ -359,6 +386,21 @@ pub enum ViewEvent {
     /// CLI renderer ignores this; the REPL handler prints help text
     /// instead since a multi-field form doesn't fit a terminal line.
     ScheduleAddOpen(String),
+    /// Open the agent-editor modal — pre-built JSON payload shaped
+    /// `{type: "agent_editor_open", mode: "new"|"edit", name, body}`
+    /// where `body` is the full `.md` (YAML frontmatter + system
+    /// prompt). Emitted by `/agent new` / `/agent edit` from a GUI
+    /// surface; the CLI renderer ignores it (the REPL handler prints a
+    /// GUI-only hint). Save round-trips via the `agent_save` IPC.
+    AgentEditorOpen(String),
+    /// Open the unified marketplace browser modal — pre-built JSON
+    /// payload `{type:"marketplace_open", source, cacheAge, catalog:{
+    /// skills,mcp_servers,plugins,subagents}, installed:{skills,subagents}}`.
+    /// Emitted by `/marketplace` from a GUI surface. Install + refresh
+    /// happen by injecting slash commands through the `shell_input` IPC,
+    /// so there's no dedicated install channel. CLI renderer ignores it
+    /// (the REPL `/marketplace` prints a combined text summary instead).
+    MarketplaceOpen(String),
     /// The session's on-disk JSONL has crossed the fork threshold.
     /// Frontend renders a dismissible banner with a "Fork into new
     /// session with summary" action. Fired once per session.
@@ -733,6 +775,11 @@ pub struct WorkerState {
     /// approver, restored on disconnect. Mirrors `line_pre_*`.
     pub telegram_pre_mode: Option<crate::permissions::PermissionMode>,
     pub telegram_pre_approver: Option<std::sync::Arc<dyn crate::permissions::ApprovalSink>>,
+    /// dev-plan/44 Tier 1: active phone-home tunnel session. `Some` only
+    /// while the bridge WS task is running; `phone_home_disconnect`
+    /// cancels + clears it. No pre-mode/approver stash — phone-home keeps
+    /// approvals local (see `ShellInput::PhoneHomeConnect`).
+    pub phone_home_session: Option<crate::phone_home::PhoneHomeHandle>,
     /// dev-plan/31: active Facebook Page Messenger bridge session. `Some`
     /// only while the relay WS task is running; `messenger_disconnect`
     /// cancels + clears it. Mirrors `line_session`.
@@ -817,6 +864,17 @@ impl WorkerState {
             self.tool_registry.remove("ImageToVideo");
             self.tool_registry.remove("MediaJobStatus");
         }
+
+        if self.config.hal_enabled {
+            self.tool_registry.register(std::sync::Arc::new(
+                crate::tools::YouTubeTranscriptTool::new(),
+            ));
+            self.tool_registry
+                .register(std::sync::Arc::new(crate::tools::WebScrapeTool::new()));
+        } else {
+            self.tool_registry.remove("YouTubeTranscript");
+            self.tool_registry.remove("WebScrape");
+        }
         let prev_perm = self.agent.permission_mode;
         let prev_thinking = self.agent.thinking_budget;
         let new_agent = Agent::new(
@@ -842,6 +900,14 @@ impl WorkerState {
         if let Some(h) = prev_history {
             self.agent.set_history(h);
         }
+        // L5: `rebuild_agent` mutates `tool_registry` directly (the
+        // image/video tool toggle above). Keep the subagent factory's
+        // snapshot in step so a Task spawned after a settings-driven
+        // rebuild (e.g. `imageToolsEnabled` flip via the settings
+        // watcher) sees the same tool set the parent does. Callers that
+        // also rebuild the prompt sync again — `sync_factory_snapshot`
+        // is idempotent.
+        self.sync_factory_snapshot();
         Ok(())
     }
 
@@ -880,10 +946,11 @@ impl WorkerState {
     /// tools (refcount bumps, no tool work). The RwLock is held for
     /// two field writes and nothing else.
     pub fn sync_factory_snapshot(&self) {
+        // L2: recover from a poisoned lock rather than panicking.
         let mut snap = self
             .factory_snapshot
             .write()
-            .expect("factory snapshot write lock");
+            .unwrap_or_else(|e| e.into_inner());
         snap.system = self.system_prompt.clone();
         snap.tools = self.tool_registry.clone();
     }
@@ -1357,6 +1424,13 @@ async fn run_worker(
         tools.register(std::sync::Arc::new(crate::tools::MediaJobStatusTool));
     }
 
+    if config.hal_enabled {
+        tools.register(std::sync::Arc::new(
+            crate::tools::YouTubeTranscriptTool::new(),
+        ));
+        tools.register(std::sync::Arc::new(crate::tools::WebScrapeTool::new()));
+    }
+
     // Tool-parity audit fix: respect `searchEngine` config override
     // (REPL had this; GUI/serve fell back to "auto" silently).
     // `HashMap::insert` in `ToolRegistry::register` overwrites the
@@ -1387,12 +1461,11 @@ async fn run_worker(
     // teammate process that happened to share this code path.
     let is_teammate = std::env::var("THCLAWS_TEAM_AGENT").is_ok();
     crate::team::set_is_team_lead(team_enabled && !is_teammate);
-    // M6.34 TEAM3: capture team_dir so the GUI's lead-process exit
-    // can scope the kill to its own teammates only. Even though the
-    // GUI doesn't currently call kill_my_teammates() at shutdown
-    // (the OS reclaims child processes when the GUI quits), recording
-    // the dir keeps parity with the CLI lead and unblocks future
-    // explicit "Stop all teammates" UI affordances.
+    // M6.34 TEAM3: capture team_dir so the GUI's lead-process exit can
+    // scope the kill to its own teammates only. The GUI DOES call
+    // kill_my_teammates() at shutdown (gui.rs) — teammates run in
+    // tmux-server-owned panes, not GUI child processes, so they are NOT
+    // reclaimed when the GUI quits; the explicit scoped kill is required.
     if team_enabled && !is_teammate {
         let td = std::env::var("THCLAWS_TEAM_DIR")
             .map(std::path::PathBuf::from)
@@ -1579,7 +1652,17 @@ async fn run_worker(
     // came back "unknown tool: Task". SUB4: cancel is threaded into
     // the factory so ctrl-C in the GUI stops in-flight subagents
     // (CLI passes None — no cancel plumbing there yet).
-    let perm_mode = if config.permissions == "auto" {
+    let perm_mode = if config.permissions == "ask" {
+        // Explicit Ask is honored even when hosted — it works via the serve
+        // approval modal (delivered over the WS + re-emitted on reconnect).
+        crate::permissions::PermissionMode::Ask
+    } else if config.permissions == "auto" {
+        crate::permissions::PermissionMode::Auto
+    } else if std::env::var("THCLAWS_HOSTED").is_ok() {
+        // Hosted safety net: an unexpected non-auto/non-ask value (e.g. a
+        // settings.json parse fallback) must not leave a managed cloud
+        // sandbox stuck in Ask with no approval UI — that's the "Write hangs,
+        // no file" failure. Default hosted to Auto.
         crate::permissions::PermissionMode::Auto
     } else {
         crate::permissions::PermissionMode::Ask
@@ -1700,7 +1783,16 @@ async fn run_worker(
                 let Some(kind) = crate::providers::ProviderKind::detect(candidate) else {
                     continue;
                 };
-                if !kind.has_key_available() {
+                // Usable if a local key exists OR the gateway proxy can serve
+                // this (featured) candidate — so a proxy-only user gets the
+                // skill's recommended model instead of falling through.
+                let gateway_ok = {
+                    let mut cfg = crate::config::AppConfig::load().unwrap_or_default();
+                    cfg.model = candidate.clone();
+                    crate::providers::thclaws_gateway::gateway_overlay_for_model(&cfg, kind)
+                        .is_some()
+                };
+                if !kind.has_key_available() && !gateway_ok {
                     continue;
                 }
                 if let Ok(mut g) = override_handle.lock() {
@@ -1743,7 +1835,20 @@ async fn run_worker(
         .map(|r| r.sessions_dir.clone())
         .or_else(SessionStore::default_path)
         .map(SessionStore::new);
-    let current_session = Session::new(&config.model, cwd.to_string_lossy());
+    // Reuse the most-recent session when it's still EMPTY instead of
+    // minting a new one on every launch. Each mint writes a header below
+    // (so SessionStore::list sees it), so without this an empty session
+    // file would pile up every time the app starts. A non-empty latest is
+    // left untouched — desktop still lands on a clean session (e14fdf8a),
+    // just without spawning a duplicate empty one. The reused session
+    // adopts the current default model.
+    let mut current_session = Session::new(&config.model, cwd.to_string_lossy());
+    if let Some(store) = session_store.as_ref() {
+        if let Ok(Some(mut empty)) = store.reuse_empty_latest() {
+            empty.model = config.model.clone();
+            current_session = empty;
+        }
+    }
     // Point the plan-persistence arc at the initial session's JSONL
     // path so any SubmitPlan / UpdatePlanStep call before the first
     // /load gets persisted. Subsequent session swaps reassign this
@@ -1813,6 +1918,7 @@ async fn run_worker(
         line_session: None,
         line_pre_mode: None,
         line_pre_approver: None,
+        phone_home_session: None,
         telegram_session: None,
         telegram_pre_mode: None,
         telegram_pre_approver: None,
@@ -1869,14 +1975,28 @@ async fn run_worker(
         Err(e) => eprintln!("[messenger] failed to load on-disk config: {e}"),
     }
 
+    // dev-plan/44 Tier 1: auto-reconnect the phone-home tunnel on boot
+    // when a binding is on disk. Mirrors the blocks above.
+    match crate::phone_home::PhoneHomeConfig::load() {
+        Ok(Some(cfg)) if !cfg.binding_token.trim().is_empty() => {
+            let _ = input_tx_self.send(ShellInput::PhoneHomeConnect(cfg));
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("[phone-home] failed to load on-disk config: {e}"),
+    }
+
     // Lead inbox poller — parity with repl.rs:1524. Without this, teammates
     // message the lead, messages pile up in `.thclaws/team/inboxes/lead.json`
     // unread, and the team stalls waiting for the lead to react.
     if team_enabled {
         let poller_tx = input_tx_self.clone();
         tokio::spawn(async move {
-            let mailbox = crate::team::Mailbox::new(crate::team::Mailbox::default_dir());
+            // Absolute team dir (not the relative default) so a mid-session
+            // cwd change doesn't desync this poller from the teammates.
+            let mailbox = crate::team::Mailbox::new(crate::team::resolved_team_dir());
             loop {
+                // Lead heartbeat for liveness/staleness checks.
+                let _ = mailbox.write_status("lead", "active", None);
                 let unread = mailbox.read_unread("lead").unwrap_or_default();
                 if !unread.is_empty() {
                     let ids: Vec<String> = unread.iter().map(|m| m.id.clone()).collect();
@@ -1983,7 +2103,20 @@ async fn run_worker(
                     let Some(target_kind) = loaded_kind else {
                         continue;
                     };
-                    if !kind_has_credentials(target_kind) {
+                    // Credentials are OK if the provider has a local key OR the
+                    // gateway proxy can serve the session's (featured) model —
+                    // mirror build_provider so a proxy-only user can load a
+                    // session recorded against a featured model with no BYOK key.
+                    let gateway_ok = {
+                        let mut probe = state.config.clone();
+                        probe.model = loaded.model.clone();
+                        crate::providers::thclaws_gateway::gateway_overlay_for_model(
+                            &probe,
+                            target_kind,
+                        )
+                        .is_some()
+                    };
+                    if !kind_has_credentials(target_kind) && !gateway_ok {
                         let provider_name = target_kind.name();
                         let env_hint = target_kind
                             .api_key_env()
@@ -2585,6 +2718,128 @@ async fn run_worker(
                 };
                 let _ = events_tx.send(ViewEvent::TelegramStatus(payload.to_string()));
             }
+            ShellInput::PhoneHomeConnect(ph_cfg) => {
+                // Last connect wins — cancel any prior tunnel.
+                if let Some(prev) = state.phone_home_session.take() {
+                    prev.cancel.cancel();
+                }
+                let handle = crate::phone_home::spawn(ph_cfg, input_tx_self.clone());
+                let server_url = handle.server_url.clone();
+
+                // dev-plan/44 streaming: fan every ViewEvent up the tunnel
+                // so a connected dashboard (/talk) mirrors the live
+                // conversation — local turns included. A dedicated
+                // sequencer keeps pushes ordered (same fix as the LINE
+                // chat-bridge). Lives until the tunnel's cancel fires.
+                {
+                    let fan_client = handle.client.clone();
+                    let fan_cancel = handle.cancel.clone();
+                    let mut event_rx = events_tx.subscribe();
+                    tokio::spawn(async move {
+                        let (tx, mut rx) =
+                            tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
+                        let push_client = fan_client.clone();
+                        tokio::spawn(async move {
+                            while let Some(env) = rx.recv().await {
+                                if let Err(e) = push_client.push_event(env).await {
+                                    eprintln!("[phone-home] event push failed: {e}");
+                                }
+                            }
+                        });
+                        loop {
+                            tokio::select! {
+                                _ = fan_cancel.cancelled() => break,
+                                ev = event_rx.recv() => match ev {
+                                    Ok(ev) => {
+                                        if let Some(env) = view_event_to_chat_envelope(&ev) {
+                                            let _ = tx.send(env);
+                                        }
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                        continue
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
+                        }
+                    });
+                }
+
+                state.phone_home_session = Some(handle);
+                // No permission-posture swap: approvals stay on the local
+                // Ask/Auto/Plan posture so a cloud-driven turn still hits
+                // the user's local approval prompts (dev-plan/44 security
+                // note). A status pill / approval-over-bridge is follow-up;
+                // for now a SlashOutput notice is enough.
+                let _ = events_tx.send(ViewEvent::SlashOutput(format!(
+                    "[thClaws Remote] connected → {server_url} (approvals stay local)"
+                )));
+            }
+            ShellInput::PhoneHomeDisconnect => {
+                if let Some(handle) = state.phone_home_session.take() {
+                    handle.cancel.cancel();
+                }
+                // Best-effort unpair so the relay drops the binding, then
+                // delete the on-disk config so the next boot doesn't
+                // auto-reconnect.
+                if let Ok(Some(cfg)) = crate::phone_home::PhoneHomeConfig::load() {
+                    let client = std::sync::Arc::new(crate::phone_home::build_client(
+                        cfg,
+                        crate::cancel::CancelToken::new(),
+                    ));
+                    tokio::spawn(async move {
+                        if let Err(e) = client.unpair().await {
+                            eprintln!("[phone-home] /unpair failed (continuing): {e}");
+                        }
+                    });
+                }
+                if let Err(e) = crate::phone_home::PhoneHomeConfig::delete() {
+                    eprintln!("[phone-home] delete on-disk config: {e}");
+                }
+                let _ = events_tx.send(ViewEvent::SlashOutput(
+                    "[thClaws Remote] disconnected".into(),
+                ));
+            }
+            ShellInput::PhoneHomePair => {
+                match crate::cloud::token() {
+                    None => {
+                        let _ = events_tx.send(ViewEvent::SlashOutput(
+                            "[thClaws Remote] not enabled: log in to thClaws.cloud first (Settings → thClaws.cloud)".into(),
+                        ));
+                    }
+                    Some(token) => {
+                        let relay_base = std::env::var("THCLAWS_PHONE_HOME_SERVER")
+                            .ok()
+                            .filter(|s| !s.trim().is_empty())
+                            .unwrap_or_else(|| {
+                                crate::phone_home::config::DEFAULT_SERVER_URL.to_string()
+                            });
+                        let machine_label =
+                            std::env::var("HOSTNAME").unwrap_or_else(|_| "thclaws".to_string());
+                        let tx = input_tx_self.clone();
+                        let events = events_tx.clone();
+                        // Network round-trip — spawn so the worker loop
+                        // keeps draining input. On success, connect.
+                        tokio::spawn(async move {
+                            match crate::phone_home::pair(&relay_base, &token, Some(machine_label))
+                                .await
+                            {
+                                Ok(cfg) => {
+                                    let _ = events.send(ViewEvent::SlashOutput(
+                                        "[thClaws Remote] enabled — connecting…".into(),
+                                    ));
+                                    let _ = tx.send(ShellInput::PhoneHomeConnect(cfg));
+                                }
+                                Err(e) => {
+                                    let _ = events.send(ViewEvent::SlashOutput(format!(
+                                        "[thClaws Remote] enable failed: {e}"
+                                    )));
+                                }
+                            }
+                        });
+                    }
+                }
+            }
             ShellInput::MessengerConnect(msgr_cfg) => {
                 // New connect always wins — cancel any prior session.
                 if let Some(prev) = state.messenger_session.take() {
@@ -2807,33 +3062,58 @@ async fn run_worker(
                 // stale state. No-op if the deleted id wasn't
                 // current.
                 if state.session.id == id {
-                    save_history(&state.agent, &mut state.session, &state.session_store);
+                    // Drop the deleted session's in-memory history first so
+                    // neither the fallback load nor the fresh mint can
+                    // resurrect the just-deleted file via `save_history`
+                    // (which no-ops on empty history).
                     state.agent.clear_history();
-                    state.session = Session::new(&state.config.model, state.cwd.to_string_lossy());
-                    state.warned_file_size = false;
-                    if let (Some(store), Ok(mut g)) =
-                        (state.session_store.as_ref(), plan_persist_path.lock())
-                    {
-                        let path = store.path_for(&state.session.id);
-                        let _ = state.session.write_header_if_missing(&path);
-                        *g = Some(path);
+                    // Prefer activating the most recent *remaining* session
+                    // over minting a blank one — deleting a session and
+                    // landing on a surprise empty session is poor UX. The
+                    // store's `list()` is sorted newest-first and the
+                    // deleted id is already gone from disk.
+                    let latest_id = state
+                        .session_store
+                        .as_ref()
+                        .and_then(|s| s.list().ok())
+                        .and_then(|metas| metas.into_iter().next().map(|m| m.id));
+                    if let Some(next_id) = latest_id {
+                        // Reuse the full LoadSession path (provider auto-
+                        // switch, history rehydrate, plan/goal restore,
+                        // HistoryReplaced + sidebar refresh). Re-queued so
+                        // the current handler returns first.
+                        let _ = input_tx_self.send(ShellInput::LoadSession(next_id));
+                    } else {
+                        // Nothing left to fall back to — mint a fresh one.
+                        state.session =
+                            Session::new(&state.config.model, state.cwd.to_string_lossy());
+                        state.warned_file_size = false;
+                        if let (Some(store), Ok(mut g)) =
+                            (state.session_store.as_ref(), plan_persist_path.lock())
+                        {
+                            let path = store.path_for(&state.session.id);
+                            let _ = state.session.write_header_if_missing(&path);
+                            *g = Some(path);
+                        }
+                        crate::tools::plan_state::clear();
+                        // M6.20 BUG M2 + M3: same reset on external delete
+                        // of the active session (sidebar trash icon while
+                        // in yolo mode would otherwise carry the flag into
+                        // the freshly-minted replacement).
+                        state.approver.reset_session_flag();
+                        let _ = crate::permissions::take_pre_plan_mode();
+                        crate::permissions::set_current_mode_and_broadcast(
+                            state.agent.permission_mode,
+                        );
+                        let _ = events_tx.send(ViewEvent::HistoryReplaced(Vec::new()));
+                        let _ = events_tx.send(ViewEvent::SessionListRefresh(build_session_list(
+                            &state.session_store,
+                            &state.session.id,
+                        )));
+                        let _ = events_tx.send(ViewEvent::SlashOutput(
+                            "(deleted the last session; minted a fresh one)".into(),
+                        ));
                     }
-                    crate::tools::plan_state::clear();
-                    // M6.20 BUG M2 + M3: same reset on external delete
-                    // of the active session (sidebar trash icon while
-                    // in yolo mode would otherwise carry the flag into
-                    // the freshly-minted replacement).
-                    state.approver.reset_session_flag();
-                    let _ = crate::permissions::take_pre_plan_mode();
-                    crate::permissions::set_current_mode_and_broadcast(state.agent.permission_mode);
-                    let _ = events_tx.send(ViewEvent::HistoryReplaced(Vec::new()));
-                    let _ = events_tx.send(ViewEvent::SessionListRefresh(build_session_list(
-                        &state.session_store,
-                        &state.session.id,
-                    )));
-                    let _ = events_tx.send(ViewEvent::SlashOutput(
-                        "(active session was deleted; minted a fresh session)".into(),
-                    ));
                 }
             }
             ShellInput::SessionRenamedExternal { id, title } => {
@@ -2906,11 +3186,17 @@ async fn run_worker(
                     Ok(()) => {
                         state.rebuild_system_prompt();
                         if model_changed {
-                            // Keep the same session id + JSONL file; just
-                            // update the `model` label so the header
-                            // reflects the active provider on the next
-                            // header write.
-                            state.session.model = state.config.model.clone();
+                            // Keep the same session id + JSONL file; append a
+                            // `model` event so the switch persists immediately
+                            // (not only on the next assistant line) and a
+                            // restore recovers it. Updates the label too.
+                            if let Some(store) = state.session_store.as_ref() {
+                                let path = store.path_for(&state.session.id);
+                                let model = state.config.model.clone();
+                                let _ = state.session.record_model_to(&path, &model);
+                            } else {
+                                state.session.model = state.config.model.clone();
+                            }
                         }
                         // Record the fingerprint so the watcher's
                         // follow-up dispatch is recognised as a dup.
@@ -2962,6 +3248,17 @@ async fn run_worker(
                     "[instructions] system prompt rebuilt — new content applies on next turn"
                         .into(),
                 ));
+            }
+            ShellInput::AgentDefsChanged => {
+                // The agent editor saved `.thclaws/agents/<name>.md`.
+                // Reload the worker's def snapshot (cheap, no agent
+                // rebuild) so side-channel `/agent <name>` spawns see
+                // the new/edited def right away.
+                let plugin_agent_dirs = crate::plugins::plugin_agent_dirs();
+                let mut reloaded =
+                    crate::agent_defs::AgentDefsConfig::load_with_extra(&plugin_agent_dirs);
+                reloaded.apply_builtin_subagent_overrides(&state.config);
+                state.agent_defs = reloaded;
             }
             ShellInput::ChangeCwd(new_cwd) => {
                 // No-op short-circuit: the StartupModal's "Start"
@@ -3515,6 +3812,26 @@ async fn handle_line(
                 return;
             }
             Some(g) => {
+                // Gap 1 — hard backstop. Past the iteration cap or a budget
+                // overrun (1.5× grace beyond the soft GOAL_BUDGET_LIMIT
+                // prompt), force the goal Blocked + abort the loop regardless
+                // of the model, so an unattended /goal continue loop can't
+                // burn unbounded cost.
+                if let Some(reason) = g.hard_limit_reached() {
+                    crate::goal_state::apply(|gg| {
+                        gg.status = crate::goal_state::GoalStatus::Blocked;
+                        gg.last_audit = Some(format!("auto-blocked (hard limit): {reason}"));
+                        true
+                    });
+                    let _ = events_tx.send(ViewEvent::SlashOutput(format!(
+                        "/goal continue — hard limit: {reason}. Auto-blocking goal + stopping loop."
+                    )));
+                    if let Some(loop_state) = state.active_loop.take() {
+                        loop_state.abort.abort();
+                    }
+                    let _ = events_tx.send(ViewEvent::TurnDone);
+                    return;
+                }
                 // Phase B2: anti-loop guard mirroring codex's runtime
                 // continuation suppression. If a /loop is wrapping us
                 // AND the previous turn produced zero tool calls (model
@@ -3632,6 +3949,72 @@ async fn handle_line(
         )
         .await;
         return;
+    }
+
+    // `/kms ingest <name> <file.pdf> --vision` intercept — the text layer is
+    // garbled (e.g. a broken Thai ToUnicode font that swaps า/ำ), which no
+    // text post-processing can repair. Route through the agent: PdfRead with
+    // `vision` renders the glyphs, the model transcribes, KmsWrite stores it.
+    if let Some(crate::repl::SlashCommand::KmsIngestPdf {
+        name,
+        file,
+        alias,
+        vision,
+        ..
+    }) = crate::repl::parse_slash(trimmed)
+    {
+        if vision {
+            if crate::kms::resolve(&name).is_none() {
+                let _ = events_tx.send(ViewEvent::SlashOutput(format!("no KMS named '{name}'")));
+                let _ = events_tx.send(ViewEvent::TurnDone);
+                return;
+            }
+            // KmsWrite registers only when a KMS is attached (kms_active).
+            if state.config.kms_active.is_empty() {
+                let _ = events_tx.send(ViewEvent::SlashOutput(format!(
+                    "/kms ingest {name} --vision: no KMS attached to this session. Run `/kms use {name}` first."
+                )));
+                let _ = events_tx.send(ViewEvent::TurnDone);
+                return;
+            }
+            let page = alias.unwrap_or_else(|| {
+                std::path::Path::new(&file)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("pdf-page")
+                    .to_string()
+            });
+            let abs = {
+                let p = std::path::PathBuf::from(&file);
+                if p.is_absolute() {
+                    p
+                } else {
+                    state.cwd.join(&p)
+                }
+            };
+            let rewritten = crate::repl::build_kms_ingest_pdf_vision_prompt(
+                &name,
+                &page,
+                &abs.to_string_lossy(),
+            );
+            let _ = events_tx.send(ViewEvent::SlashOutput(format!(
+                "(/kms ingest {name} {file} --vision → page `{page}` — render + transcribe via PdfRead vision)"
+            )));
+            let stream = Box::pin(state.agent.run_turn(rewritten));
+            let lead_mb = crate::team::Mailbox::new(crate::team::Mailbox::default_dir());
+            let _ = lead_mb.write_status("lead", "working", None);
+            drive_turn_stream(
+                stream,
+                state,
+                events_tx,
+                cancel,
+                &lead_mb,
+                input_tx,
+                Some(state.session.id.clone()),
+            )
+            .await;
+            return;
+        }
     }
 
     // `/kms dump <name> <text>` intercept — rewrite into a routing
@@ -4044,6 +4427,19 @@ async fn drive_turn_stream(
         let _ = lead_mb.write_status("lead", "idle", Some(&msg));
         std::panic::resume_unwind(payload);
     }
+
+    // After a turn that ran tools, push a fresh KMS snapshot so the sidebar
+    // reflects any KMS an agent/workflow just created or wrote — e.g. the
+    // research agent's synthesizer/fetcher write pages via `Write` into
+    // `.thclaws/kms/**`, which no KMS-tool hook catches. `build_kms_update_payload`
+    // re-scans disk, so plain-Write pages show up without a `/reload`. The native
+    // `/research` job manager already pushes this on Done (see set_broadcaster
+    // above); this covers the catalog-agent path that runs via WorkflowRun.
+    if state.last_turn_made_tool_calls {
+        let _ = events_tx.send(ViewEvent::KmsUpdate(
+            crate::gui::build_kms_update_payload().to_string(),
+        ));
+    }
 }
 
 async fn drive_turn_stream_inner(
@@ -4101,6 +4497,10 @@ async fn drive_turn_stream_inner(
             _broadcast_on_drop: BroadcastOnDrop(None),
         },
     };
+
+    // Wall-clock start so the per-turn usage footer (emitted on Done)
+    // can report elapsed time, matching the CLI REPL's token line.
+    let turn_start = std::time::Instant::now();
 
     // Rolling buffer for progress-line extraction. Bounded so the
     // regex doesn't scan unbounded text on long turns; we only care
@@ -4214,6 +4614,15 @@ async fn drive_turn_stream_inner(
                         .unwrap_or_else(crate::usage::UsageTracker::default_path),
                 );
                 tracker.record(provider_name, &state.config.model, &usage);
+                if let Ok(cwd) = std::env::current_dir() {
+                    crate::usage::append_usage_ledger(
+                        &cwd,
+                        "main",
+                        provider_name,
+                        &state.config.model,
+                        &usage,
+                    );
+                }
 
                 // Cost accounting (GUI parity with the CLI REPL). Drain
                 // any pending buddy resets first so a mid-turn Backspace
@@ -4260,6 +4669,29 @@ async fn drive_turn_stream_inner(
                     &state.session_store,
                     &state.session.id,
                 )));
+
+                // Per-turn usage footer (GUI parity with the CLI REPL).
+                let cache_info = match (
+                    usage.cache_creation_input_tokens,
+                    usage.cache_read_input_tokens,
+                ) {
+                    (Some(c), Some(r)) if c > 0 || r > 0 => format!(" · cache: +{c}w/{r}r"),
+                    _ => String::new(),
+                };
+                let cost_str = if state.session_cost_usd > 0.0 {
+                    format!(" · ${:.4} session", state.session_cost_usd)
+                } else {
+                    String::new()
+                };
+                let _ = events_tx.send(ViewEvent::TurnUsage(format!(
+                    "[tokens: {}in/{}out{} · {}{}]",
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    cache_info,
+                    crate::tool_display::format_duration(turn_start.elapsed()),
+                    cost_str
+                )));
+
                 let _ = events_tx.send(ViewEvent::TurnDone);
             }
             Err(e) => {
@@ -4617,6 +5049,15 @@ async fn handle_team_messages(
                         .unwrap_or_else(crate::usage::UsageTracker::default_path),
                 );
                 tracker.record(provider_name, &state.config.model, &usage);
+                if let Ok(cwd) = std::env::current_dir() {
+                    crate::usage::append_usage_ledger(
+                        &cwd,
+                        "main",
+                        provider_name,
+                        &state.config.model,
+                        &usage,
+                    );
+                }
                 save_history(&state.agent, &mut state.session, &state.session_store);
                 let _ = events_tx.send(ViewEvent::SessionListRefresh(build_session_list(
                     &state.session_store,
@@ -4667,6 +5108,14 @@ fn format_provider_model(provider: &str, model: &str) -> String {
 fn view_event_to_chat_envelope(ev: &ViewEvent) -> Option<serde_json::Value> {
     use serde_json::json;
     match ev {
+        // The user's own message — so a connected surface (phone-home
+        // /talk) mirrors what was typed locally. The LINE browser SPA has
+        // no `user_message` case so it ignores this; the phone-home /talk
+        // page renders it as a user bubble. (dev-plan/44 streaming)
+        ViewEvent::UserPrompt(text) => Some(json!({
+            "type": "user_message",
+            "text": text,
+        })),
         ViewEvent::AssistantTextDelta(text) => {
             // Apply the same ANSI + tool-narration strip the LINE
             // OA path uses, otherwise the model's echoed

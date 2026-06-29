@@ -6,6 +6,7 @@
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use thclaws_core::bridge::BridgeConfig;
 use thclaws_core::config::AppConfig;
 use thclaws_core::dotenv::load_dotenv;
 use thclaws_core::repl::{run_print_mode, run_repl};
@@ -326,6 +327,14 @@ enum Command {
         #[arg(long, global = true, value_name = "URL")]
         cloud_url: Option<String>,
     },
+    /// Package or validate an agent folder headlessly (dev-plan/47.5).
+    /// `pack` produces the same fused tarball `/cloud publish` uploads;
+    /// `validate` lints the folder before publish. Lets scripts/CI reuse
+    /// the canonical packer instead of re-deriving the strip rules.
+    Agent {
+        #[command(subcommand)]
+        cmd: AgentCmd,
+    },
     /// GUI Shell authoring (dev-plan/39 Tier 2) — scaffold a new shell
     /// from a vendored template, preview locally with hot-reload, lint
     /// the manifest, or pack into a single-file HTML for publish.
@@ -333,6 +342,63 @@ enum Command {
     Shell {
         #[command(subcommand)]
         cmd: ShellCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentCmd {
+    /// Scaffold a best-practice agent skeleton (dev-plan/48.6) that
+    /// `thclaws agent validate` passes out of the box: role subagents
+    /// (planner / worker / read-only verifier) + output_schema files,
+    /// and a deterministic workflow for the static patterns.
+    New {
+        /// Destination folder (created if missing).
+        path: std::path::PathBuf,
+        /// Starter shape: static-pipeline | batch-fanout | dynamic.
+        #[arg(long, default_value = "static-pipeline")]
+        pattern: String,
+        /// Agent id/name (defaults to the folder name).
+        #[arg(long)]
+        name: Option<String>,
+        /// Scaffold into a non-empty folder.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Run an agent's pre-authored workflow headlessly (Task + MCP
+    /// registered, unlike `-p`) to behaviorally smoke-test it (dev-plan/48.2).
+    /// Exits non-zero if the workflow errors.
+    Run {
+        /// Agent folder.
+        #[arg(default_value = ".")]
+        path: std::path::PathBuf,
+        /// Workflow script relative to the agent folder. Defaults to the
+        /// sole `.thclaws/workflows/*.js` when there's exactly one.
+        #[arg(long)]
+        workflow: Option<std::path::PathBuf>,
+        /// JSON value passed to the script as the `args` global.
+        #[arg(long)]
+        args: Option<String>,
+        /// Skip MCP + native media tools — run control-flow without real
+        /// generation / external spend.
+        #[arg(long)]
+        dry_tools: bool,
+    },
+    /// Pack an agent folder into the canonical fused tarball (identity +
+    /// catalog manifest) — the exact bytes `/cloud publish` uploads.
+    Pack {
+        /// Agent folder (must contain AGENTS.md + manifest.json).
+        #[arg(default_value = ".")]
+        path: std::path::PathBuf,
+        /// Output file. Defaults to <path>/<id>-<version>.tar.gz.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
+    /// Validate an agent folder before publish: manifest + identity,
+    /// subagent output/input schemas, workflow scripts, and a trial pack.
+    /// Exits non-zero on any error.
+    Validate {
+        #[arg(default_value = ".")]
+        path: std::path::PathBuf,
     },
 }
 
@@ -596,7 +662,12 @@ fn respawn_detached_for_gui_if_needed(cli: &Cli) {
     // Only respawn when the dispatch is actually GUI: not --cli/--print/
     // --telegram/--messenger, and either plain GUI (no --serve) or the
     // --serve --gui combo.
-    let use_cli = cli.cli || cli.print || cli.telegram || cli.messenger || cli.workflow.is_some();
+    let use_cli = cli.cli
+        || cli.print
+        || cli.telegram
+        || cli.messenger
+        || cli.workflow.is_some()
+        || cli.team_agent.is_some();
     let is_gui_dispatch = !use_cli && (!cli.serve || cli.gui);
     if !is_gui_dispatch {
         return;
@@ -628,6 +699,9 @@ fn respawn_detached_for_gui_if_needed(_cli: &Cli) {}
 
 #[tokio::main]
 async fn main() {
+    // dev-plan/49: if this is the internal `__confine` re-exec (Linux Landlock
+    // path), install the ruleset + exec the target here and never return.
+    thclaws_core::confine::maybe_handle_confine_subcommand();
     secrets::load_into_env();
     endpoints::load_into_env();
     load_dotenv();
@@ -711,6 +785,10 @@ async fn main() {
             let code = run_cloud_subcommand(cmd, cloud_url).await;
             std::process::exit(code);
         }
+        Some(Command::Agent { cmd }) => {
+            let code = run_agent_subcommand(cmd).await;
+            std::process::exit(code);
+        }
         #[cfg(feature = "gui")]
         Some(Command::Shell { cmd }) => {
             let code = run_shell_subcommand(cmd).await;
@@ -719,7 +797,12 @@ async fn main() {
         None => {}
     }
 
-    let use_cli = cli.cli || cli.print || cli.telegram || cli.messenger || cli.workflow.is_some();
+    let use_cli = cli.cli
+        || cli.print
+        || cli.telegram
+        || cli.messenger
+        || cli.workflow.is_some()
+        || cli.team_agent.is_some();
 
     // Issue #109: on Windows, respawn detached so cmd.exe / PowerShell
     // return the prompt instead of waiting on the GUI window. Runs
@@ -1132,6 +1215,141 @@ fn run_messenger_subcommand(cmd: MessengerCmd) -> i32 {
                  Run `thclaws messenger status` to confirm the binding is detected."
             );
             0
+        }
+    }
+}
+
+async fn run_agent_subcommand(cmd: AgentCmd) -> i32 {
+    use thclaws_core::cloud::{agent_cli, agent_scaffold};
+    match cmd {
+        AgentCmd::Run {
+            path,
+            workflow,
+            args,
+            dry_tools,
+        } => {
+            // Resolve the workflow (sole *.js when --workflow omitted).
+            let wf = match workflow {
+                Some(w) => w,
+                None => {
+                    let wfdir = path.join(".thclaws/workflows");
+                    let js: Vec<std::path::PathBuf> = std::fs::read_dir(&wfdir)
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .map(|e| e.path())
+                        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("js"))
+                        .collect();
+                    match js.len() {
+                        1 => std::path::Path::new(".thclaws/workflows")
+                            .join(js[0].file_name().unwrap()),
+                        0 => {
+                            eprintln!(
+                                "✗ no .thclaws/workflows/*.js in {} — pass --workflow",
+                                path.display()
+                            );
+                            return 1;
+                        }
+                        n => {
+                            eprintln!("✗ {n} workflows found — pass --workflow to pick one");
+                            return 1;
+                        }
+                    }
+                }
+            };
+            let args_val = match args {
+                Some(s) => match serde_json::from_str::<serde_json::Value>(&s) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        eprintln!("✗ --args is not valid JSON: {e}");
+                        return 1;
+                    }
+                },
+                None => None,
+            };
+            // cd into the agent folder so AppConfig + script_path resolve there.
+            if let Err(e) = std::env::set_current_dir(&path) {
+                eprintln!("✗ cannot enter {}: {e}", path.display());
+                return 1;
+            }
+            let config = match AppConfig::load() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("✗ config: {e}");
+                    return 1;
+                }
+            };
+            thclaws_core::repl::run_agent_workflow(config, wf, args_val, dry_tools).await
+        }
+        AgentCmd::New {
+            path,
+            pattern,
+            name,
+            force,
+        } => match agent_scaffold::scaffold_agent(&path, &pattern, name.as_deref(), force) {
+            Ok(files) => {
+                eprintln!(
+                    "✓ scaffolded {} ({} pattern) — {} file(s):",
+                    path.display(),
+                    pattern,
+                    files.len()
+                );
+                for f in &files {
+                    eprintln!("    {f}");
+                }
+                // Confirm the scaffold is valid out of the box.
+                let report = agent_cli::validate_folder(&path);
+                if report.ok() {
+                    eprintln!("✓ validates — edit the subagents + AGENTS.md, then `thclaws agent validate {}`", path.display());
+                    0
+                } else {
+                    for e in &report.errors {
+                        eprintln!("✗ {e}");
+                    }
+                    eprintln!("✗ scaffold did not validate (this is a bug)");
+                    1
+                }
+            }
+            Err(e) => {
+                eprintln!("✗ {e}");
+                1
+            }
+        },
+        AgentCmd::Pack { path, out } => match agent_cli::pack_to_file(&path, out) {
+            Ok((out_path, res)) => {
+                eprintln!(
+                    "✓ packed {} → {} ({} file(s), {} stripped, {:.1} KB)",
+                    path.display(),
+                    out_path.display(),
+                    res.included.len(),
+                    res.stripped.len(),
+                    res.bytes.len() as f64 / 1024.0
+                );
+                0
+            }
+            Err(e) => {
+                eprintln!("✗ pack failed: {e}");
+                1
+            }
+        },
+        AgentCmd::Validate { path } => {
+            let report = agent_cli::validate_folder(&path);
+            for i in &report.info {
+                eprintln!("  {i}");
+            }
+            for w in &report.warnings {
+                eprintln!("⚠ {w}");
+            }
+            for e in &report.errors {
+                eprintln!("✗ {e}");
+            }
+            if report.ok() {
+                eprintln!("✓ {} validates", path.display());
+                0
+            } else {
+                eprintln!("✗ {} — {} error(s)", path.display(), report.errors.len());
+                1
+            }
         }
     }
 }

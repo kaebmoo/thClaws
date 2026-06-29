@@ -18,6 +18,7 @@
 
 use std::sync::Arc;
 
+use crate::bridge::BridgeConfig;
 use async_trait::async_trait;
 use futures::StreamExt;
 

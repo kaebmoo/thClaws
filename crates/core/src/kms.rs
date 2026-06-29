@@ -511,7 +511,7 @@ pub fn ingest(
     let alias = sanitize_alias(&raw_alias);
     if alias.is_empty() {
         return Err(Error::Tool(format!(
-            "alias '{raw_alias}' sanitises to empty — use [A-Za-z0-9_-] characters"
+            "alias '{raw_alias}' sanitises to empty — use letters, numbers, '-' or '_'"
         )));
     }
     if RESERVED_PAGE_STEMS
@@ -827,6 +827,12 @@ pub async fn ingest_pdf(
     .await
     .map_err(|e| Error::Tool(format!("pdftotext join: {e}")))??;
 
+    // Apply the SAME Thai repair PdfReadTool uses — `pdftotext -layout`
+    // orphans Thai vowel/tone marks behind spaces, and without this the
+    // ingested page keeps that fragmentation. (Pre-fix this path copied the
+    // pdftotext call but not the normalization step.)
+    let extracted = crate::tools::pdf_read::normalize_thai_spacing(&extracted);
+
     let tmp_dir = std::env::temp_dir();
     let tmp_path = tmp_dir.join(format!("kms-pdf-{alias_clean}.md"));
     let banner = format!(
@@ -853,10 +859,24 @@ pub fn sanitize_alias(raw: &str) -> String {
         .trim()
         .chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+            if c == '-' || c == '_' {
                 c
-            } else {
+            } else if c.is_ascii() {
+                // ASCII: keep alphanumerics, fold everything else (spaces,
+                // path separators, punctuation, the Windows-reserved set) to
+                // '_'. The '.' folds too so it can't split the stem/extension.
+                if c.is_ascii_alphanumeric() {
+                    c
+                } else {
+                    '_'
+                }
+            } else if c.is_whitespace() || c.is_control() {
                 '_'
+            } else {
+                // Non-ASCII letters and combining marks (Thai, CJK, …) are
+                // valid in UTF-8 filenames — keep them so non-Latin names
+                // survive instead of sanitising to empty.
+                c
             }
         })
         .collect();
@@ -964,9 +984,22 @@ pub fn system_prompt_section(active: &[String]) -> String {
              KMS content is authoritative for any topic it covers — the user populated the KMS \
              specifically to override generic answers. Answering without KMS lookup when the \
              index suggests relevance is a correctness bug, not a shortcut.\n\n\
+             **Prefer canonical topic pages.** When matches include both a topic page (named for \
+             the subject, e.g. `welsh-corgi`) and a session-digest or audit page (named `sess-…` \
+             or `dream-…`), read the **topic page** — it's the curated, merged answer. Digests \
+             and `dream-…` logs are provenance/audit, not the canonical source; consult them only \
+             to trace where a fact came from.\n\n\
              If `KmsSearch` returns no hits AND the index lists nothing matching the user's \
              topic, fall back to training-data knowledge — but say so explicitly (\"the KMS \
              has nothing on this; answering from general knowledge\").\n\n\
+             **KMS before the web; write back after.** When a question would otherwise send you \
+             to `WebSearch` / `WebFetch`, search the KMS FIRST (steps 1-2) — re-searching the web \
+             for something the KMS already covers wastes the user's effort and ignores knowledge \
+             they deliberately saved. If the KMS lacks it and you do gather it from the web, \
+             **write the findings back** with `KmsWrite` (a canonical page named by topic) before \
+             you finish, so the next session answers from the KMS instead of searching again. \
+             That write-back is how the KMS compounds — skipping it means re-doing the same \
+             research forever.\n\n\
              You are both reader AND maintainer: file new findings via `KmsWrite`, update \
              entity pages when sources contradict them, and run `/kms lint <name>` \
              periodically.\n\n\
@@ -1169,14 +1202,25 @@ pub fn write_frontmatter(map: &std::collections::BTreeMap<String, String>, body:
     }
     let mut out = String::from("---\n");
     for (k, v) in map {
-        // YAML-safe values: if the value contains `:`, `#`, leading
+        // A YAML flow collection (`[a, b]` / `{a: b}`) is already valid
+        // YAML — emit it verbatim. Quoting it would turn a real list
+        // like `sources: ["session-x", "session-y"]` into the opaque
+        // string `"[\"session-x\", \"session-y\"]"`, which breaks every
+        // consumer that expects `sources:` to be a sequence. Single-line
+        // only — a flow value with a newline can't be emitted inline, so
+        // fall through to quoting.
+        let is_flow_collection = !v.contains('\n')
+            && ((v.starts_with('[') && v.ends_with(']'))
+                || (v.starts_with('{') && v.ends_with('}')));
+        // YAML-safe scalars: if the value contains `:`, `#`, leading
         // whitespace, or quote chars, wrap in double quotes and
         // escape internal double quotes.
-        let needs_quote = v.contains(':')
-            || v.contains('#')
-            || v.starts_with(' ')
-            || v.contains('"')
-            || v.contains('\n');
+        let needs_quote = !is_flow_collection
+            && (v.contains(':')
+                || v.contains('#')
+                || v.starts_with(' ')
+                || v.contains('"')
+                || v.contains('\n'));
         if needs_quote {
             let escaped = v.replace('"', "\\\"");
             out.push_str(&format!("{k}: \"{escaped}\"\n"));
@@ -1343,12 +1387,26 @@ pub fn write_page(kref: &KmsRef, page_name: &str, content: &str) -> Result<PathB
     std::fs::write(&path, serialized.as_bytes())
         .map_err(|e| Error::Tool(format!("write {}: {e}", path.display())))?;
 
-    // Index summary uses the user-supplied body (not the
-    // canonical-header version) so the model's first real paragraph
-    // surfaces in the index — not the auto-injected `# {title}` line.
-    // The summary's job is to signal page relevance at a glance;
-    // the title is already visible in the link text in the index.
-    let summary = first_meaningful_line(&body);
+    // Index summary: prefer the `topic:` frontmatter — it's a purpose-
+    // built one-line description of the page ("Dog breed profile — Welsh
+    // Corgi"), exactly what signals relevance when scanning the index.
+    // Fall back to the first real body line only when `topic:` is
+    // absent. (Pre-fix this always used the first body line, so pages
+    // whose body opens with a section heading surfaced as a useless
+    // "Overview".) The title is already the index link text, so we don't
+    // repeat it here.
+    let summary = fm
+        .get("topic")
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+        .map(|t| {
+            let mut s: String = t.chars().take(80).collect();
+            if t.chars().count() > 80 {
+                s.push('…');
+            }
+            s
+        })
+        .unwrap_or_else(|| first_meaningful_line(&body));
     let category = fm.get("category").cloned();
     update_index_for_write(kref, &stem, &summary, category.as_deref(), existed)?;
     append_log_header(kref, if existed { "edited" } else { "wrote" }, &stem)?;
@@ -4170,6 +4228,32 @@ pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn sanitize_alias_keeps_thai_and_other_unicode() {
+        // The reported bug: an all-Thai name used to fold to empty.
+        let thai = "ข้อบังคับเกี่ยวกับการทำงาน";
+        assert_eq!(sanitize_alias(thai), thai);
+        // Combining tone marks/vowels are preserved, not stripped.
+        assert_eq!(sanitize_alias("ภาษาไทย"), "ภาษาไทย");
+        assert_eq!(sanitize_alias("日本語"), "日本語");
+    }
+
+    #[test]
+    fn sanitize_alias_folds_unsafe_ascii_and_whitespace() {
+        assert_eq!(sanitize_alias("hello world"), "hello_world");
+        assert_eq!(sanitize_alias("a/b\\c:d"), "a_b_c_d");
+        assert_eq!(sanitize_alias("notes.md"), "notes_md");
+        assert_eq!(sanitize_alias("__trim__"), "trim");
+        // Thai with trailing spaces still trims and survives.
+        assert_eq!(sanitize_alias("  รายงาน  "), "รายงาน");
+    }
+
+    #[test]
+    fn sanitize_alias_empty_only_for_no_word_chars() {
+        assert_eq!(sanitize_alias("   "), "");
+        assert_eq!(sanitize_alias("///"), "");
+    }
+
     struct EnvGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
         prev_home: Option<String>,
@@ -4683,6 +4767,22 @@ mod tests {
         assert_eq!(body, "body text\n");
     }
 
+    #[test]
+    fn write_frontmatter_preserves_flow_list_unquoted() {
+        // A `sources:` YAML list must round-trip as a real sequence, not
+        // get quoted into the opaque string `"[\"a\", \"b\"]"`.
+        let mut fm = std::collections::BTreeMap::new();
+        fm.insert("sources".into(), "[\"sess-abc\", \"sess-def\"]".into());
+        let serialized = write_frontmatter(&fm, "body\n");
+        assert!(
+            serialized.contains("sources: [\"sess-abc\", \"sess-def\"]"),
+            "flow list should be emitted verbatim, got:\n{serialized}"
+        );
+        // No outer quoting / escaping of the list.
+        assert!(!serialized.contains("sources: \"["));
+        assert!(!serialized.contains("\\\""));
+    }
+
     // ─── M6.25: write_page + append_to_page (BUG #1) ──────────────────────
 
     #[test]
@@ -4699,6 +4799,45 @@ mod tests {
         assert!(index.contains("- [topic](pages/topic.md)"));
         let log = std::fs::read_to_string(k.log_path()).unwrap();
         assert!(log.contains("] wrote | topic"));
+    }
+
+    #[test]
+    fn write_page_index_summary_prefers_topic_frontmatter() {
+        // A page whose body opens with a `## Overview` heading must
+        // surface its `topic:` line in the index — not "Overview".
+        let _home = scoped_home();
+        let k = create("nb", KmsScope::User).unwrap();
+        write_page(
+            &k,
+            "welsh-corgi",
+            "---\ntitle: Welsh Corgi\ntopic: Dog breed profile — Welsh Corgi\n---\n\n## Overview\n\nThe Welsh Corgi is a herding dog.\n",
+        )
+        .unwrap();
+        let index = std::fs::read_to_string(k.index_path()).unwrap();
+        assert!(
+            index.contains(
+                "- [welsh-corgi](pages/welsh-corgi.md) — Dog breed profile — Welsh Corgi"
+            ),
+            "index should use topic: frontmatter, got:\n{index}"
+        );
+        assert!(!index.contains("— Overview"));
+    }
+
+    #[test]
+    fn write_page_index_summary_falls_back_to_body_without_topic() {
+        let _home = scoped_home();
+        let k = create("nb", KmsScope::User).unwrap();
+        write_page(
+            &k,
+            "note",
+            "---\ntitle: Note\n---\n\nFirst real line here.\n",
+        )
+        .unwrap();
+        let index = std::fs::read_to_string(k.index_path()).unwrap();
+        assert!(
+            index.contains("First real line here."),
+            "no topic: should fall back to first body line, got:\n{index}"
+        );
     }
 
     #[test]

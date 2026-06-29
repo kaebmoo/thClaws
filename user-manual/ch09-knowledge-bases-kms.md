@@ -227,6 +227,17 @@ To grep all pages, call `KmsSearch(kms: "notes", pattern: "...")`.
 
 And `KmsRead` / `KmsSearch` (and the mutating `KmsWrite` / `KmsAppend` / `KmsDelete`) are registered in the tool list. **Several slash commands below require at least one KMS to be active** — without it, KMS tools aren't in the registry and the agent can't act on any KMS by name.
 
+### Automatic retrieval (you don't have to say "from the KMS")
+
+The index above tells the agent *what exists*, but relying on the model to **decide** to look it up is unreliable — for a casual or "tell me about X" phrasing, models (even strong ones) often answer from training data and skip the KMS. So thClaws also does **deterministic pre-retrieval**: on every message, the engine itself searches your active KMS for the message's keywords and, when there's a strong match, injects a short pointer list of the matching **topic pages** right into that turn — e.g.:
+
+```
+## Relevant KMS pages (auto-matched to this message)
+- `KMS: notes/auth-flow` — JWT refresh pattern we use
+```
+
+The agent then reads those pages and answers from them (citing `KMS: <name>/<page>`), instead of re-deriving the answer or doing a fresh web search. It's gated by relevance, so greetings, coding turns, and off-topic asks pull nothing; provenance/audit pages (session digests, dream logs) are skipped in favour of canonical topic pages. The net effect: ask "tell me about Corgis" and you get *your* curated page back — no need to add "from the KMS". (Requires the BM25 search index, which the released binaries include; `cargo install` users opt in with `--features kms_search_index`.)
+
 ## Slash commands
 
 The full surface, grouped by purpose:
@@ -234,7 +245,7 @@ The full surface, grouped by purpose:
 - **Discovery and inspection**: `/kms`, `/kms show`
 - **Lifecycle**: `/kms new`, `/kms use`, `/kms off`
 - **Capture**: `/kms ingest`, `/kms dump`, `/kms file-answer`
-- **Maintenance**: `/kms lint`, `/kms wrap-up`, `/kms reconcile`, `/kms migrate`
+- **Maintenance**: `/kms lint`, `/kms wrap-up`, `/kms reconcile`, `/kms maintain` (all four in one pass), `/kms migrate`
 - **Cross-linking**: `/kms link`
 - **Consolidation**: `/kms merge`
 - **Decision support**: `/kms challenge`
@@ -457,6 +468,34 @@ this was a dry-run preview. re-run with `--apply` to execute.
 ```
 
 `kms-reconcile`'s tool whitelist is **strictly narrower than `dream`** — `KmsRead, KmsSearch, KmsWrite, KmsAppend, TodoWrite` only. No `KmsDelete` (reconcile preserves every original claim, either in `## History` on the rewritten page or in the Conflict page). Hard rules: never invent dates or sources; "someone changed their mind" classifies as Evolution, not contradiction.
+
+### `/kms maintain NAME [--apply]`
+
+The **one-command maintenance umbrella**. Instead of running `lint`, `wrap-up --fix`, and `reconcile` separately, `/kms maintain` dispatches the built-in **`kms-maintain`** subagent to run them as a single staged pipeline — plus a step the others can't do (reconciling provenance against your live sessions). Dry-run by default; `--apply` executes. GUI-only. Aliases: `tidy`.
+
+The five stages, run in order (cheap mechanical cleanup first, judgment-heavy work last):
+
+1. **Structural fixes** — broken page links, pages missing from the index, missing required frontmatter (the `lint` + `kms-linker` job).
+2. **Source reconciliation** — globs your live `.thclaws/sessions/`, and for any page whose `sources:` lists a `sess-…` whose session you've since **deleted**, drops just that dead id from `sources:`. **Pages are never deleted** — knowledge built from a session outlives the session; only the dangling pointer goes. (This is the full-vault version of the cleanup `/dream` does incrementally.)
+3. **Stale refresh** — refreshes pages flagged `> ⚠ STALE` by the re-ingest cascade.
+4. **Contradiction reconciliation** — the full `reconcile` pass (claims / entities / decisions / source-freshness) across the whole vault, with `## History` rewrites and `Conflict —` pages.
+5. **Orphans** — listed for your review, never modified.
+
+```
+❯ /kms maintain notes
+✓ kms-maintain dispatched (id: side-9f3c, dry-run)
+
+[subagent reports back, sections in stage order]
+DRY-RUN — no changes written. Re-run with --apply to execute.
+**Structural fixed (1):** - oauth-flow: relinked to sso-config
+**Sources reconciled (2):** - corgi: dropped dead sess-… (session deleted)
+**Contradictions auto-resolved (1):** - redis-config: cites 2026 spec
+**Orphans (3, untouched):** - …
+```
+
+Like `reconcile`, the `kms-maintain` agent has **no `KmsDelete`** — it never deletes a page, the most it removes is a dead reference inside one. It does have `Glob` (needed to read the live session set in stage 2). Requires KMS tools — run `/kms use <name>` first.
+
+**`/kms maintain` vs `/dream`** — complementary. `/dream` is *incremental*: it mines new sessions and cleans only the pages it touches. `/kms maintain` is a *full-vault* sweep over every page, regardless of recent activity — run it occasionally (or before a commit) to tidy the whole KMS at once.
 
 ### `/kms migrate NAME [--apply]`
 

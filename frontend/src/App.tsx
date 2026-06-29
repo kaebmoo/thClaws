@@ -31,6 +31,8 @@ import { InstructionsEditorModal } from "./components/InstructionsEditorModal";
 import { SecretsBackendDialog } from "./components/SecretsBackendDialog";
 import { ApprovalModal } from "./components/ApprovalModal";
 import { ScheduleAddModal } from "./components/ScheduleAddModal";
+import { AgentEditorModal } from "./components/AgentEditorModal";
+import { MarketplaceModal } from "./components/MarketplaceModal";
 import { ModelPickerModal, type PickerModel } from "./components/ModelPickerModal";
 import { ContextWarningBanner } from "./components/ContextWarningBanner";
 import { useEditingShortcuts } from "./hooks/useEditingShortcuts";
@@ -463,6 +465,16 @@ export default function App() {
     // The engine sends sessions sorted most-recent-first (per
     // SessionStore::list ordering). Skip empty ones so a freshly-
     // spawned default session doesn't shadow a real prior session.
+    //
+    // Desktop is excluded: a fresh app launch should land on the clean
+    // session the worker just minted, NOT silently inherit the previous
+    // conversation's history (otherwise `session_load` runs the engine's
+    // LoadSession → agent.set_history(previous), and the agent answers
+    // "what were we talking about?" from the old chat even though the UI
+    // shows a new session). Case 1 still reconnects to an actively-busy
+    // agent. This auto-resume stays for the --serve/web surface, where
+    // reopening a browser tab reconnects to a still-running engine.
+    if (typeof window !== "undefined" && window.ipc) return;
     if (!knownSessions.length) return;
     const target = knownSessions.find((s) => (s.messages ?? 0) > 0);
     if (!target) return;
@@ -1090,6 +1102,8 @@ export default function App() {
       )}
       <ApprovalModal />
       <ScheduleAddModal />
+      <AgentEditorModal />
+      <MarketplaceModal />
       <ContextWarningBanner />
       {modelPicker && (
         <ModelPickerModal

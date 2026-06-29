@@ -186,6 +186,17 @@ impl OpenAIProvider {
                     ContentBlock::ToolUse {
                         id, name, input, ..
                     } => {
+                        // Dedup by id. Some OpenAI-compat models (DeepSeek)
+                        // occasionally emit two parallel tool_calls sharing
+                        // one id; the strict endpoint then rejects the
+                        // follow-up ("insufficient tool messages following
+                        // tool_calls"). Keep the first, drop the collision.
+                        if tool_calls
+                            .iter()
+                            .any(|tc| tc["id"].as_str() == Some(id.as_str()))
+                        {
+                            continue;
+                        }
                         let args = serde_json::to_string(input).unwrap_or_else(|_| "{}".into());
                         tool_calls.push(json!({
                             "id": id,
@@ -202,7 +213,15 @@ impl OpenAIProvider {
                         // text portions via to_text(). Any images get
                         // queued for the synthetic user message that
                         // follows the tool message (see the emission
-                        // loop below).
+                        // loop below). Dedup by id to mirror the tool_call
+                        // dedup above — a duplicated result id would
+                        // re-introduce the count mismatch.
+                        if trailing_tool_results
+                            .iter()
+                            .any(|(rid, _, _)| rid == tool_use_id)
+                        {
+                            continue;
+                        }
                         let text = content.to_text();
                         let images = extract_images(content);
                         trailing_tool_results.push((tool_use_id.clone(), text, images));
@@ -216,6 +235,25 @@ impl OpenAIProvider {
             let has_reasoning = !reasoning_text.is_empty();
             let has_tools = !tool_calls.is_empty();
             let has_inline_images = !inline_user_images.is_empty();
+
+            // Tool results FIRST. OpenAI's contract: an assistant message
+            // with `tool_calls` must be immediately followed by tool-role
+            // messages answering every tool_call_id, with no other role
+            // interleaved. Emitting these before THIS message's own
+            // text/image content guarantees that even a results-bearing
+            // user message that also carries text (or an interleaved user
+            // turn) can't wedge a `user` role between the assistant's
+            // tool_calls and their results — which strict endpoints
+            // (DeepSeek, …) 400 on ("insufficient tool messages following
+            // tool_calls"). A results-only user message (the common case)
+            // emits just these and no main message at all.
+            for (tool_call_id, content, _images) in &trailing_tool_results {
+                out.push(json!({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": content,
+                }));
+            }
 
             if has_text || has_tools || has_reasoning || has_inline_images {
                 let mut msg = json!({"role": role});
@@ -255,23 +293,6 @@ impl OpenAIProvider {
                     msg["reasoning_content"] = json!(reasoning_text);
                 }
                 out.push(msg);
-            }
-
-            // Emit ALL tool messages back-to-back first. OpenAI's
-            // contract: an assistant message with `tool_calls` must
-            // be followed by tool-role messages responding to every
-            // tool_call_id, with no other roles interleaved. An
-            // earlier (broken) version of this code emitted a
-            // synthetic user message after each individual tool
-            // message — fine for one tool call but a 400 from the
-            // server when the model batched N parallel calls
-            // ("tool_call_ids did not have response messages").
-            for (tool_call_id, content, _images) in &trailing_tool_results {
-                out.push(json!({
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": content,
-                }));
             }
             // Then ONE combined synthetic user message carrying every
             // image returned by any of those tool calls — text labels
@@ -354,6 +375,20 @@ impl OpenAIProvider {
         }
         body
     }
+
+    /// POST a prepared body to the chat/completions endpoint. Factored
+    /// out so `stream` can issue a second attempt (image-stripped retry)
+    /// without duplicating the header/auth wiring.
+    async fn send_body(&self, body: &Value) -> Result<reqwest::Response> {
+        self.client
+            .post(&self.base_url)
+            .header(self.auth_header_name(), self.auth_header_value())
+            .header("content-type", "application/json")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| Error::Provider(format!("http: {e}")))
+    }
 }
 
 /// Strip the routing prefix from a stored model id before sending it
@@ -415,6 +450,64 @@ fn request_carries_image(req: &StreamRequest) -> bool {
             _ => false,
         })
     })
+}
+
+/// A copy of `req` with every image pixel replaced by a short text note.
+/// Used to retry once after a text-only model rejects `image_url` with a
+/// 4xx (issue #164 follow-up): the turn then completes with the model
+/// merely *told* an image existed, instead of dead-ending. The real
+/// session history keeps the image — only this one wire request drops the
+/// bytes — so a later switch to a vision model still sees it.
+fn strip_request_images(req: &StreamRequest) -> StreamRequest {
+    const NOTE: &str =
+        "[image omitted — the current model is not vision-capable; the image file was still written to disk]";
+    let mut out = req.clone();
+    for m in &mut out.messages {
+        for block in &mut m.content {
+            match block {
+                ContentBlock::Image { .. } => {
+                    *block = ContentBlock::Text {
+                        text: NOTE.to_string(),
+                    };
+                }
+                ContentBlock::ToolResult { content, .. } => {
+                    if let ToolResultContent::Blocks(blocks) = content {
+                        for tb in blocks.iter_mut() {
+                            if matches!(tb, ToolResultBlock::Image { .. }) {
+                                *tb = ToolResultBlock::Text {
+                                    text: NOTE.to_string(),
+                                };
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// True when a 4xx response is a request-size / body-cap rejection rather than
+/// a modality (image) rejection. The image-strip retry below must NOT fire on
+/// these: stripping the images would wrongly stamp a vision-capable model
+/// (e.g. gpt-4.1-nano) as "not vision-capable" and hide the real cause (too
+/// many / too-large images in one request — the gateway's 5 MB body cap).
+fn is_request_too_large(status: reqwest::StatusCode, body: &str) -> bool {
+    if status.as_u16() == 413 {
+        return true;
+    }
+    let t = body.to_ascii_lowercase();
+    [
+        "byte cap",
+        "request body",
+        "too large",
+        "payload too large",
+        "request_too_large",
+        "entity too large",
+    ]
+    .iter()
+    .any(|needle| t.contains(needle))
 }
 
 #[async_trait]
@@ -482,33 +575,50 @@ impl Provider for OpenAIProvider {
         }
         req.model = strip_wire_prefix(&req.model, self.strip_model_prefix.as_deref());
         let body = self.build_body(&req);
-        let resp = self
-            .client
-            .post(&self.base_url)
-            .header(self.auth_header_name(), self.auth_header_value())
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| Error::Provider(format!("http: {e}")))?;
+        let mut resp = self.send_body(&body).await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
+            // Read the error body once, up front: we both classify it and
+            // surface it. (Consumes `resp`; the success/strip-retry paths
+            // below reassign it.)
             let text = resp.text().await.unwrap_or_default();
-            let mut msg = format!("http {status}: {}", super::redact_key(&text, &self.api_key));
-            // Issue #164: a 4xx on a request that shipped image pixels is
-            // almost always "this model can't see images" (text-only
-            // model + a Read on an image / a scanned-image PDF). The raw
-            // upstream 400 body is unhelpful, so append a concrete fix.
-            if status.is_client_error() && request_carries_image(&req) {
-                msg.push_str(&format!(
-                    "\n\n⚠️ This request included an image, but model `{}` may not support image input. \
-                     Switch to a vision-capable model (e.g. dashscope/qwen3-vl-plus, gpt-4o, gemini-2.x, a Claude model), \
-                     or extract the PDF/image to text first (e.g. read it once with a vision model and save to KMS, then query the text).",
-                    req.model
-                ));
+            let carries_image = request_carries_image(&req);
+            let too_large = is_request_too_large(status, &text);
+
+            // Issue #164 follow-up: a 4xx on a request shipping image pixels
+            // is *usually* a text-only model rejecting `image_url`. Retry ONCE
+            // with the pixels swapped for a short text note so the turn
+            // completes. BUT a size/body-cap 4xx (the gateway's 5 MB cap, or a
+            // 413) is NOT a vision problem — stripping there would mislabel a
+            // vision-capable model as "not vision-capable" and mask the real
+            // cause, so we surface a clear size error instead.
+            if status.is_client_error() && carries_image && !too_large {
+                let retry_body = self.build_body(&strip_request_images(&req));
+                match self.send_body(&retry_body).await {
+                    Ok(r) if r.status().is_success() => resp = r,
+                    _ => {
+                        return Err(Error::Provider(format!(
+                            "http {status}: {}\n\n⚠️ This request included an image, but model `{}` may not support image input. \
+                             Switch to a vision-capable model (e.g. dashscope/qwen3-vl-plus, gpt-4o, gemini-2.x, a Claude model), \
+                             or extract the PDF/image to text first (e.g. read it once with a vision model and save to KMS, then query the text).",
+                            super::redact_key(&text, &self.api_key),
+                            req.model
+                        )));
+                    }
+                }
+            } else if too_large && carries_image {
+                return Err(Error::Provider(format!(
+                    "http {status}: {}\n\n⚠️ The request body is too large because of image data — not a vision-capability problem. \
+                     Read fewer images per turn (the engine also auto-downscales images to fit the body cap).",
+                    super::redact_key(&text, &self.api_key)
+                )));
+            } else {
+                return Err(Error::Provider(format!(
+                    "http {status}: {}",
+                    super::redact_key(&text, &self.api_key)
+                )));
             }
-            return Err(Error::Provider(msg));
         }
 
         let byte_stream = resp.bytes_stream();
@@ -848,6 +958,23 @@ mod tests {
     use crate::providers::{assemble, collect_turn};
     use crate::types::Message;
 
+    #[test]
+    fn size_cap_4xx_not_classified_as_vision_error() {
+        use reqwest::StatusCode;
+        // The gateway's body-cap 400 must read as a size error, so the
+        // image-strip ("not vision-capable") retry is skipped.
+        assert!(is_request_too_large(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":"request body exceeds 5242880 byte cap"}"#
+        ));
+        assert!(is_request_too_large(StatusCode::PAYLOAD_TOO_LARGE, ""));
+        // A genuine modality rejection is NOT a size error → strip path stays.
+        assert!(!is_request_too_large(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"This model does not support image_url","type":"invalid_request_error"}}"#
+        ));
+    }
+
     fn parse_all(chunks: &[&str]) -> Vec<ProviderEvent> {
         let mut state = ParseState::default();
         let mut out = Vec::new();
@@ -1168,6 +1295,115 @@ mod tests {
     }
 
     #[test]
+    fn messages_to_openai_dedups_duplicate_tool_call_ids() {
+        // DeepSeek-style glitch: two parallel tool_calls share one id, and
+        // the results come back with that same duplicated id. Both sides
+        // must collapse to a single call + single tool message so the
+        // endpoint sees one matched pair (not 2 calls vs 1 result, which
+        // 400s as "insufficient tool messages following tool_calls").
+        let req = StreamRequest {
+            model: "deepseek-v4-pro".into(),
+            system: None,
+            messages: vec![
+                Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        ContentBlock::ToolUse {
+                            id: "call_0".into(),
+                            name: "WebSearch".into(),
+                            input: json!({"query": "a"}),
+                            thought_signature: None,
+                        },
+                        ContentBlock::ToolUse {
+                            id: "call_0".into(),
+                            name: "WebFetch".into(),
+                            input: json!({"url": "b"}),
+                            thought_signature: None,
+                        },
+                    ],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![
+                        ContentBlock::ToolResult {
+                            tool_use_id: "call_0".into(),
+                            content: "r1".into(),
+                            is_error: false,
+                        },
+                        ContentBlock::ToolResult {
+                            tool_use_id: "call_0".into(),
+                            content: "r2".into(),
+                            is_error: false,
+                        },
+                    ],
+                },
+            ],
+            tools: vec![],
+            max_tokens: 100,
+            thinking_budget: None,
+            stream_chunk_timeout_override: None,
+        };
+        let msgs = OpenAIProvider::messages_to_openai(&req);
+        // assistant(1 deduped tool_call), tool(1 deduped result)
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["role"], "assistant");
+        assert_eq!(msgs[0]["tool_calls"].as_array().unwrap().len(), 1);
+        assert_eq!(msgs[0]["tool_calls"][0]["id"], "call_0");
+        assert_eq!(msgs.iter().filter(|m| m["role"] == "tool").count(), 1);
+        assert_eq!(msgs[1]["role"], "tool");
+        assert_eq!(msgs[1]["tool_call_id"], "call_0");
+    }
+
+    #[test]
+    fn messages_to_openai_tool_results_precede_interleaved_user_text() {
+        // A user message carrying tool_results AND text must emit the tool
+        // messages FIRST (immediately after the assistant tool_calls), with
+        // the user text after — never wedged between the calls and their
+        // results.
+        let req = StreamRequest {
+            model: "deepseek-v4-pro".into(),
+            system: None,
+            messages: vec![
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: "call_0".into(),
+                        name: "WebSearch".into(),
+                        input: json!({"query": "a"}),
+                        thought_signature: None,
+                    }],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![
+                        ContentBlock::ToolResult {
+                            tool_use_id: "call_0".into(),
+                            content: "result".into(),
+                            is_error: false,
+                        },
+                        ContentBlock::Text {
+                            text: "now summarize".into(),
+                        },
+                    ],
+                },
+            ],
+            tools: vec![],
+            max_tokens: 100,
+            thinking_budget: None,
+            stream_chunk_timeout_override: None,
+        };
+        let msgs = OpenAIProvider::messages_to_openai(&req);
+        // assistant(tool_calls), tool(result), user(text) — tool BEFORE user.
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0]["role"], "assistant");
+        assert!(msgs[0]["tool_calls"].is_array());
+        assert_eq!(msgs[1]["role"], "tool");
+        assert_eq!(msgs[1]["tool_call_id"], "call_0");
+        assert_eq!(msgs[2]["role"], "user");
+        assert_eq!(msgs[2]["content"], "now summarize");
+    }
+
+    #[test]
     fn messages_to_openai_image_tool_result_emits_synthetic_user_message() {
         // ToolResult with Blocks (Image + Text) — OpenAI's tool-role
         // message must stay text-only (the summary), and a synthetic
@@ -1292,6 +1528,60 @@ mod tests {
                 is_error: false,
             }
         ])));
+    }
+
+    #[test]
+    fn strip_request_images_drops_pixels_keeps_text() {
+        // Issue #164 follow-up: the retry path must leave NO image pixels
+        // (so a text-only model stops 400'ing on image_url) while keeping
+        // the tool result's text summary so the model still knows an image
+        // was produced.
+        use crate::types::{ImageSource, ToolResultBlock, ToolResultContent};
+        let img = ImageSource::Base64 {
+            media_type: "image/png".into(),
+            data: "AAAA".into(),
+        };
+        let req = StreamRequest {
+            model: "deepseek-v4-pro".into(),
+            system: None,
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::Image {
+                        source: img.clone(),
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "c1".into(),
+                        content: ToolResultContent::Blocks(vec![
+                            ToolResultBlock::Text {
+                                text: "Wrote output/img.png".into(),
+                            },
+                            ToolResultBlock::Image { source: img },
+                        ]),
+                        is_error: false,
+                    },
+                ],
+            }],
+            tools: vec![],
+            max_tokens: 100,
+            thinking_budget: None,
+            stream_chunk_timeout_override: None,
+        };
+        assert!(request_carries_image(&req));
+
+        let stripped = strip_request_images(&req);
+        assert!(
+            !request_carries_image(&stripped),
+            "no image pixels should remain after stripping"
+        );
+        // The OpenAI wire form must carry no image_url, but keep the summary.
+        let wire = OpenAIProvider::messages_to_openai(&stripped);
+        let json = serde_json::to_string(&wire).unwrap();
+        assert!(
+            !json.contains("image_url"),
+            "stripped request must not emit image_url: {json}"
+        );
+        assert!(json.contains("Wrote output/img.png"));
     }
 
     #[test]

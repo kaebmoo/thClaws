@@ -24,6 +24,7 @@
 //! build their own `IpcContext` flavor and call [`handle_ipc`] uniformly.
 //! The body of [`handle_ipc`] is identical regardless of transport.
 
+use crate::bridge::BridgeConfig;
 use crate::permissions::{
     AgentOrigin, ApprovalDecision, ApprovalRequest, ApprovalSink, GuiApprover,
 };
@@ -359,6 +360,9 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 || crate::config::AppConfig::load()
                     .map(|c| c.image_tools_enabled)
                     .unwrap_or(false);
+            let hal_enabled = crate::config::AppConfig::load()
+                .map(|c| c.hal_enabled)
+                .unwrap_or(false);
             let dispatch = ctx.dispatch.clone();
             let approver = ctx.approver.clone();
             std::thread::spawn(move || {
@@ -373,6 +377,11 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         registry.register(Arc::new(crate::tools::TextToVideoTool));
                         registry.register(Arc::new(crate::tools::ImageToVideoTool));
                         registry.register(Arc::new(crate::tools::MediaJobStatusTool));
+                    }
+
+                    if hal_enabled {
+                        registry.register(Arc::new(crate::tools::YouTubeTranscriptTool::new()));
+                        registry.register(Arc::new(crate::tools::WebScrapeTool::new()));
                     }
                     let tool = registry
                         .get(&tool_name)
@@ -1154,6 +1163,63 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             (ctx.dispatch)(payload.to_string());
         }
 
+        // ── Phone-home tunnel wiring (dev-plan/44 Tier 1) ──────────
+        // The cloud-token pairing that writes `.thclaws/phone-home.json`
+        // is a follow-up; `phone_home_connect` reconnects an existing
+        // binding (the worker also auto-reconnects one on boot).
+        "phone_home_connect" => {
+            let payload = match crate::phone_home::PhoneHomeConfig::load() {
+                Ok(Some(cfg)) => {
+                    let _ = ctx
+                        .shared
+                        .input_tx
+                        .send(crate::shared_session::ShellInput::PhoneHomeConnect(cfg));
+                    serde_json::json!({ "type": "phone_home_connect_ack", "ok": true })
+                }
+                Ok(None) => serde_json::json!({
+                    "type": "phone_home_connect_ack",
+                    "ok": false,
+                    "error": "no phone-home binding on disk — pair first",
+                }),
+                Err(e) => serde_json::json!({
+                    "type": "phone_home_connect_ack",
+                    "ok": false,
+                    "error": e.to_string(),
+                }),
+            };
+            (ctx.dispatch)(payload.to_string());
+        }
+        "phone_home_disconnect" => {
+            let _ = ctx
+                .shared
+                .input_tx
+                .send(crate::shared_session::ShellInput::PhoneHomeDisconnect);
+            let payload = serde_json::json!({
+                "type": "phone_home_disconnect_ack",
+                "ok": true,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+        "phone_home_pair" => {
+            // Exchange the stored cloud CLI token for a phone-home binding,
+            // then connect. The worker does the network round-trip; we
+            // ack immediately (with a clear error if not logged in).
+            let payload = if crate::cloud::token().is_some() {
+                let _ = ctx
+                    .shared
+                    .input_tx
+                    .send(crate::shared_session::ShellInput::PhoneHomePair);
+                serde_json::json!({ "type": "phone_home_pair_ack", "ok": true, "pending": true })
+            } else {
+                serde_json::json!({
+                    "type": "phone_home_pair_ack",
+                    "ok": false,
+                    "error": "log in to thClaws.cloud first (Settings → thClaws.cloud)",
+                })
+            };
+            (ctx.dispatch)(payload.to_string());
+        }
+
         // ── Telegram bridge wiring (dev-plan/29 Tier 1) ────────────
         // The GUI TelegramConnectModal hits these; the polling session
         // itself lives on the worker so its cancel token sits on one
@@ -1492,6 +1558,46 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             (ctx.dispatch)(payload.to_string());
         }
 
+        // ── Agent editor (/agent new · /agent edit) ────────────────
+        "agent_save" => {
+            // Frontend AgentEditorModal submits the full `.md` body
+            // (YAML frontmatter + system prompt). Always write the
+            // project-scoped path `.thclaws/agents/<name>.md` — edits to
+            // a user-scoped or built-in agent land here as an override.
+            let raw_name = msg.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let body = msg.get("body").and_then(|v| v.as_str()).unwrap_or("");
+            let (ok, error, path) = match crate::agent_defs::sanitize_agent_name(raw_name) {
+                None => (
+                    false,
+                    "invalid agent name (letters, digits, '-' or '_' only)".to_string(),
+                    None,
+                ),
+                Some(name) => {
+                    let path = crate::agent_defs::AgentDefsConfig::project_agent_path(&name);
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    match std::fs::write(&path, body) {
+                        Ok(()) => (true, String::new(), Some(path.display().to_string())),
+                        Err(e) => (false, e.to_string(), Some(path.display().to_string())),
+                    }
+                }
+            };
+            // Reload the worker's def snapshot so the new/edited agent is
+            // usable in-session (side-channel spawns + existence checks).
+            if ok {
+                let _ = ctx.shared.input_tx.send(ShellInput::AgentDefsChanged);
+            }
+            let payload = serde_json::json!({
+                "type": "agent_save_result",
+                "name": raw_name,
+                "path": path,
+                "ok": ok,
+                "error": error,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
         // ── Deploy target (dev-plan/28: /deploy command config) ────
         "remote_agent_get" => {
             let url = crate::remote_agent::url();
@@ -1801,6 +1907,8 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         "env_set": matches!(s.env_source, crate::secrets::KeySource::Environment),
                         "key_length": s.key_length,
                         "kind": s.kind,
+                        "featured": s.featured,
+                        "default_model": s.default_model,
                     })
                 })
                 .collect();
@@ -2442,6 +2550,105 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             (ctx.dispatch)(payload.to_string());
         }
 
+        // Mirror of team_enabled_get/set for the opt-in media-generation
+        // tools (`imageToolsEnabled` / `mediaToolsEnabled`). Off by
+        // default; the tools also self-hide without a GEMINI/GOOGLE key.
+        "media_tools_enabled_get" => {
+            let enabled = crate::config::ProjectConfig::load()
+                .and_then(|c| c.image_tools_enabled)
+                .unwrap_or(false);
+            let payload = serde_json::json!({
+                "type": "media_tools_enabled",
+                "enabled": enabled,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        "media_tools_enabled_set" => {
+            let enabled = msg
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let mut cfg = crate::config::ProjectConfig::load().unwrap_or_default();
+            cfg.image_tools_enabled = Some(enabled);
+            let (ok, error) = match cfg.save() {
+                Ok(()) => (true, String::new()),
+                Err(e) => (false, e.to_string()),
+            };
+            let payload = serde_json::json!({
+                "type": "media_tools_enabled_result",
+                "enabled": enabled,
+                "ok": ok,
+                "error": error,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        "hal_enabled_get" => {
+            let enabled = crate::config::ProjectConfig::load()
+                .and_then(|c| c.hal_enabled)
+                .unwrap_or(false);
+            let payload = serde_json::json!({
+                "type": "hal_enabled",
+                "enabled": enabled,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        "hal_enabled_set" => {
+            let enabled = msg
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let mut cfg = crate::config::ProjectConfig::load().unwrap_or_default();
+            cfg.hal_enabled = Some(enabled);
+            let (ok, error) = match cfg.save() {
+                Ok(()) => (true, String::new()),
+                Err(e) => (false, e.to_string()),
+            };
+            let payload = serde_json::json!({
+                "type": "hal_enabled_result",
+                "enabled": enabled,
+                "ok": ok,
+                "error": error,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        // Browser tools (`browserEnabled`) — the INVERSE of the
+        // media/team toggles: opt-OUT, default ON. Same get/set shape so
+        // the Settings menu can flip it; the Playwright MCP is injected at
+        // startup, so a change needs a restart to add/remove its tools.
+        "browser_enabled_get" => {
+            let enabled = crate::config::ProjectConfig::load()
+                .and_then(|c| c.browser_enabled)
+                .unwrap_or(true);
+            let payload = serde_json::json!({
+                "type": "browser_enabled",
+                "enabled": enabled,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        "browser_enabled_set" => {
+            // Default to ON (true) on a malformed payload — matches the
+            // opt-out default so a bad message can't silently disable it.
+            let enabled = msg.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+            let mut cfg = crate::config::ProjectConfig::load().unwrap_or_default();
+            cfg.browser_enabled = Some(enabled);
+            let (ok, error) = match cfg.save() {
+                Ok(()) => (true, String::new()),
+                Err(e) => (false, e.to_string()),
+            };
+            let payload = serde_json::json!({
+                "type": "browser_enabled_result",
+                "enabled": enabled,
+                "ok": ok,
+                "error": error,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
         "openrouter_free_only_get" => {
             let enabled = crate::config::AppConfig::load()
                 .map(|c| c.openrouter_free_only)
@@ -2617,23 +2824,15 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let payload = serde_json::json!({
                 "type": "gateway_settings",
                 "base_url": crate::providers::thclaws_gateway::GATEWAY_BASE_URL,
-                "use_for": cfg.gateway_use_for,
+                "proxy": cfg.gateway_proxy,
+                "has_cli_token": crate::providers::thclaws_gateway::has_access_key(),
             });
             (ctx.dispatch)(payload.to_string());
         }
         "gateway_settings_set" => {
-            let use_for: Vec<String> = msg
-                .get("use_for")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(|s| s.trim().to_lowercase()))
-                        .filter(|s| !s.is_empty())
-                        .collect()
-                })
-                .unwrap_or_default();
+            let proxy = msg.get("proxy").and_then(|v| v.as_bool()).unwrap_or(false);
             let mut cfg = crate::config::ProjectConfig::load().unwrap_or_default();
-            cfg.set_gateway_use_for(use_for.clone());
+            cfg.set_gateway_proxy(proxy);
             let (ok, error) = match cfg.save() {
                 Ok(()) => (true, String::new()),
                 Err(e) => (false, e.to_string()),
@@ -2641,7 +2840,8 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let payload = serde_json::json!({
                 "type": "gateway_settings_result",
                 "base_url": crate::providers::thclaws_gateway::GATEWAY_BASE_URL,
-                "use_for": use_for,
+                "proxy": proxy,
+                "has_cli_token": crate::providers::thclaws_gateway::has_access_key(),
                 "ok": ok,
                 "error": error,
             });
@@ -3158,6 +3358,11 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                     serde_json::json!({
                         "name": a.agent,
                         "status": a.status,
+                        // `alive=false` when the heartbeat is stale (crashed /
+                        // never booted) so the Team tab can flag it; the raw
+                        // status word alone freezes on its last value.
+                        "alive": a.agent == "lead" || a.status == "stopped" || !a.is_stale(),
+                        "last_heartbeat": a.last_heartbeat,
                         "task": a.current_task,
                         "output": output,
                     })
@@ -3726,6 +3931,132 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 "error": error,
             });
             (ctx.dispatch)(payload.to_string());
+        }
+
+        // Upload a dropped file (Files-tab drag-and-drop). Content arrives
+        // base64-encoded so arbitrary binary (images, PDFs, …) round-trips
+        // intact — `file_write` is text-only. Sandbox-checked; refuses to
+        // clobber an existing name, like `file_create`. Echoes `id` so the
+        // frontend can match the result to its per-upload listener.
+        "file_upload" => {
+            let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+            let raw_path = msg.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let data_b64 = msg.get("data").and_then(|v| v.as_str()).unwrap_or("");
+            let (ok, error): (bool, Option<String>) = match crate::sandbox::Sandbox::check(raw_path)
+            {
+                Ok(path) => {
+                    if path.exists() {
+                        (false, Some("a file with that name already exists".into()))
+                    } else {
+                        use base64::Engine;
+                        match base64::engine::general_purpose::STANDARD.decode(data_b64) {
+                            Ok(bytes) => {
+                                let parent_made = match path.parent() {
+                                    Some(parent) => std::fs::create_dir_all(parent)
+                                        .map_err(|e| format!("mkdir parent: {e}")),
+                                    None => Ok(()),
+                                };
+                                match parent_made {
+                                    Err(e) => (false, Some(e)),
+                                    Ok(()) => match std::fs::write(&path, &bytes) {
+                                        Ok(()) => (true, None),
+                                        Err(e) => (false, Some(format!("write: {e}"))),
+                                    },
+                                }
+                            }
+                            Err(e) => (false, Some(format!("decode: {e}"))),
+                        }
+                    }
+                }
+                Err(e) => (false, Some(format!("access denied: {e}"))),
+            };
+            (ctx.dispatch)(
+                serde_json::json!({
+                    "type": "file_upload_result",
+                    "id": id,
+                    "path": raw_path,
+                    "ok": ok,
+                    "error": error,
+                })
+                .to_string(),
+            );
+        }
+
+        // Delete a file or folder (Files-tab entry context menu). Sandbox-
+        // checked; folders are removed recursively. Echoes `id` so the
+        // frontend matches the result to its per-delete listener.
+        "file_delete" => {
+            let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+            let raw_path = msg.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let (ok, error): (bool, Option<String>) = match crate::sandbox::Sandbox::check(raw_path)
+            {
+                Ok(path) => {
+                    if !path.exists() {
+                        (false, Some("path no longer exists".into()))
+                    } else {
+                        let res = if path.is_dir() {
+                            std::fs::remove_dir_all(&path)
+                        } else {
+                            std::fs::remove_file(&path)
+                        };
+                        match res {
+                            Ok(()) => (true, None),
+                            Err(e) => (false, Some(format!("delete: {e}"))),
+                        }
+                    }
+                }
+                Err(e) => (false, Some(format!("access denied: {e}"))),
+            };
+            (ctx.dispatch)(
+                serde_json::json!({
+                    "type": "file_delete_result",
+                    "id": id,
+                    "path": raw_path,
+                    "ok": ok,
+                    "error": error,
+                })
+                .to_string(),
+            );
+        }
+
+        // Rename / move a file or folder (Files-tab entry context menu).
+        // Both endpoints are sandbox-checked; refuses to clobber an existing
+        // destination. Echoes `id` + the new path for the frontend listener.
+        "file_rename" => {
+            let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+            let from_raw = msg.get("from").and_then(|v| v.as_str()).unwrap_or("");
+            let to_raw = msg.get("to").and_then(|v| v.as_str()).unwrap_or("");
+            let (ok, error): (bool, Option<String>) = match (
+                crate::sandbox::Sandbox::check(from_raw),
+                crate::sandbox::Sandbox::check(to_raw),
+            ) {
+                (Ok(from), Ok(to)) => {
+                    if !from.exists() {
+                        (false, Some("source no longer exists".into()))
+                    } else if to.exists() {
+                        (
+                            false,
+                            Some("a file or folder with that name already exists".into()),
+                        )
+                    } else {
+                        match std::fs::rename(&from, &to) {
+                            Ok(()) => (true, None),
+                            Err(e) => (false, Some(format!("rename: {e}"))),
+                        }
+                    }
+                }
+                (Err(e), _) | (_, Err(e)) => (false, Some(format!("access denied: {e}"))),
+            };
+            (ctx.dispatch)(
+                serde_json::json!({
+                    "type": "file_rename_result",
+                    "id": id,
+                    "to": to_raw,
+                    "ok": ok,
+                    "error": error,
+                })
+                .to_string(),
+            );
         }
 
         // Create a new directory (Files-tab explorer context menu).

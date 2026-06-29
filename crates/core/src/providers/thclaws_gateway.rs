@@ -18,7 +18,7 @@
 //! ## Base URL
 //!
 //! The gateway base URL is **fixed** at the canonical
-//! [`GATEWAY_BASE_URL`] (`https://gateway.thclaws.ai`). End users
+//! [`GATEWAY_BASE_URL`] (`https://gateway.thclaws.cloud`). End users
 //! can't change it from the Settings UI — there's nothing to
 //! misconfigure. For development against a staging gateway, set the
 //! `THCLAWS_GATEWAY_BASE_URL` env var; it overrides at lookup time.
@@ -27,17 +27,23 @@
 //!
 //! Resolution order:
 //! 1. `THCLAWS_GATEWAY_API_KEY` env var
-//! 2. OS keychain bundle, account `gateway`
-//! 3. None → overlay disabled (falls back to the provider's native upstream)
+//! 2. OS keychain bundle, account `gateway` (a dedicated `gw_v1_` key)
+//! 3. The thClaws.cloud CLI token ([`crate::cloud::token`]) — the gateway
+//!    accepts it directly, so a cloud-logged-in user needs no separate
+//!    gateway key.
+//! 4. None → overlay disabled (falls back to the provider's native upstream)
 
 use crate::config::AppConfig;
 use crate::providers::ProviderKind;
 
-/// Fixed gateway base URL. Matches the DNS at
-/// `gateway.thclaws.ai → 203.150.118.93` + the Ingress host in
-/// `thclaws/k8s/gateway/ingress.yaml`. Override at lookup time with
-/// `THCLAWS_GATEWAY_BASE_URL` for staging / local dev only.
-pub const GATEWAY_BASE_URL: &str = "https://gateway.thclaws.ai";
+/// Fixed gateway base URL. Points at the consolidated thclaws.cloud
+/// gateway via the dedicated subdomain `gateway.thclaws.cloud` (Traefik
+/// IngressRoute `thclaws-cloud-gateway-host`, no /gateway strip-prefix —
+/// the gateway is served at the host root), TLS by the *.thclaws.cloud
+/// wildcard cert. Replaces the retired standalone `gateway.thclaws.ai`.
+/// Override at lookup time with `THCLAWS_GATEWAY_BASE_URL` for staging /
+/// local dev only.
+pub const GATEWAY_BASE_URL: &str = "https://gateway.thclaws.cloud";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GatewayOverlay {
@@ -91,6 +97,13 @@ pub fn provider_name_for_config(kind: ProviderKind) -> Option<&'static str> {
 /// providers in gateway mode, and the full catalogue for BYOK sessions.
 pub fn is_active(config: &AppConfig) -> bool {
     !config.gateway_use_for.is_empty() && resolve_access_key().is_some()
+}
+
+/// True when a gateway access key is available (a gateway key OR the cloud CLI
+/// token). The GUI enables the proxy checkbox only when this holds — no token,
+/// no proxy.
+pub fn has_access_key() -> bool {
+    resolve_access_key().is_some()
 }
 
 /// Map a catalogue/picker provider NAME (not kind) to its gateway
@@ -153,10 +166,38 @@ pub fn for_kind(config: &AppConfig, kind: ProviderKind) -> Option<GatewayOverlay
     })
 }
 
+/// The gateway overlay for ROUTING the active model — `for_kind` plus a
+/// per-model eligibility gate. The gateway only serves **featured** models
+/// (a Featured-tier provider with a priced catalogue entry); a non-featured
+/// model returns `None` so `build_provider` falls back to BYOK rather than
+/// sending a request the gateway would reject with 400. Unlike `for_kind`
+/// (which answers the model-agnostic "does this provider have a route?",
+/// used by `preferred_default_model`), this is the call routing sites use.
+///
+/// The catalogue is only consulted AFTER `for_kind` confirms the proxy is on
+/// for this provider + an access key exists, so BYOK sessions never pay the
+/// lookup cost.
+pub fn gateway_overlay_for_model(config: &AppConfig, kind: ProviderKind) -> Option<GatewayOverlay> {
+    let overlay = for_kind(config, kind)?;
+    if !model_is_gateway_servable(&config.model) {
+        return None;
+    }
+    Some(overlay)
+}
+
+/// True when `model` is gateway-servable: it has a priced catalogue entry
+/// (both input + output per-mtok), which is what makes the gateway able to
+/// meter it. Provider-level routability is already established by `for_kind`'s
+/// caller, so this only checks pricing.
+pub fn model_is_gateway_servable(model: &str) -> bool {
+    crate::model_catalogue::EffectiveCatalogue::load().is_priced(model)
+}
+
 /// Resolve the gateway base URL. Honors `THCLAWS_GATEWAY_BASE_URL`
 /// for dev/staging overrides; otherwise returns the canonical
-/// [`GATEWAY_BASE_URL`].
-fn resolve_base_url() -> String {
+/// [`GATEWAY_BASE_URL`]. `pub(crate)` so the media-generation tools
+/// route through the exact same base as the LLM path.
+pub(crate) fn resolve_base_url() -> String {
     std::env::var("THCLAWS_GATEWAY_BASE_URL")
         .ok()
         .map(|s| s.trim().to_string())
@@ -165,15 +206,27 @@ fn resolve_base_url() -> String {
 }
 
 /// Look up the gateway access key. Env var wins (handy for CI /
-/// scripted runs); otherwise keychain bundle.
-fn resolve_access_key() -> Option<String> {
+/// scripted runs); otherwise keychain bundle; otherwise the cloud CLI
+/// token. `pub(crate)` so media-generation tools detect gateway access
+/// from the SAME three sources as the LLM path (an env-only check made
+/// `TextToImage` blind to cloud-login / keychain gateway users).
+pub(crate) fn resolve_access_key() -> Option<String> {
     if let Ok(v) = std::env::var("THCLAWS_GATEWAY_API_KEY") {
         let trimmed = v.trim().to_string();
         if !trimmed.is_empty() {
             return Some(trimmed);
         }
     }
-    crate::secrets::get("gateway")
+    if let Some(k) = crate::secrets::get("gateway") {
+        let trimmed = k.trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(trimmed);
+        }
+    }
+    // Fall back to the thClaws.cloud CLI token. The gateway accepts it
+    // directly (looked up in `cli_tokens`, billed to the same user), so a
+    // cloud-logged-in user gets gateway access with no separate key.
+    crate::cloud::token()
 }
 
 #[cfg(test)]
@@ -218,8 +271,9 @@ mod tests {
         assert!(is_active(&cfg(&["openai"])), "toggle + key → active");
         assert!(!is_active(&cfg(&[])), "no provider toggled → inactive");
         std::env::remove_var("THCLAWS_GATEWAY_API_KEY");
-        // No key (unless the test host has a keychain 'gateway' entry).
-        if crate::secrets::get("gateway").is_none() {
+        // No key (unless the test host has a keychain 'gateway' entry or
+        // a thClaws.cloud login — both are valid access-key sources).
+        if resolve_access_key().is_none() {
             assert!(!is_active(&cfg(&["openai"])), "no key → inactive");
         }
     }
@@ -238,9 +292,10 @@ mod tests {
         assert!(!hides_unpriced_models(&cfg_on, "ollama"));
         assert!(!hides_unpriced_models(&cfg_on, "nvidia"));
         std::env::remove_var("THCLAWS_GATEWAY_API_KEY");
-        // No access key → overlay inert → nothing hidden (unless the
-        // test host has a keychain 'gateway' entry — accept that).
-        if crate::secrets::get("gateway").is_none() {
+        // No access key → overlay inert → nothing hidden (unless the test
+        // host has a keychain 'gateway' entry or a thClaws.cloud login —
+        // both are valid access-key sources).
+        if resolve_access_key().is_none() {
             assert!(!hides_unpriced_models(&cfg_on, "dashscope"));
         }
     }

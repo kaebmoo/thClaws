@@ -258,7 +258,7 @@ impl ProviderKind {
             Self::OpenAI => "gpt-4.1",
             Self::OpenAIResponses => "codex/gpt-5.2-codex",
             Self::ChatGptCodex => "chatgpt-codex/gpt-5.4",
-            Self::OpenRouter => "openrouter/anthropic/claude-sonnet-4-6",
+            Self::OpenRouter => "openrouter/qwen/qwen3.7-plus",
             Self::TokenRouter => "tokenrouter/anthropic/claude-sonnet-4.5",
             // Pinned to a versioned ID (matching Anthropic / OpenAI
             // convention) rather than `gemini-flash-latest` — `-latest`
@@ -968,6 +968,13 @@ impl Usage {
                 (None, Some(b)) => Some(b),
                 (None, None) => None,
             };
+        self.reasoning_output_tokens =
+            match (self.reasoning_output_tokens, other.reasoning_output_tokens) {
+                (Some(a), Some(b)) => Some(a + b),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
     }
 }
 
@@ -1072,7 +1079,15 @@ pub trait Provider: Send + Sync {
 /// M6.36 SERVE9e: lifted out of `gui.rs` to an always-on home so the
 /// WS transport's IPC handlers can use the same readiness check.
 pub fn provider_has_credentials(cfg: &crate::config::AppConfig) -> bool {
-    kind_has_credentials(cfg.detect_provider_kind().ok())
+    let kind = cfg.detect_provider_kind().ok();
+    if kind_has_credentials(kind) {
+        return true;
+    }
+    // A gateway-routed provider is "ready" even without a local key:
+    // the gateway supplies credentials against the user's CLI token.
+    // Without this, ticking the per-provider proxy toggle still leaves
+    // the sidebar showing "no API key". Mirrors preferred_default_model().
+    kind.is_some_and(|k| crate::providers::thclaws_gateway::for_kind(cfg, k).is_some())
 }
 
 /// True when `kind` has credentials available (env var, auth file, or
@@ -1115,10 +1130,6 @@ pub async fn build_all_models_payload() -> String {
     let cat = crate::model_catalogue::EffectiveCatalogue::load();
     let app_cfg = crate::config::AppConfig::load().unwrap_or_default();
     let free_only_or = app_cfg.openrouter_free_only;
-    // Gateway mode (hosted cloud, metered): only Featured providers have a
-    // gateway route, so the picker hides Additional ones. BYOK sessions
-    // (desktop / own keys) see the full catalogue.
-    let gateway_mode = crate::providers::thclaws_gateway::is_active(&app_cfg);
     let ollama_live: Vec<String> = {
         let base = std::env::var("OLLAMA_BASE_URL")
             .unwrap_or_else(|_| crate::providers::ollama::DEFAULT_BASE_URL.to_string());
@@ -1159,15 +1170,20 @@ pub async fn build_all_models_payload() -> String {
     let mut groups: Vec<(u32, serde_json::Value)> = Vec::new();
     for (all_idx, kind) in ProviderKind::ALL.iter().enumerate() {
         let name = kind.name();
-        // In gateway mode, Additional providers aren't routable — skip them.
-        if gateway_mode && kind.tier() != ProviderTier::Featured {
+        // Hosted multiuser pods have NO BYOK — a non-routable provider or an
+        // unpriced model can't be served there, so hide them. On desktop we
+        // show EVERYTHING (BYOK works for any model) and tag each row with
+        // `featured` so the UI can decide where the proxy switch applies.
+        let pod = crate::workdir::is_multiuser();
+        if pod && kind.tier() != ProviderTier::Featured {
             continue;
         }
-        let mut model_ids: std::collections::BTreeMap<String, Option<u32>> =
+        let provider_featured = kind.tier() == ProviderTier::Featured;
+        // (id) -> (context, featured). `featured` = gateway-servable: a
+        // Featured-tier provider with a priced catalogue entry.
+        let mut model_ids: std::collections::BTreeMap<String, (Option<u32>, bool)> =
             std::collections::BTreeMap::new();
         let is_openrouter = matches!(kind, ProviderKind::OpenRouter);
-        let hide_unpriced =
-            crate::providers::thclaws_gateway::hides_unpriced_models(&app_cfg, name);
         for (id, entry) in cat.list_models_for_provider(name) {
             if entry.chat == Some(false) {
                 continue;
@@ -1175,22 +1191,22 @@ pub async fn build_all_models_payload() -> String {
             if is_openrouter && free_only_or && entry.free != Some(true) {
                 continue;
             }
-            // Strictly metered via gateway → unpriced rows 400, hide them.
-            if hide_unpriced && (entry.input_per_mtok.is_none() || entry.output_per_mtok.is_none())
-            {
+            let priced = entry.input_per_mtok.is_some() && entry.output_per_mtok.is_some();
+            // In a pod, unpriced rows would 400 (strictly metered) — hide them.
+            if pod && !priced {
                 continue;
             }
             let canonical = crate::model_catalogue::canonical_model_id(name, &id);
-            model_ids.insert(canonical, entry.context);
+            model_ids.insert(canonical, (entry.context, provider_featured && priced));
         }
         if matches!(kind, ProviderKind::Ollama) {
             for id in &ollama_live {
-                model_ids.entry(id.clone()).or_insert(None);
+                model_ids.entry(id.clone()).or_insert((None, false));
             }
         }
         if matches!(kind, ProviderKind::OpenCodeGo) {
             for id in &opencodego_live {
-                model_ids.entry(id.clone()).or_insert(None);
+                model_ids.entry(id.clone()).or_insert((None, false));
             }
         }
         if model_ids.is_empty() {
@@ -1198,7 +1214,9 @@ pub async fn build_all_models_payload() -> String {
         }
         let model_rows: Vec<serde_json::Value> = model_ids
             .into_iter()
-            .map(|(id, ctx)| serde_json::json!({ "id": id, "context": ctx }))
+            .map(|(id, (ctx, featured))| {
+                serde_json::json!({ "id": id, "context": ctx, "featured": featured })
+            })
             .collect();
         let tier = kind.tier();
         let rank = match tier {
@@ -1278,16 +1296,23 @@ pub fn auto_fallback_model(cfg: &crate::config::AppConfig) -> Option<String> {
 /// keyless; this picks the preferred *paid* default when nothing is
 /// configured yet.
 pub fn preferred_default_model(cfg: &crate::config::AppConfig) -> Option<String> {
-    const ORDER: &[ProviderKind] = &[
-        ProviderKind::DashScope,
-        ProviderKind::OpenAI,
-        ProviderKind::Anthropic,
+    // Ordered (provider, model) preference: the first provider the user can
+    // reach — own key OR a gateway route — picks the session default. Models
+    // are pinned explicitly (not `kind.default_model()`) so the credential-
+    // aware default can prefer a specific tier per provider independent of
+    // each provider's standalone default. All four are priced in the
+    // catalogue, so they're gateway-servable for proxied sessions.
+    const ORDER: &[(ProviderKind, &str)] = &[
+        (ProviderKind::DeepSeek, "deepseek-v4-pro"),
+        (ProviderKind::DashScope, "dashscope/qwen3.7-max"),
+        (ProviderKind::OpenAI, "gpt-5.5"),
+        (ProviderKind::Anthropic, "claude-sonnet-4-6"),
     ];
-    for kind in ORDER {
+    for (kind, model) in ORDER {
         let has_key = kind_has_credentials(Some(*kind));
         let via_gateway = crate::providers::thclaws_gateway::for_kind(cfg, *kind).is_some();
         if has_key || via_gateway {
-            return Some(kind.default_model().to_string());
+            return Some((*model).to_string());
         }
     }
     None
@@ -1296,6 +1321,55 @@ pub fn preferred_default_model(cfg: &crate::config::AppConfig) -> Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accumulate_sums_all_token_fields_including_reasoning() {
+        let mut acc = Usage::default();
+        acc.accumulate(&Usage {
+            input_tokens: 100,
+            output_tokens: 20,
+            cache_creation_input_tokens: Some(5),
+            cache_read_input_tokens: None,
+            reasoning_output_tokens: Some(7),
+        });
+        acc.accumulate(&Usage {
+            input_tokens: 50,
+            output_tokens: 10,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: Some(8),
+            reasoning_output_tokens: Some(3),
+        });
+        assert_eq!(acc.input_tokens, 150);
+        assert_eq!(acc.output_tokens, 30);
+        assert_eq!(acc.cache_creation_input_tokens, Some(5));
+        assert_eq!(acc.cache_read_input_tokens, Some(8));
+        // The bug: reasoning tokens used to be dropped → would stay None.
+        assert_eq!(acc.reasoning_output_tokens, Some(10));
+    }
+
+    /// Regression: a provider routed through the thClaws gateway (the
+    /// per-provider proxy toggle on + a CLI/gateway token present) must
+    /// count as "having credentials" even with no local API key, so the
+    /// sidebar stops showing "no API key" for a working proxied provider.
+    /// Test isolation: serialise the `THCLAWS_GATEWAY_API_KEY` mutation
+    /// so a sibling env-reading test doesn't see ghost state.
+    #[test]
+    fn provider_has_credentials_honors_gateway_route() {
+        // Share the one lock with the other tests that mutate
+        // THCLAWS_GATEWAY_API_KEY / provider-key env vars — distinct mutexes
+        // would let them race and intermittently clear each other's state.
+        let _guard = PREF_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = crate::config::AppConfig::default();
+        // Detects as Gemini; segment "google" is the gateway key.
+        cfg.model = "gemini-2.5-flash".to_string();
+        cfg.gateway_use_for = vec!["google".to_string()];
+        std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw_v1_test");
+        assert!(
+            provider_has_credentials(&cfg),
+            "gateway toggle + token → ready, no local key needed"
+        );
+        std::env::remove_var("THCLAWS_GATEWAY_API_KEY");
+    }
 
     /// `set_stream_chunk_timeout_secs` must be reflected by the
     /// next `stream_chunk_timeout()` call — the providers read this
@@ -1651,20 +1725,25 @@ mod tests {
     }
 
     #[test]
-    fn preferred_default_model_follows_dashscope_openai_anthropic_order() {
+    fn preferred_default_model_follows_deepseek_dashscope_openai_anthropic_order() {
         let _guard = PREF_ENV_LOCK.lock().unwrap();
         // Isolate from any real provider keys in the host env so only the
         // gateway route under test decides the pick.
-        for v in ["DASHSCOPE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"] {
+        for v in [
+            "DEEPSEEK_API_KEY",
+            "DASHSCOPE_API_KEY",
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+        ] {
             std::env::remove_var(v);
         }
         std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw_v1_test");
 
         let mut cfg = crate::config::AppConfig::default();
 
-        // Only OpenAI gateway-routed → OpenAI's default model.
+        // Only OpenAI gateway-routed → the pinned OpenAI default.
         cfg.gateway_use_for = vec!["openai".into()];
-        assert_eq!(preferred_default_model(&cfg).as_deref(), Some("gpt-4.1"));
+        assert_eq!(preferred_default_model(&cfg).as_deref(), Some("gpt-5.5"));
 
         // DashScope outranks OpenAI when both are available.
         cfg.gateway_use_for = vec!["openai".into(), "dashscope".into()];
@@ -1673,8 +1752,15 @@ mod tests {
             Some("dashscope/qwen3.7-max")
         );
 
-        // None of the three configured (no gateway route, host keys
-        // cleared) → None so the caller keeps the compiled-in default.
+        // DeepSeek outranks everything when in the routed set.
+        cfg.gateway_use_for = vec!["openai".into(), "dashscope".into(), "deepseek".into()];
+        assert_eq!(
+            preferred_default_model(&cfg).as_deref(),
+            Some("deepseek-v4-pro")
+        );
+
+        // None configured (no gateway route, host keys cleared) → None so
+        // the caller keeps the compiled-in default.
         cfg.gateway_use_for = vec![];
         let out = preferred_default_model(&cfg);
         std::env::remove_var("THCLAWS_GATEWAY_API_KEY");

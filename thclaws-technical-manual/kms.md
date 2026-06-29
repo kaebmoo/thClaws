@@ -7,12 +7,13 @@ This doc covers: the three-layer architecture, on-disk layout, YAML frontmatter 
 **Source modules:**
 - `crates/core/src/kms.rs` — `KmsRef`, `KmsScope`, `KmsManifest` + `KMS_SCHEMA_VERSION`, `create`, `resolve`, `list_all`, `ingest` + `ingest_url` + `ingest_pdf`, `write_page` + `append_to_page` + `delete_page` + `writable_page_path`, `parse_frontmatter` + `write_frontmatter`, `lint` + `LintReport` (six categories incl. `missing_required_fields`), `system_prompt_section` + categorized index, `mark_dependent_pages_stale` + `scan_stale_markers`, Migration framework (`Migration` + `migrations()` + `migrate` + `detect_schema_version` + `MigrationReport` + `LEGACY_SCHEMA_VERSION`)
 - `crates/core/src/tools/kms.rs` — `KmsReadTool`, `KmsSearchTool`, `KmsWriteTool`, `KmsAppendTool`, `KmsDeleteTool`
-- `crates/core/src/shell_dispatch.rs` — `/kms` slash-command handlers (GUI path); `format_lint_report` + `format_wrap_up_report` + `format_migration_report`, `has_actionable_issues`, `compose_kms_linker_prompt` + `compose_kms_reconcile_prompt`, `sanitize_alias_for_dispatch`
+- `crates/core/src/shell_dispatch.rs` — `/kms` slash-command handlers (GUI path); `format_lint_report` + `format_wrap_up_report` + `format_migration_report`, `has_actionable_issues`, `compose_kms_linker_prompt` + `compose_kms_reconcile_prompt` + `compose_kms_maintain_prompt`, `sanitize_alias_for_dispatch`
+- `crates/core/src/agent.rs` — `build_kms_context_reminder` (deterministic pre-retrieval — see "Deterministic pre-retrieval" under the BM25 search section) + `sanitize_kms_query`, spliced into the per-turn system prompt in `run_turn_multipart`
 - `crates/core/src/repl.rs` — `SlashCommand::Kms*` enum + parser + CLI dispatch; `build_kms_ingest_session_prompt` + `build_kms_dump_prompt` + `build_kms_challenge_prompt` (inline prompt builders for the rewrite-before-match commands)
 - `crates/core/src/shared_session.rs` — `kms_active`-driven tool registration at worker boot; rewrite-before-match intercepts for `KmsIngestSession` + `KmsDump` + `KmsChallenge`
 - `crates/core/src/config.rs` — `kms_active` persistence in `.thclaws/settings.json` via `ProjectConfig::set_active_kms`
-- `crates/core/src/default_prompts/kms-linker.md` + `kms-reconcile.md` — built-in subagent definitions (`include_str!`-embedded via `agent_defs::seed_builtins`)
-- `crates/core/src/agent_defs.rs` — `BUILTINS` array registers `kms-linker` + `kms-reconcile` alongside `dream` + `translator`
+- `crates/core/src/default_prompts/kms-linker.md` + `kms-reconcile.md` + `kms-maintain.md` — built-in subagent definitions (`include_str!`-embedded via `agent_defs::seed_builtins`)
+- `crates/core/src/agent_defs.rs` — `BUILTINS` array registers `kms-linker` + `kms-reconcile` + `kms-maintain` alongside `dream` + `translator`
 
 **Cross-references:**
 - [`built-in-tools.md`](built-in-tools.md) §3 — `KmsRead` + `KmsSearch` + `KmsWrite` + `KmsAppend` + `KmsDelete` tool surface
@@ -429,6 +430,8 @@ _… index truncated at 200 entries (total: 487)_
 | `/kms wrap-up <name> --fix` | GUI-only — dispatches `kms-linker` subagent to act on the report (see §15) |
 | `/kms reconcile <name> [<focus>]` (or `resolve`) | GUI-only — dispatches `kms-reconcile` subagent (see §15) for dry-run contradiction scan; classifies findings as clear-winner / ambiguous / evolution |
 | `/kms reconcile <name> [<focus>] --apply` | Same, but executes — rewrites outdated pages with `## History`, creates `Conflict — <topic>.md` for ambiguous cases |
+| `/kms maintain <name>` (or `tidy`) | GUI-only — dispatches `kms-maintain` subagent (see §15) for a dry-run of the full staged pipeline (structural → source-reconcile → stale → contradictions) |
+| `/kms maintain <name> --apply` | Same, but executes all stages. Dry-run/apply flags mirror `reconcile` (`--apply`/`--execute`, `--dry-run`/`--plan`) |
 | `/kms migrate <name>` | Dry-run preview of the schema chain |
 | `/kms migrate <name> --apply` | Execute the chain. Aliases: `--execute`, `--run` (and `--dry-run` / `--plan` to opt back) |
 | `/kms file-answer <kms> <title>` (or `file`) | File latest assistant message as a new page |
@@ -1006,6 +1009,18 @@ CLI emits the same `"GUI-only — dispatches the built-in kms-reconcile agent as
 
 The split is deliberate. `kms-linker` is *deterministic* — the lint report is generated mechanically and the agent acts on each entry. `kms-reconcile` is *judgment-driven* — every contradiction needs LLM evaluation (which side is more authoritative? is this evolution or contradiction?). Different jobs; same architectural seam.
 
+### `kms-maintain` — one-command maintenance umbrella
+
+`def: default_prompts/kms-maintain.md`; dispatched by `/kms maintain <name> [--apply]`. A single side-channel agent that runs the whole maintenance surface as a **staged pipeline**, so users don't have to know which of `lint` / `wrap-up` / `reconcile` to reach for. Dispatch (`shell_dispatch.rs`) computes the `LintReport` + `Vec<StaleEntry>` in Rust (same inputs as `kms-linker`) and feeds them via `compose_kms_maintain_prompt(name, lint, stale, apply)`; the agent's manual carries the five-stage procedure:
+
+1. **Structural fixes** — broken links, missing-in-index, missing required frontmatter (linker's job).
+2. **Source reconciliation** — `Glob .thclaws/sessions/*.jsonl` (uncapped), drop any `sess-<id>` from a page's `sources:` whose session file is gone. **Never deletes a page** — full-vault analogue of `dream`'s incremental sweep (see `dream.md`). This is why `kms-maintain` is the only maintenance agent with `Glob` in its tool list.
+3. **Stale refresh** — refresh `> ⚠ STALE`-marked pages.
+4. **Contradiction reconciliation** — the full `kms-reconcile` procedure across the whole vault.
+5. **Orphans** — listed, never modified.
+
+Tool whitelist: `KmsRead, KmsSearch, KmsWrite, KmsAppend, Glob, TodoWrite` — **no `KmsDelete`** (like the other two; it only scrubs dead refs *inside* pages). Dry-run by default; `--apply` executes. Complementary to `/dream`: `dream` is incremental (mines new sessions, cleans only pages it touches), `maintain` is a full-vault sweep over every page.
+
 ---
 
 ## dev-plan/36 BM25 search architecture
@@ -1154,6 +1169,20 @@ Build wiring:
 `shell_dispatch.rs` (GUI / `--serve`). Drops `.index/` and calls
 `full_rebuild`. Operator-only (no `KmsReindex` model-callable
 tool — the auto-build-on-stale path covers self-healing).
+
+### Deterministic pre-retrieval (auto-RAG)
+
+`agent.rs::build_kms_context_reminder(query)` — gated on `feature = "kms_search_index"` (no-op stub otherwise). The system-prompt KMS index (`system_prompt_section`, §4) tells the model what *exists* and a "consult before answering" directive asks it to search — but the model **decides** whether to, and routinely skips for casual/"tell me about X" phrasings even on strong models (observed with `deepseek-v4-pro`). Pre-retrieval removes that decision from the loop.
+
+Once per **user turn** (in `run_turn_multipart`, before `provider.stream`, alongside the plan/todos reminders — *not* per tool-loop iteration), the engine:
+
+1. Sanitizes the message into a bag-of-words query (`sanitize_kms_query` strips tantivy metacharacters `: ( ? + * …` and caps at 200 chars). Skips if < 4 chars.
+2. Loads `AppConfig::kms_active`; bails if empty.
+3. For each active KMS: `kms_search_index::get_or_open(root).search(q, …, limit=5)`.
+4. Keeps hits with `score ≥ SCORE_FLOOR` (4.0; tuned so a direct topic match ~10-20 clears it and the `dream-*` audit page ~1-2 doesn't), **skipping `sess-*` / `dream-*`** pages (provenance/audit, not canonical answers).
+5. Top `MAX_PAGES` (3) by score → injects a **pointer list** (`` - `KMS: <name>/<page>` — <topic> ``) into the per-turn system prompt, instructing the model to `KmsRead` the relevant one(s) and answer from them.
+
+Deliberately **pointers, not page bodies** — ~200 bytes/turn instead of multiple KB; the model `KmsRead`s only what it needs (which it does reliably once the page is named). The Thai-aware tokenizer (see "Tokenizer" above) runs at query time too, so a raw Thai message segments and matches without the model having to build a clean query. Gating (floor + length + active-KMS) keeps greetings / coding turns / off-topic asks from injecting anything.
 
 ---
 

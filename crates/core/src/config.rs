@@ -96,6 +96,19 @@ pub struct AppConfig {
     /// Lifecycle hooks — shell commands fired on agent events.
     pub hooks: crate::hooks::HooksConfig,
 
+    /// dev-plan/49: OS-level Bash confinement mode — `workspace` (default:
+    /// writes confined to workspace + tmp + package-manager caches), `strict`
+    /// (workspace + tmp only), or `off`. settings.json `bash.sandbox`. Falls
+    /// back to unconfined (with a warning) on hosts where no OS confiner can
+    /// enforce, so the default never breaks a command.
+    pub bash_sandbox: String,
+    /// Extra absolute (or `~/`) paths the confined Bash may write to.
+    /// settings.json `bash.sandbox_write_paths`.
+    pub bash_sandbox_write_paths: Vec<String>,
+    /// Extra paths the confined Bash must NOT read. settings.json
+    /// `bash.sandbox_deny_read`.
+    pub bash_sandbox_deny_read: Vec<String>,
+
     /// Maximum agent loop iterations per turn (0 = unlimited).
     /// Default 200 — high enough for complex multi-step tasks.
     pub max_iterations: usize,
@@ -217,6 +230,14 @@ pub struct AppConfig {
     #[serde(default)]
     pub image_tools_enabled: bool,
 
+    /// Opt-in flag for the HAL Public-API tools (`YouTubeTranscript`,
+    /// `WebScrape`). Off by default — same posture as the media tools:
+    /// they call a hosted service on the user's `HAL_API_KEY` (or the
+    /// gateway). `requires_env()` still hides them when no key is set
+    /// even with this flag on.
+    #[serde(default, alias = "halEnabled")]
+    pub hal_enabled: bool,
+
     /// Engine-managed browser automation (docs/browser, Phase 0+1).
     /// When `true`, `AppConfig::load()` injects the official Playwright
     /// MCP server as a synthetic engine-managed stdio config named
@@ -246,6 +267,14 @@ pub struct AppConfig {
     /// — see that module for the staging override env var.
     #[serde(default)]
     pub gateway_use_for: Vec<String>,
+    /// Single source of truth for the desktop proxy toggle: when true (and a
+    /// CLI access token is present), every gateway-routable provider routes
+    /// through the thClaws Gateway; when false, pure BYOK. `gateway_use_for`
+    /// above is DERIVED from this in `load()` — never edited directly by the
+    /// UI. Per-model eligibility (Featured + priced) is enforced at routing
+    /// time, so a non-featured model falls back to BYOK even when this is on.
+    #[serde(default)]
+    pub gateway_proxy: bool,
 
     /// Per-skill model recommendations from settings.json. Overrides the
     /// `model:` field declared in the SKILL.md frontmatter for the named
@@ -506,6 +535,9 @@ impl Default for AppConfig {
             disallowed_tools: None,
             resume_session: None,
             hooks: crate::hooks::HooksConfig::default(),
+            bash_sandbox: "workspace".to_string(),
+            bash_sandbox_write_paths: Vec::new(),
+            bash_sandbox_deny_read: Vec::new(),
             // 50 tool-use rounds is enough for everything short of
             // teammate-orchestrated multi-agent flows, and surfaces
             // runaway loops earlier than the old 200.
@@ -525,9 +557,11 @@ impl Default for AppConfig {
             claude_md_compat: false,
             openrouter_free_only: false,
             image_tools_enabled: false,
+            hal_enabled: false,
             browser_enabled: true,
             browser_headless: None,
             gateway_use_for: Vec::new(),
+            gateway_proxy: false,
             extract_save_skill_models: None,
             translator_subagent_model: None,
             remote_agent_url: None,
@@ -710,6 +744,10 @@ pub struct ProjectConfig {
     /// `mediaToolsEnabled` (preferred) or the legacy `imageToolsEnabled`.
     #[serde(rename = "imageToolsEnabled", alias = "mediaToolsEnabled")]
     pub image_tools_enabled: Option<bool>,
+    /// Opt-in flag for the HAL Public-API tools (`YouTubeTranscript`,
+    /// `WebScrape`). See [`AppConfig::hal_enabled`].
+    #[serde(rename = "halEnabled")]
+    pub hal_enabled: Option<bool>,
     /// Engine-managed Playwright browser automation. See
     /// [`AppConfig::browser_enabled`].
     #[serde(rename = "browserEnabled")]
@@ -725,6 +763,9 @@ pub struct ProjectConfig {
     pub show_raw_response: Option<bool>,
     /// Knowledge-base settings — `{ "active": ["name1", ...] }`.
     pub kms: Option<KmsSettings>,
+    /// dev-plan/49 OS-level Bash confinement —
+    /// `{ "sandbox": "workspace", "sandbox_write_paths": [...], ... }`.
+    pub bash: Option<BashSettings>,
     /// Auto-learn — file each ended session as a page in a dedicated
     /// KMS and periodically reconcile it. See
     /// [`AppConfig::auto_learn`] for the full design. Default off
@@ -751,6 +792,12 @@ pub struct ProjectConfig {
     /// per-provider opt-in lives in user-visible config.
     #[serde(rename = "gatewayUseFor")]
     pub gateway_use_for: Option<Vec<String>>,
+    /// Desktop proxy toggle (single flag). `true` = route every gateway-routable
+    /// provider through the thClaws Gateway; `false`/absent = BYOK. Supersedes
+    /// the legacy `gatewayUseFor` list (which is migrated to `true` when
+    /// non-empty). Written by the GUI proxy checkbox.
+    #[serde(rename = "gatewayProxy")]
+    pub gateway_proxy: Option<bool>,
     /// Default target for `/deploy`. See
     /// [`AppConfig::remote_agent_url`].
     #[serde(rename = "remoteAgentUrl")]
@@ -847,15 +894,18 @@ impl Default for ProjectConfig {
             team_enabled: Some(false),
             shell_tab_enabled: Some(false),
             image_tools_enabled: Some(false),
+            hal_enabled: Some(false),
             browser_enabled: None,
             browser_headless: None,
             show_raw_response: None,
             kms: None,
+            bash: None,
             auto_learn: None,
             auto_learn_kms: None,
             auto_learn_reconcile_hours: None,
             openrouter_free_only: None,
             gateway_use_for: None,
+            gateway_proxy: None,
             remote_agent_url: None,
             telegram: None,
             cloud: None,
@@ -874,6 +924,18 @@ pub struct KmsSettings {
     /// every name in the list gets its `index.md` spliced into the
     /// system prompt.
     pub active: Vec<String>,
+}
+
+/// dev-plan/49: `bash` block in settings.json — OS-level Bash confinement.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct BashSettings {
+    /// `off` | `workspace` | `strict`.
+    pub sandbox: Option<String>,
+    /// Extra paths the confined Bash may write (absolute or `~/`).
+    pub sandbox_write_paths: Option<Vec<String>>,
+    /// Extra paths the confined Bash must not read.
+    pub sandbox_deny_read: Option<Vec<String>>,
 }
 
 /// Shallow-overlay merge for `save()`'s non-destructive write. Two
@@ -1026,9 +1088,10 @@ impl ProjectConfig {
         // compiled-in default; null on an Option field has the same
         // effect. Keep this list in sync with `ProjectConfig` whenever
         // a field is added.
-        let body = r#"{
+        let template = r#"{
   "_doc": "thClaws project settings. Every available field is listed below at its default value — change a value to override, or delete a field (or set it to null on Option fields) to inherit the global default. windowWidth/windowHeight default to a monitor-resolution-aware size picked at GUI startup (1760x962 on >=1920x1080 displays, 1200x800 otherwise) when left null. See user-manual ch10 for the field reference.",
-  "model": "gpt-4.1",
+  "_doc_model": "null = pick automatically from the first provider you have credentials for (DeepSeek → DashScope → OpenAI → Anthropic). Set an explicit id (e.g. \"claude-sonnet-4-6\") to pin one.",
+  "model": null,
   "permissions": "auto",
   "maxTokens": 32000,
   "maxIterations": 50,
@@ -1038,6 +1101,7 @@ impl ProjectConfig {
   "skillsListingStrategy": "full",
   "teamEnabled": false,
   "shellTabEnabled": false,
+  "halEnabled": false,
   "showRawResponse": false,
   "allowedTools": null,
   "disallowedTools": null,
@@ -1051,12 +1115,34 @@ impl ProjectConfig {
   "kms": { "active": [] }
 }
 "#;
+        // First-run on a fresh folder + a usable gateway credential (cloud
+        // login or a pasted gateway key) → default the proxy ON, so a
+        // logged-in user gets a working session immediately instead of a
+        // "no API key found for provider …" wall. Only ever written here at
+        // first-run bootstrap, never onto an existing config, so it can't
+        // flip a project the user deliberately set to BYOK; they can still
+        // turn it off in Settings → thClaws.cloud. `has_access_key` is the
+        // same gate the GUI uses to enable the proxy checkbox (cloud token /
+        // gateway key — not network-validated here). Skipped under tests
+        // (keychain/env-dependent → would be nondeterministic).
+        let body = if !cfg!(test) && crate::providers::thclaws_gateway::has_access_key() {
+            Self::inject_default_gateway_proxy(template)
+        } else {
+            template.to_string()
+        };
         if let Some(parent) = path.parent() {
             if std::fs::create_dir_all(parent).is_err() {
                 return false;
             }
         }
         std::fs::write(&path, body).is_ok()
+    }
+
+    /// Insert `"gatewayProxy": true` into the first-run settings template.
+    /// Anchored on the opening brace (not the model line) so it keeps
+    /// working if the default model ever changes.
+    fn inject_default_gateway_proxy(template: &str) -> String {
+        template.replacen("{\n", "{\n  \"gatewayProxy\": true,\n", 1)
     }
 
     /// Replace the active-KMS list in `.thclaws/settings.json` and
@@ -1129,6 +1215,17 @@ impl ProjectConfig {
         if let Some(ref kms) = self.kms {
             config.kms_active = kms.active.clone();
         }
+        if let Some(ref bash) = self.bash {
+            if let Some(ref s) = bash.sandbox {
+                config.bash_sandbox = s.clone();
+            }
+            if let Some(ref w) = bash.sandbox_write_paths {
+                config.bash_sandbox_write_paths = w.clone();
+            }
+            if let Some(ref d) = bash.sandbox_deny_read {
+                config.bash_sandbox_deny_read = d.clone();
+            }
+        }
         if let Some(b) = self.auto_learn {
             config.auto_learn = b;
         }
@@ -1153,18 +1250,25 @@ impl ProjectConfig {
         if let Some(b) = self.image_tools_enabled {
             config.image_tools_enabled = b;
         }
+        if let Some(b) = self.hal_enabled {
+            config.hal_enabled = b;
+        }
         if let Some(b) = self.browser_enabled {
             config.browser_enabled = b;
         }
         if let Some(b) = self.browser_headless {
             config.browser_headless = Some(b);
         }
-        if let Some(ref providers) = self.gateway_use_for {
-            config.gateway_use_for = providers
-                .iter()
-                .map(|s| s.trim().to_lowercase())
-                .filter(|s| !s.is_empty())
-                .collect();
+        // Proxy toggle. Explicit `gatewayProxy` wins; otherwise migrate a
+        // legacy non-empty `gatewayUseFor` list to "proxy on". The effective
+        // `gateway_use_for` is DERIVED from this flag in `load()`, so we set
+        // the flag here, not the list.
+        if let Some(proxy) = self.gateway_proxy {
+            config.gateway_proxy = proxy;
+        } else if let Some(ref providers) = self.gateway_use_for {
+            if providers.iter().any(|s| !s.trim().is_empty()) {
+                config.gateway_proxy = true;
+            }
         }
         if let Some(ref url) = self.remote_agent_url {
             let trimmed = url.trim();
@@ -1258,15 +1362,11 @@ impl ProjectConfig {
         self.permissions = Some(PermissionsConfig::Mode(mode.to_string()));
     }
 
-    /// Persist the set of providers routed through the gateway.
-    pub fn set_gateway_use_for(&mut self, providers: Vec<String>) {
-        self.gateway_use_for = Some(
-            providers
-                .into_iter()
-                .map(|s| s.trim().to_lowercase())
-                .filter(|s| !s.is_empty())
-                .collect(),
-        );
+    /// Persist the desktop proxy toggle (single flag). Also clears any legacy
+    /// `gatewayUseFor` list so the two representations can't drift apart.
+    pub fn set_gateway_proxy(&mut self, on: bool) {
+        self.gateway_proxy = Some(on);
+        self.gateway_use_for = None;
     }
 
     /// Load project-level MCP servers. Checks (in order):
@@ -1619,19 +1719,38 @@ impl AppConfig {
             }
         }
 
-        // dev-plan/42: in a multiuser pod the guest's settings.json + .env
-        // live in their WRITABLE workspace, so without this they could
-        // BYOK and bypass the owner's gateway (billing + governance).
-        // Force every gateway-routable provider through the gateway,
-        // ignoring any BYOK/native config in the workspace. Mirrors
-        // shared-mode's gateway-only rule (load_shared), but triggered by
-        // multiuser — here the def is in-workspace, not a $SHARED mount.
-        if crate::workdir::is_multiuser() {
-            config.gateway_use_for = crate::shared::GATEWAY_ALL_PROVIDERS
+        // In any hosted gateway pod, every gateway-routable provider must
+        // route through the gateway (the user has no BYOK keys; BYOK would
+        // bypass billing + governance — dev-plan/42). Derive the routed set
+        // from the engine's CURRENT `GATEWAY_ALL_PROVIDERS` rather than the
+        // per-workspace `gatewayUseFor`: that list is written by a
+        // provision-time init container whose default is baked then, so it
+        // goes STALE when new gateway-routable providers ship — e.g. xai /
+        // moonshot landed in v0.67.0 but pre-existing workspaces' lists
+        // predate them, so those Featured providers wrongly fell back to
+        // BYOK ("set XAI_API_KEY") in gateway mode. Keying off the engine
+        // here keeps Featured == gateway-supported without re-provisioning.
+        // `THCLAWS_USES_GATEWAY=1` marks a cloud gateway runner (the
+        // provisioner sets it; desktop never does) and covers multiuser
+        // pods too.
+        let in_gateway_pod = crate::workdir::is_multiuser()
+            || std::env::var("THCLAWS_USES_GATEWAY").ok().as_deref() == Some("1");
+        // DERIVE the routed set from a single source of truth: the `gatewayProxy`
+        // flag (desktop) or being in a gateway pod (cloud). When on, every
+        // gateway-routable provider is in the set; when off, the set is empty
+        // (pure BYOK). Deriving here — rather than persisting a per-provider
+        // list — means the proxy can't get "stuck on" or partially toggle, and
+        // newly-shipped routable providers are covered automatically. Per-model
+        // eligibility (Featured + priced) is enforced at routing time, so a
+        // non-featured model still falls back to BYOK even when the proxy is on.
+        config.gateway_use_for = if in_gateway_pod || config.gateway_proxy {
+            crate::shared::GATEWAY_ALL_PROVIDERS
                 .iter()
                 .map(|s| s.to_string())
-                .collect();
-        }
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         Ok(config)
     }
@@ -1982,6 +2101,32 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_gateway_use_for_migrates_to_proxy_flag() {
+        // A pre-existing non-empty `gatewayUseFor` (the old per-provider list)
+        // migrates to the single proxy flag = on.
+        let mut pc = ProjectConfig::default();
+        pc.gateway_use_for = Some(vec!["openai".to_string()]);
+        let mut cfg = AppConfig::default();
+        pc.apply_to(&mut cfg);
+        assert!(cfg.gateway_proxy, "non-empty legacy list → proxy on");
+
+        // Explicit `gatewayProxy` wins over the legacy list.
+        let mut pc2 = ProjectConfig::default();
+        pc2.gateway_proxy = Some(false);
+        pc2.gateway_use_for = Some(vec!["openai".to_string()]);
+        let mut cfg2 = AppConfig::default();
+        pc2.apply_to(&mut cfg2);
+        assert!(!cfg2.gateway_proxy, "explicit gatewayProxy=false wins");
+
+        // Empty legacy list → stays off (pure BYOK).
+        let mut pc3 = ProjectConfig::default();
+        pc3.gateway_use_for = Some(vec![]);
+        let mut cfg3 = AppConfig::default();
+        pc3.apply_to(&mut cfg3);
+        assert!(!cfg3.gateway_proxy, "empty legacy list → proxy off");
+    }
     use tempfile::tempdir;
 
     // Env-mutating tests in this module use `crate::kms::test_env_lock`
@@ -2417,7 +2562,9 @@ mod tests {
             );
         }
         let parsed: ProjectConfig = serde_json::from_str(&body).unwrap();
-        assert_eq!(parsed.model.as_deref(), Some("gpt-4.1"));
+        // model is intentionally null in the bootstrap so the credential-aware
+        // default (preferred_default_model) drives the choice on first run.
+        assert!(parsed.model.is_none(), "bootstrap leaves model unpinned");
 
         // Idempotent: a user edit survives a second bootstrap call.
         std::fs::write(&path, r#"{"model":"custom-model"}"#).unwrap();
@@ -2426,6 +2573,25 @@ mod tests {
         assert!(after.contains("custom-model"));
 
         std::env::remove_var("THCLAWS_PROJECT_ROOT");
+    }
+
+    #[test]
+    fn default_gateway_proxy_injection_parses_and_sets_flag() {
+        // The real bootstrap gates the injection behind a live gateway
+        // credential AND `!cfg!(test)`, so exercise the injection itself:
+        // it must turn a clean template into valid JSON with gatewayProxy on
+        // without disturbing the other fields.
+        let template = r#"{
+  "_doc": "...",
+  "model": "gpt-4.1",
+  "kms": { "active": [] }
+}
+"#;
+        let body = ProjectConfig::inject_default_gateway_proxy(template);
+        assert_ne!(body, template, "injection must change the template");
+        let pc: ProjectConfig = serde_json::from_str(&body).unwrap();
+        assert_eq!(pc.gateway_proxy, Some(true), "proxy defaulted on");
+        assert_eq!(pc.model.as_deref(), Some("gpt-4.1"), "model untouched");
     }
 
     #[test]

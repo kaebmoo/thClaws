@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
+import { resolveAssetSrc } from "../lib/fileAsset";
 import { Check, Copy, Paperclip } from "lucide-react";
 import { basePath, send, subscribe } from "../hooks/useIPC";
 import { useTheme } from "../hooks/useTheme";
@@ -264,6 +265,11 @@ export function ChatView({ active, modalOpen }: Props) {
   /// so the user knows the request is in flight.
   const [waitingFirstByte, setWaitingFirstByte] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  // Auto-scroll only when the user is parked at the bottom. When they
+  // scroll up to read history, streamed tokens must NOT yank them back
+  // down (issue #170). Updated by the messages container's onScroll.
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const isAtBottomRef = useRef(true);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
@@ -643,6 +649,15 @@ export function ChatView({ active, modalOpen }: Props) {
             { role: "system", content: msg.text as string },
           ]);
           break;
+        case "chat_turn_usage":
+          // Per-turn token/cost footer (parity with the CLI REPL's
+          // `[tokens: …in/…out · …s · $… session]`). Rendered as the same
+          // muted system line as skill notes / slash output.
+          setMessages((prev) => [
+            ...prev,
+            { role: "system", content: msg.text as string },
+          ]);
+          break;
         case "chat_done":
           setStreaming(false);
           setAskPrompt(null);
@@ -797,7 +812,10 @@ export function ChatView({ active, modalOpen }: Props) {
   }, [active, modalOpen]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    // Only follow new content if the user hasn't scrolled up to read.
+    if (isAtBottomRef.current) {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
   }, [messages]);
 
   useEffect(() => {
@@ -1283,14 +1301,20 @@ export function ChatView({ active, modalOpen }: Props) {
                           </a>
                         ),
                         // Markdown `![alt](url)` images render inline.
-                        // Click-to-zoom isn't needed: MCP-Apps tools
-                        // produce their own iframe widgets, and any
-                        // other inline image (e.g. attached by the
-                        // user) is already shown at full bubble width.
+                        // A workspace-relative src (e.g. `output/img-….jpg`
+                        // written by TextToImage) is routed through
+                        // /file-asset via resolveAssetSrc — otherwise the
+                        // browser resolves it against the page origin and
+                        // 404s. Click-to-zoom isn't needed: MCP-Apps tools
+                        // produce their own iframe widgets, and any other
+                        // inline image (e.g. attached by the user) is
+                        // already shown at full bubble width.
                         img: ({ src, alt, ...rest }) => (
                           <img
                             {...rest}
-                            src={src}
+                            src={resolveAssetSrc(
+                              typeof src === "string" ? src : undefined,
+                            )}
                             alt={alt}
                             style={{
                               maxWidth: "100%",
@@ -1381,8 +1405,17 @@ export function ChatView({ active, modalOpen }: Props) {
     <div className="flex flex-col h-full">
       {/* Messages */}
       <div
+        ref={messagesContainerRef}
         className="flex-1 overflow-y-auto p-4 space-y-3"
         style={{ background: "var(--bg-primary)" }}
+        onScroll={() => {
+          const el = messagesContainerRef.current;
+          if (!el) return;
+          // Within 64px of the bottom counts as "pinned" — so smooth
+          // scrolls and 1px rounding don't unpin the follow behavior.
+          isAtBottomRef.current =
+            el.scrollHeight - el.scrollTop - el.clientHeight < 64;
+        }}
       >
         {/* Empty-state hero — count only user/assistant turns. System
             bubbles (MCP "connected" notices, slash-output, skill model

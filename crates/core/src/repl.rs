@@ -292,6 +292,10 @@ pub enum SlashCommand {
         /// default behavior (manual or /loop-driven continuation)
         /// stays unchanged.
         auto_continue: bool,
+        /// Engine-enforced completion artifacts — files that must exist
+        /// on disk before `MarkGoalComplete` is accepted. From
+        /// `--require <path>` (repeatable). Empty = prompt-level done only.
+        require_paths: Vec<String>,
     },
     /// M6.29: show current goal state + budget consumption.
     GoalStatus,
@@ -486,6 +490,28 @@ pub enum SlashCommand {
     PluginSearch(String),
     /// `/plugin info <name>` — detail for a marketplace plugin entry.
     PluginInfo(String),
+    /// `/subagent marketplace [--refresh]` — list subagents (agent defs)
+    /// in the catalogue.
+    SubagentMarketplace {
+        refresh: bool,
+    },
+    /// `/subagent search <query>` — search subagent catalogue.
+    SubagentSearch(String),
+    /// `/subagent info <name>` — detail for a marketplace subagent entry.
+    SubagentInfo(String),
+    /// `/subagent install [--project] <url-or-name> [name]` — install a
+    /// single agent def `.md` into `~/.config/thclaws/agents/` (user) or
+    /// `.thclaws/agents/` (project).
+    SubagentInstall {
+        arg: String,
+        name: Option<String>,
+        project: bool,
+    },
+    /// `/marketplace [--refresh]` — open the unified GUI marketplace
+    /// browser (all four types). CLI prints a combined summary.
+    Marketplace {
+        refresh: bool,
+    },
     Permissions(String),
     /// `/plan` — toggle plan mode (M2). With no args, flips the
     /// session into plan mode (mutating tools blocked, sidebar opens
@@ -521,6 +547,9 @@ pub enum SlashCommand {
         file: String,
         alias: Option<String>,
         force: bool,
+        /// Force the vision-OCR path (render pages, model transcribes) instead
+        /// of text extraction — for PDFs with a garbled text layer.
+        vision: bool,
     },
     /// M6.28: ingest the current chat session as a KMS page. Triggers an
     /// agent turn that summarizes history and calls `KmsWrite`.
@@ -620,6 +649,15 @@ pub enum SlashCommand {
         name: String,
         fix: bool,
     },
+    /// One-shot maintenance umbrella: structural fixes + source
+    /// reconciliation against live sessions + stale refresh +
+    /// contradiction reconciliation, in a single staged pass via the
+    /// built-in `kms-maintain` subagent. Dry-run by default; `--apply`
+    /// executes. GUI-only (dispatches a side channel).
+    KmsMaintain {
+        name: String,
+        apply: bool,
+    },
     /// Schema migration. Defaults to dry-run (prints the plan) so the
     /// user can review before any writes; `--apply` executes the chain.
     KmsMigrate {
@@ -715,6 +753,15 @@ pub enum SlashCommand {
     /// side channel. The agent's `cancelled().await` wakes and the
     /// spawn task emits `SideChannelError { error: "cancelled" }`.
     AgentCancel(String),
+    /// `/agent new <name>` — GUI-only. Open the agent-editor modal
+    /// pre-filled with a starter template to author a new agent def
+    /// at `.thclaws/agents/<name>.md`.
+    AgentNew(String),
+    /// `/agent edit <name>` — GUI-only. Open the agent-editor modal
+    /// pre-filled with the named agent's current frontmatter + system
+    /// prompt (from disk, or reconstructed from a built-in). Saves a
+    /// project override at `.thclaws/agents/<name>.md`.
+    AgentEdit(String),
     /// `/dream [focus]` — dispatch the built-in `dream` agent as a
     /// side channel to consolidate the project's KMS by mining recent
     /// sessions. `focus` is optional free-text passed as the user
@@ -1215,7 +1262,7 @@ fn parse_research_start(args: &str) -> SlashCommand {
             }
             "--max-pages" if tokens.len() >= 2 => {
                 if let Ok(v) = tokens[1].parse::<u32>() {
-                    if (1..=20).contains(&v) {
+                    if v >= 1 && v <= 20 {
                         max_pages = Some(v);
                         tokens.drain(0..2);
                     } else {
@@ -1670,7 +1717,7 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
                 }
             } else if let Some(after_mp) = rest.strip_prefix("marketplace").map(str::trim_start) {
                 let parts: Vec<&str> = after_mp.split_whitespace().collect();
-                let refresh = parts.contains(&"--refresh");
+                let refresh = parts.iter().any(|p| *p == "--refresh");
                 SlashCommand::SkillMarketplace { refresh }
             } else if let Some(after_search) = rest.strip_prefix("search").map(str::trim_start) {
                 if after_search.is_empty() {
@@ -1716,6 +1763,11 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
                 ))
             }
         }
+        "subagent" => parse_agentdef_subcommand(args, "subagent"),
+        "marketplace" | "market" => {
+            let refresh = args.split_whitespace().any(|p| p == "--refresh");
+            SlashCommand::Marketplace { refresh }
+        }
         "permissions" | "perms" => SlashCommand::Permissions(args.to_string()),
         "plan" => SlashCommand::Plan(args.trim().to_string()),
         "team" => SlashCommand::Team,
@@ -1726,7 +1778,11 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
         "goal" => parse_goal_subcommand(args),
         "schedule" | "sched" => parse_schedule_subcommand(args),
         "workflow" | "wf" => parse_workflow_subcommand(args),
-        "agent" => parse_agent_subcommand(args),
+        // `/agent` + `/agents` are deprecated aliases of `/subagent` —
+        // kept working (GUI buttons, muscle memory) but not advertised in
+        // the menu, since "agent" collides with thClaws' folder-as-agent
+        // product concept. `/subagent` is canonical.
+        "agent" => parse_agentdef_subcommand(args, "agent"),
         "agents" => SlashCommand::AgentsList,
         "deploy" => parse_deploy_subcommand(args),
         "cloud" => parse_cloud_subcommand(args),
@@ -1863,34 +1919,129 @@ fn parse_deploy_subcommand(args: &str) -> SlashCommand {
     }
 }
 
-/// Parse `/agent <name> <prompt>` and `/agent cancel <id>`. Bare
-/// `/agent` returns Unknown with a usage hint. Empty name (only
-/// whitespace after the slash) → Unknown.
-fn parse_agent_subcommand(args: &str) -> SlashCommand {
-    let args = args.trim();
-    if args.is_empty() {
-        return SlashCommand::Unknown(
-            "usage: /agent <name> <prompt>   (or /agent cancel <id>)".into(),
-        );
+/// Strip a leading standalone `word` (followed by whitespace, or the
+/// whole string) from `s`, returning the trimmed remainder. `None`
+/// when `s` doesn't start with that exact word — so `new` matches but
+/// `newsletter` doesn't.
+fn strip_word_prefix<'a>(s: &'a str, word: &str) -> Option<&'a str> {
+    let rest = s.strip_prefix(word)?;
+    if rest.is_empty() {
+        return Some("");
     }
-    // Recognize `cancel <id>` first — `cancel` would otherwise be
-    // treated as an agent name.
-    if let Some(rest) = args.strip_prefix("cancel") {
-        let rest = rest.trim();
-        if rest.is_empty() {
-            return SlashCommand::Unknown(
-                "usage: /agent cancel <id>   (try /agents to see active ids)".into(),
-            );
+    if rest.starts_with(char::is_whitespace) {
+        return Some(rest.trim());
+    }
+    None
+}
+
+/// Parse the `/subagent` command family (and its deprecated `/agent`
+/// alias). `label` is the command word used in usage hints
+/// (`"subagent"` or `"agent"`) so each surface shows context-appropriate
+/// messages. `/subagent` is the canonical name — `/agent` is kept as a
+/// hidden alias to avoid clashing with thClaws' folder-as-agent product
+/// concept while not breaking existing usage / GUI buttons.
+///
+/// Subcommands are matched as STANDALONE words (via `strip_word_prefix`)
+/// so an agent named `infosec` or `newsbot` isn't shadowed by the
+/// `info` / `new` keywords now that bare `<name>` falls through to a run:
+///   marketplace [--refresh] · search <q> · info <name>   — marketplace browse
+///   install [--user|--project] <name|url|.md> [name]     — install a def
+///   new <name> · edit <name>                             — GUI editor
+///   cancel <id> · list                                   — manage / list active
+///   <name> <prompt>                                      — run a named agent
+fn parse_agentdef_subcommand(args: &str, label: &str) -> SlashCommand {
+    let rest = args.trim();
+    if rest.is_empty() {
+        return SlashCommand::Unknown(format!(
+            "usage: /{label} <name> <prompt>   (subcommands: install · marketplace · search · info · new · edit · cancel · list)"
+        ));
+    }
+
+    // ── marketplace lifecycle (acquire defs) ────────────────────────
+    if let Some(after_mp) = strip_word_prefix(rest, "marketplace") {
+        let refresh = after_mp.split_whitespace().any(|p| p == "--refresh");
+        return SlashCommand::SubagentMarketplace { refresh };
+    }
+    if let Some(after_search) = strip_word_prefix(rest, "search") {
+        return if after_search.is_empty() {
+            SlashCommand::Unknown(format!("usage: /{label} search <query>"))
+        } else {
+            SlashCommand::SubagentSearch(after_search.to_string())
+        };
+    }
+    if let Some(after_info) = strip_word_prefix(rest, "info") {
+        return if after_info.is_empty() {
+            SlashCommand::Unknown(format!("usage: /{label} info <name>"))
+        } else {
+            SlashCommand::SubagentInfo(after_info.to_string())
+        };
+    }
+    if let Some(after_install) = strip_word_prefix(rest, "install") {
+        let mut project = true;
+        let mut parts: Vec<&str> = after_install.split_whitespace().collect();
+        if parts.first().copied() == Some("--user") {
+            project = false;
+            parts.remove(0);
+        } else if parts.first().copied() == Some("--project") {
+            parts.remove(0);
         }
-        return SlashCommand::AgentCancel(rest.to_string());
+        return match parts.as_slice() {
+            [arg] => SlashCommand::SubagentInstall {
+                arg: arg.to_string(),
+                name: None,
+                project,
+            },
+            [arg, name] => SlashCommand::SubagentInstall {
+                arg: arg.to_string(),
+                name: Some(name.to_string()),
+                project,
+            },
+            _ => SlashCommand::Unknown(format!(
+                "usage: /{label} install [--user] <name-or-git-url-or-.md> [name]"
+            )),
+        };
     }
-    let (name, prompt) = match args.split_once(char::is_whitespace) {
+
+    // ── manage / list ───────────────────────────────────────────────
+    if let Some(after_cancel) = strip_word_prefix(rest, "cancel") {
+        return if after_cancel.is_empty() {
+            SlashCommand::Unknown(format!(
+                "usage: /{label} cancel <id>   (try /{label} list to see active ids)"
+            ))
+        } else {
+            SlashCommand::AgentCancel(after_cancel.to_string())
+        };
+    }
+    if let Some(after_new) = strip_word_prefix(rest, "new") {
+        return if after_new.is_empty() {
+            SlashCommand::Unknown(format!("usage: /{label} new <name>"))
+        } else {
+            SlashCommand::AgentNew(after_new.to_string())
+        };
+    }
+    if let Some(after_edit) = strip_word_prefix(rest, "edit") {
+        return if after_edit.is_empty() {
+            SlashCommand::Unknown(format!("usage: /{label} edit <name>"))
+        } else {
+            SlashCommand::AgentEdit(after_edit.to_string())
+        };
+    }
+    // Bare `list` → active-agent listing. `list <something>` is absurd
+    // as a subcommand, so it falls through to the run path (name="list").
+    if let Some(after_list) = strip_word_prefix(rest, "list") {
+        if after_list.is_empty() {
+            return SlashCommand::AgentsList;
+        }
+    }
+
+    // ── run a named agent: <name> <prompt> ──────────────────────────
+    let (name, prompt) = match rest.split_once(char::is_whitespace) {
         Some((n, p)) => (n.trim(), p.trim()),
-        None => (args, ""),
+        None => (rest, ""),
     };
     if prompt.is_empty() {
         return SlashCommand::Unknown(format!(
-            "usage: /agent {name} <prompt>   (prompt cannot be empty)"
+            "usage: /{label} {name} <prompt>   (prompt cannot be empty)"
         ));
     }
     SlashCommand::Agent {
@@ -1915,8 +2066,10 @@ fn parse_memory_shortcut(input: &str) -> Option<SlashCommand> {
     // anchors the body separator.
     let after_hash = if let Some(rest) = input.strip_prefix("# ") {
         rest
+    } else if let Some(rest) = input.strip_prefix('#') {
+        rest
     } else {
-        input.strip_prefix('#')?
+        return None;
     };
 
     let (name_part, body_part) = after_hash.split_once(':')?;
@@ -2224,6 +2377,32 @@ pub fn build_kms_ingest_session_prompt(
     )
 }
 
+/// Compose the agent-facing prompt for `/kms ingest <name> <file.pdf> --vision`.
+/// The PDF's text layer is garbled (e.g. a broken Thai ToUnicode font), so the
+/// agent must read the rendered glyphs via `PdfRead`'s vision path and store
+/// the transcription with `KmsWrite`. Used by the GUI rewrite handler.
+pub fn build_kms_ingest_pdf_vision_prompt(kms_name: &str, page: &str, file: &str) -> String {
+    format!(
+        "The user ran `/kms ingest {kms_name} --vision` to file a PDF whose text layer is \
+         garbled (a broken font cmap text extraction can't fix), so use the VISION path.\n\
+         \n\
+         Steps:\n\
+         1. Call `PdfRead(path: \"{file}\", vision: true)` to render the pages as images and \
+         read the actual glyphs. The vision path renders at most 20 pages per call, so for a \
+         longer PDF call it again with `pages: \"21-40\"`, `\"41-60\"`, … until you've covered \
+         every page.\n\
+         2. Transcribe ALL the text you see, verbatim and in reading order. Preserve Thai \
+         exactly as rendered — do NOT 'fix' or paraphrase it.\n\
+         3. Call `KmsWrite(kms: \"{kms_name}\", page: \"{page}\", content: \"...\")` with the \
+         full transcription, frontmatter:\n   ---\n   category: pdf\n   sources: {file}\n   \
+         description: <one-line hook>\n   ---\n   <transcription>\n   For a multi-call PDF, \
+         write page 1's batch first, then `KmsAppend` the rest so nothing is dropped.\n\
+         \n\
+         Page name: `{page}`. After the write succeeds, confirm the resolved page path and how \
+         many PDF pages you transcribed."
+    )
+}
+
 /// Render the post-merge "next steps" workflow hint that both the
 /// CLI REPL and the GUI shell-dispatch emit after a successful
 /// `/kms merge`. Centralised here so both surfaces stay in sync.
@@ -2519,15 +2698,18 @@ fn parse_goal_subcommand(args: &str) -> SlashCommand {
     }
 }
 
-/// Parse `/goal start <objective> [--budget-tokens N] [--budget-time T]`.
-/// Objective can be quoted ("...") to include all words; unquoted
-/// strings consume up to the first `--` flag.
+/// Parse `/goal start <objective> [--budget-tokens N] [--budget-time T]
+/// [--auto] [--require <path>]...`. Objective can be quoted ("...") to
+/// include all words; unquoted strings consume up to the first `--` flag.
+/// `--require` (repeatable) names files the engine must find on disk
+/// before `MarkGoalComplete` is accepted.
 fn parse_goal_start_args(rest: &str) -> SlashCommand {
     let tokens = tokenize_quoted(rest);
     let mut objective_parts: Vec<String> = Vec::new();
     let mut budget_tokens: Option<u64> = None;
     let mut budget_time_secs: Option<u64> = None;
     let mut auto_continue = false;
+    let mut require_paths: Vec<String> = Vec::new();
     let mut i = 0;
     while i < tokens.len() {
         let tok = tokens[i].as_str();
@@ -2570,6 +2752,16 @@ fn parse_goal_start_args(rest: &str) -> SlashCommand {
                     }
                 }
             }
+            "--require" | "--require-file" => {
+                i += 1;
+                if i >= tokens.len() {
+                    return SlashCommand::Unknown(
+                        "--require needs a path that must exist before the goal can complete"
+                            .into(),
+                    );
+                }
+                require_paths.push(tokens[i].clone());
+            }
             other if other.starts_with("--") => {
                 return SlashCommand::Unknown(format!("unknown flag: {other}"));
             }
@@ -2580,7 +2772,8 @@ fn parse_goal_start_args(rest: &str) -> SlashCommand {
     let objective = objective_parts.join(" ");
     if objective.trim().is_empty() {
         return SlashCommand::Unknown(
-            "usage: /goal start \"<objective>\" [--budget-tokens N] [--budget-time T]".into(),
+            "usage: /goal start \"<objective>\" [--budget-tokens N] [--budget-time T] [--auto] [--require <path>]"
+                .into(),
         );
     }
     SlashCommand::GoalStart {
@@ -2588,6 +2781,7 @@ fn parse_goal_start_args(rest: &str) -> SlashCommand {
         budget_tokens,
         budget_time_secs,
         auto_continue,
+        require_paths,
     }
 }
 
@@ -2654,6 +2848,11 @@ fn parse_kms_subcommand(args: &str) -> SlashCommand {
                 force = true;
                 parts.remove(i);
             }
+            let mut vision = false;
+            if let Some(i) = parts.iter().position(|p| *p == "--vision") {
+                vision = true;
+                parts.remove(i);
+            }
             let mut alias: Option<String> = None;
             if let Some(i) = parts.iter().position(|p| *p == "as") {
                 if i + 1 < parts.len() {
@@ -2690,6 +2889,7 @@ fn parse_kms_subcommand(args: &str) -> SlashCommand {
                             file: t.to_string(),
                             alias,
                             force,
+                            vision,
                         }
                     } else {
                         SlashCommand::KmsIngest {
@@ -2797,6 +2997,34 @@ fn parse_kms_subcommand(args: &str) -> SlashCommand {
                 Some(n) => SlashCommand::KmsWrapUp { name: n, fix },
                 None => SlashCommand::Unknown(
                     "usage: /kms wrap-up <name> [--fix]".into(),
+                ),
+            }
+        }
+        "maintain" | "tidy" => {
+            // `/kms maintain <name> [--apply]` — staged maintenance
+            // pipeline; dry-run by default, --apply executes.
+            let mut name: Option<String> = None;
+            let mut apply = false;
+            for tok in rest.split_whitespace() {
+                match tok {
+                    "--apply" | "--execute" => apply = true,
+                    "--dry-run" | "--plan" => apply = false,
+                    other if !other.starts_with("--") => {
+                        if name.is_none() {
+                            name = Some(other.to_string());
+                        }
+                    }
+                    other => {
+                        return SlashCommand::Unknown(format!(
+                            "unknown flag '{other}' — usage: /kms maintain <name> [--apply]"
+                        ));
+                    }
+                }
+            }
+            match name {
+                Some(n) => SlashCommand::KmsMaintain { name: n, apply },
+                None => SlashCommand::Unknown(
+                    "usage: /kms maintain <name> [--apply]".into(),
                 ),
             }
         }
@@ -3098,7 +3326,7 @@ fn parse_kms_subcommand(args: &str) -> SlashCommand {
             }
         }
         other => SlashCommand::Unknown(format!(
-            "unknown kms subcommand: '{other}' (try: /kms, /kms new …, /kms use …, /kms off …, /kms show …, /kms ingest …, /kms dump …, /kms challenge …, /kms html …, /kms merge …, /kms drop …, /kms link …, /kms lint …, /kms wrap-up …, /kms reconcile …, /kms migrate …, /kms export-okf …, /kms import-okf …, /kms file-answer …)"
+            "unknown kms subcommand: '{other}' (try: /kms, /kms new …, /kms use …, /kms off …, /kms show …, /kms ingest …, /kms dump …, /kms challenge …, /kms html …, /kms merge …, /kms drop …, /kms link …, /kms lint …, /kms wrap-up …, /kms reconcile …, /kms maintain …, /kms migrate …, /kms export-okf …, /kms import-okf …, /kms file-answer …)"
         )),
     }
 }
@@ -3369,12 +3597,20 @@ pub fn built_in_commands() -> &'static [BuiltInCommand] {
         BuiltInCommand { name: "skills",   description: "List installed skills",                      category: "Extensions", usage: "" },
         BuiltInCommand { name: "skill",    description: "Skill subcommands (install / marketplace / search / info / show)", category: "Extensions", usage: "<sub> [args]" },
         BuiltInCommand { name: "plugins",  description: "List installed plugins",                     category: "Extensions", usage: "" },
-        BuiltInCommand { name: "plugin",   description: "Plugin subcommands (install / marketplace / search / info / show / enable / disable)", category: "Extensions", usage: "<sub> [args]" },
+        BuiltInCommand { name: "plugin",   description: "Plugin subcommands (install / remove / enable / disable / show / gc / marketplace / search / info)", category: "Extensions", usage: "<sub> [args]" },
         BuiltInCommand { name: "mcp",      description: "MCP subcommands (add / remove / install / reauth / marketplace / search / info)", category: "Extensions", usage: "[sub] [args]" },
+        BuiltInCommand { name: "marketplace", description: "Browse the full marketplace (skills, plugins, MCP, subagents)", category: "Extensions", usage: "[--refresh]" },
 
         // Team
+        BuiltInCommand { name: "subagent", description: "Run / manage named agent defs (<name> <prompt> · new · edit · cancel · list · install · marketplace · search · info)", category: "Team", usage: "<sub|name> [args]" },
         BuiltInCommand { name: "team",     description: "Show team agent status",                     category: "Team", usage: "" },
         BuiltInCommand { name: "tasks",    description: "List current tasks/todos",                   category: "Team", usage: "" },
+
+        // Automation
+        BuiltInCommand { name: "workflow", description: "Run multi-agent workflows",                  category: "Automation", usage: "run <goal> | exec <path> | list | inspect <id> | resume <id> | rm <id>" },
+        BuiltInCommand { name: "loop",     description: "Run a repeating / self-paced task loop",     category: "Automation", usage: "<interval> <body>" },
+        BuiltInCommand { name: "goal",     description: "Manage long-running goals",                  category: "Automation", usage: "new <goal> | status | next | done | cancel <id>" },
+        BuiltInCommand { name: "schedule", description: "Manage scheduled (cron) tasks",             category: "Automation", usage: "list | show <id> | run <id> | pause|resume <id> | rm <id>" },
 
         // Research
         BuiltInCommand { name: "research", description: "Background research → KMS",                  category: "Research", usage: "<query> | list | status <id> | show <id> | cancel <id> | wait <id>" },
@@ -3576,6 +3812,13 @@ pub fn render_help() -> &'static str {
      /thinking BUDGET  Set extended-thinking token budget (0 = off)\n  \
      /cwd              Show current working directory\n  \
      /version          Show version\n  \
+     /subagent <name> <prompt>\n  \
+     \x20                 Run a named agent def (.thclaws/agents/<name>.md)\n  \
+     /subagent new|edit <name>   Create / edit an agent def (GUI)\n  \
+     /subagent cancel <id> | list   Cancel / list active agents\n  \
+     /subagent install|marketplace|search|info ...\n  \
+     \x20                 Install/browse agent defs from the marketplace\n  \
+     \x20                 (/agent is a deprecated alias)\n  \
      /team             Attach to team tmux session (or show status)\n  \
      /usage            Show token usage by provider and model\n  \
      /cost             Show accumulated session cost in USD\n  \
@@ -3674,7 +3917,7 @@ fn compat_endpoint(
     default_base: &str,
     api_key: String,
 ) -> (String, String) {
-    if let Some(o) = crate::providers::thclaws_gateway::for_kind(config, kind) {
+    if let Some(o) = crate::providers::thclaws_gateway::gateway_overlay_for_model(config, kind) {
         return (o.access_key, format!("{}/chat/completions", o.base_url));
     }
     let base = std::env::var(base_env).unwrap_or_else(|_| default_base.to_string());
@@ -3820,7 +4063,9 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
         // (pre-v0.45.8) carry no per-provider placeholders at all —
         // without this carve-out every compat provider on them dies
         // here with "no API key" before the overlay is consulted.
-        None if crate::providers::thclaws_gateway::for_kind(config, kind).is_some() => {
+        None if crate::providers::thclaws_gateway::gateway_overlay_for_model(config, kind)
+            .is_some() =>
+        {
             String::from("gateway-placeholder")
         }
         None => {
@@ -3836,7 +4081,8 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             // OpenAI-compatible; models use openrouter/<vendor>/<model> form
             // (e.g. openrouter/anthropic/claude-sonnet-4-6). Strip the
             // "openrouter/" prefix before forwarding to the upstream API.
-            let overlay = crate::providers::thclaws_gateway::for_kind(config, kind);
+            let overlay =
+                crate::providers::thclaws_gateway::gateway_overlay_for_model(config, kind);
             let (key, base) = match overlay {
                 Some(o) => (
                     o.access_key,
@@ -3884,7 +4130,8 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             ))
         }
         ProviderKind::Anthropic => {
-            let overlay = crate::providers::thclaws_gateway::for_kind(config, kind);
+            let overlay =
+                crate::providers::thclaws_gateway::gateway_overlay_for_model(config, kind);
             let provider = match overlay {
                 // Gateway preserves Anthropic's `/v1/messages` path; the
                 // gateway injects the real x-api-key + anthropic-version
@@ -3898,7 +4145,8 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             Ok(Arc::new(provider))
         }
         ProviderKind::OpenAI => {
-            let overlay = crate::providers::thclaws_gateway::for_kind(config, kind);
+            let overlay =
+                crate::providers::thclaws_gateway::gateway_overlay_for_model(config, kind);
             let provider = match overlay {
                 Some(o) => OpenAIProvider::new(o.access_key)
                     .with_base_url(format!("{}/v1/chat/completions", o.base_url)),
@@ -3910,7 +4158,8 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             crate::providers::openai_responses::OpenAIResponsesProvider::new(api_key),
         )),
         ProviderKind::Gemini => {
-            let overlay = crate::providers::thclaws_gateway::for_kind(config, kind);
+            let overlay =
+                crate::providers::thclaws_gateway::gateway_overlay_for_model(config, kind);
             let provider = match overlay {
                 Some(o) => GeminiProvider::new(o.access_key).with_base_url(o.base_url),
                 None => GeminiProvider::new(api_key),
@@ -4151,7 +4400,8 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             // be overridden via OPENCODE_GO_BASE_URL for self-hosted proxies.
             // Gateway overlay swaps base + key; the provider appends its
             // own per-protocol path, which the gateway forwards verbatim.
-            let overlay = crate::providers::thclaws_gateway::for_kind(config, kind);
+            let overlay =
+                crate::providers::thclaws_gateway::gateway_overlay_for_model(config, kind);
             let (key, base) = match overlay {
                 Some(o) => (o.access_key, o.base_url),
                 None => (
@@ -4171,7 +4421,8 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             unreachable!("handled above")
         }
         ProviderKind::OllamaCloud => {
-            let overlay = crate::providers::thclaws_gateway::for_kind(config, kind);
+            let overlay =
+                crate::providers::thclaws_gateway::gateway_overlay_for_model(config, kind);
             let provider = match overlay {
                 Some(o) => OllamaCloudProvider::new(o.access_key).with_base_url(o.base_url),
                 None => OllamaCloudProvider::new(api_key),
@@ -4321,15 +4572,24 @@ async fn load_mcp_servers(
     let mut clients: Vec<Arc<McpClient>> = Vec::new();
     let mut summary: Vec<(String, Vec<String>)> = Vec::new();
 
+    // MCP load progress is diagnostics, not result — emit on STDERR so a
+    // piped or scheduler-captured STDOUT stays clean (just the agent's
+    // answer → the workspace result file). ANSI only when stderr is a TTY.
+    let use_color = std::io::IsTerminal::is_terminal(&std::io::stderr())
+        && std::env::var_os("NO_COLOR").is_none();
+    let dim = if use_color { COLOR_DIM } else { "" };
+    let warn = if use_color { COLOR_YELLOW } else { "" };
+    let reset = if use_color { COLOR_RESET } else { "" };
+
     for cfg in servers {
-        print!("{COLOR_DIM}[mcp] {} … {COLOR_RESET}", cfg.name);
-        let _ = std::io::stdout().flush();
+        eprint!("{dim}[mcp] {} … {reset}", cfg.name);
+        let _ = std::io::stderr().flush();
 
         match McpClient::spawn(cfg.clone()).await {
             Ok(client) => match client.list_tools().await {
                 Ok(tools) => {
                     let names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
-                    println!("{COLOR_DIM}{} tool(s){COLOR_RESET}", tools.len());
+                    eprintln!("{dim}{} tool(s){reset}", tools.len());
                     for info in tools {
                         let tool = McpTool::new(client.clone(), info);
                         registry.register(Arc::new(tool));
@@ -4338,11 +4598,11 @@ async fn load_mcp_servers(
                     clients.push(client);
                 }
                 Err(e) => {
-                    println!("{COLOR_YELLOW}list_tools failed: {e}{COLOR_RESET}");
+                    eprintln!("{warn}list_tools failed: {e}{reset}");
                 }
             },
             Err(e) => {
-                println!("{COLOR_YELLOW}spawn failed: {e}{COLOR_RESET}");
+                eprintln!("{warn}spawn failed: {e}{reset}");
             }
         }
     }
@@ -4379,6 +4639,11 @@ pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> R
         tool_registry.register(Arc::new(crate::tools::TextToVideoTool));
         tool_registry.register(Arc::new(crate::tools::ImageToVideoTool));
         tool_registry.register(Arc::new(crate::tools::MediaJobStatusTool));
+    }
+
+    if config.hal_enabled {
+        tool_registry.register(Arc::new(crate::tools::YouTubeTranscriptTool::new()));
+        tool_registry.register(Arc::new(crate::tools::WebScrapeTool::new()));
     }
 
     // KMS tools always-on (pre-fix this was gated by
@@ -4519,12 +4784,34 @@ pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> R
         None,
     )));
 
+    // Diagnostic run header → STDERR (the scheduler captures stderr into
+    // the run log; interactive `-p` shows it in the terminal). Records the
+    // model + the tools the model can actually see this run — so a
+    // scheduled log answers "which model? was WebSearch even available?"
+    // at a glance. stdout / the result file stays the clean answer.
+    {
+        let mut tool_names = tool_registry.names();
+        tool_names.sort_unstable();
+        eprintln!(
+            "[run] model={} · permissions={} · {} tools: {}",
+            config.model,
+            config.permissions,
+            tool_names.len(),
+            tool_names.join(", "),
+        );
+    }
+
     let agent = Agent::new(provider, tool_registry, config.model.clone(), system)
         .with_max_iterations(config.max_iterations)
         .with_max_tokens(config.max_tokens)
         .with_permission_mode(perm_mode);
 
     let turn_start = std::time::Instant::now();
+    // Live reasoning is shown only on a TTY. When piped (`-p | jq`) or
+    // captured by the scheduler into a run log, streaming the model's
+    // thinking onto stdout buries the actual answer and corrupts
+    // downstream parsers — so the captured output is just the final text.
+    let stdout_is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
     let mut stream = Box::pin(agent.run_turn(prompt.to_string()));
     let mut last_was_thinking = false;
     while let Some(ev) = stream.next().await {
@@ -4540,20 +4827,37 @@ pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> R
             Ok(AgentEvent::Thinking(s)) => {
                 // Reasoning models (DeepSeek v4/r1, OpenAI o-series, NVIDIA NIM
                 // glm4.7, …) emit reasoning_content before the final answer.
-                // Print dim-italic so it's distinguishable from the answer in
-                // -p / scripted output, but still visible (otherwise the user
-                // sees nothing for many seconds while the model thinks).
-                print!("\x1b[2;3m{s}\x1b[0m");
-                last_was_thinking = true;
-                let _ = std::io::stdout().flush();
+                // On a TTY, print dim-italic so the user sees progress while
+                // the model thinks. When piped / captured (scheduler log),
+                // skip it — the consumer wants the answer, not the reasoning.
+                if stdout_is_tty {
+                    print!("\x1b[2;3m{s}\x1b[0m");
+                    last_was_thinking = true;
+                    let _ = std::io::stdout().flush();
+                }
+            }
+            Ok(AgentEvent::ToolCallStart { name, input, .. }) => {
+                // Trace tool calls to STDERR so the scheduler's run log
+                // shows what the agent actually did (e.g. did it call
+                // WebSearch?) without polluting the result on stdout. A
+                // short, char-safe input preview tags each call.
+                if last_was_thinking {
+                    println!();
+                    last_was_thinking = false;
+                }
+                let raw = input.to_string();
+                let preview: String = raw.chars().take(140).collect();
+                let ellipsis = if raw.chars().count() > 140 { "…" } else { "" };
+                eprintln!("[tool] {name} {preview}{ellipsis}");
             }
             Ok(AgentEvent::Done { usage, .. }) => {
                 println!();
-                // Issue #69: --verbose surfaces the same per-turn token
-                // line the REPL prints, but to stderr so piped consumers
-                // (`thclaws -p ... | jq`) get clean stdout. Default off
-                // — print mode stays scriptable as before.
-                if verbose {
+                // Issue #69: the per-turn token line goes to stderr so
+                // piped consumers (`thclaws -p ... | jq`) get clean stdout.
+                // Emitted on --verbose OR whenever stdout isn't a TTY
+                // (piped / scheduler-captured), so a scheduled run log
+                // always ends with a token + duration footer.
+                if verbose || !stdout_is_tty {
                     let cache_info = match (
                         usage.cache_creation_input_tokens,
                         usage.cache_read_input_tokens,
@@ -4585,6 +4889,151 @@ pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> R
         }
     }
     Ok(())
+}
+
+/// dev-plan/48.2: run an agent's pre-authored workflow headlessly with the
+/// Task tool + MCP registered (unlike `-p`), so authors + CI can behaviorally
+/// smoke-test a pipeline instead of only structurally linting it. Returns a
+/// process exit code (0 = ok). `--dry-tools` skips MCP + the native media
+/// tools so control-flow runs without real generation / external spend (Bash
+/// still runs — full per-tool mocking is dev-plan/48.2's open question).
+pub async fn run_agent_workflow(
+    config: AppConfig,
+    workflow_path: std::path::PathBuf,
+    args: Option<serde_json::Value>,
+    dry_tools: bool,
+) -> i32 {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut tool_registry = ToolRegistry::with_builtins();
+
+    // Always-on KMS + memory + session tools (mirror run_print_mode's set so
+    // subagents inherit the same base toolset they'd have on any surface).
+    tool_registry.register(Arc::new(crate::tools::KmsReadTool));
+    tool_registry.register(Arc::new(crate::tools::KmsSearchTool));
+    tool_registry.register(Arc::new(crate::tools::KmsWriteTool));
+    tool_registry.register(Arc::new(crate::tools::KmsAppendTool));
+    tool_registry.register(Arc::new(crate::tools::KmsDeleteTool));
+    tool_registry.register(Arc::new(crate::tools::KmsCreateTool));
+    tool_registry.register(Arc::new(crate::tools::MemoryReadTool));
+    tool_registry.register(Arc::new(crate::tools::MemoryWriteTool));
+    tool_registry.register(Arc::new(crate::tools::MemoryAppendTool));
+    tool_registry.register(Arc::new(crate::tools::SessionRenameTool));
+    if config.search_engine != "auto" {
+        tool_registry.register(Arc::new(crate::tools::WebSearchTool::new(
+            &config.search_engine,
+        )));
+    }
+    if config.image_tools_enabled && !dry_tools {
+        tool_registry.register(Arc::new(crate::tools::TextToImageTool));
+        tool_registry.register(Arc::new(crate::tools::ImageToImageTool));
+        tool_registry.register(Arc::new(crate::tools::TextToVideoTool));
+        tool_registry.register(Arc::new(crate::tools::ImageToVideoTool));
+        tool_registry.register(Arc::new(crate::tools::MediaJobStatusTool));
+    }
+
+    if config.hal_enabled && !dry_tools {
+        tool_registry.register(Arc::new(crate::tools::YouTubeTranscriptTool::new()));
+        tool_registry.register(Arc::new(crate::tools::WebScrapeTool::new()));
+    }
+    let _task_store = crate::tools::tasks::register_task_tools(&mut tool_registry);
+
+    let plugin_skill_dirs = crate::plugins::plugin_skill_dirs();
+    let skill_store = crate::skills::SkillStore::discover_with_extra(&plugin_skill_dirs);
+    let skill_tool = crate::skills::SkillTool::new(skill_store.clone());
+    let store_handle = skill_tool.store_handle();
+    tool_registry.register(Arc::new(skill_tool));
+    tool_registry.register(Arc::new(crate::skills::SkillListTool::new_from_handle(
+        store_handle.clone(),
+    )));
+    tool_registry.register(Arc::new(crate::skills::SkillSearchTool::new_from_handle(
+        store_handle,
+    )));
+    let store_ref = if skill_store.skills.is_empty() {
+        None
+    } else {
+        Some(&skill_store)
+    };
+
+    let mcp_instructions = if dry_tools {
+        eprintln!("· --dry-tools: skipping MCP + media tools (control-flow only)");
+        Vec::new()
+    } else {
+        let mut merged_mcp = config.mcp_servers.clone();
+        for p_mcp in crate::plugins::plugin_mcp_servers() {
+            if !merged_mcp.iter().any(|s| s.name == p_mcp.name) {
+                merged_mcp.push(p_mcp);
+            }
+        }
+        let (mcp_clients, _) = load_mcp_servers(&merged_mcp, &mut tool_registry).await;
+        crate::mcp::collect_mcp_instructions(&mcp_clients)
+    };
+
+    let system = crate::prompts::build_full_system_prompt(
+        &config,
+        &cwd,
+        store_ref,
+        &mcp_instructions,
+        crate::prompts::SurfaceHints::Headless,
+    );
+
+    let provider = match build_provider(&config) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("✗ provider: {e}");
+            return 1;
+        }
+    };
+
+    // Headless → auto-approve (no interactive prompts).
+    let approver: Arc<dyn crate::permissions::ApprovalSink> =
+        Arc::new(crate::permissions::AutoApprover);
+    let hooks_arc = std::sync::Arc::new(config.hooks.clone());
+    let mut agent_defs =
+        crate::agent_defs::AgentDefsConfig::load_with_extra(&crate::plugins::plugin_agent_dirs());
+    agent_defs.apply_builtin_subagent_overrides(&config);
+    let snapshot = std::sync::Arc::new(std::sync::RwLock::new(crate::subagent::FactorySnapshot {
+        system: system.clone(),
+        tools: tool_registry.clone(),
+    }));
+    let factory = Arc::new(ProductionAgentFactory {
+        provider: provider.clone(),
+        snapshot,
+        model: config.model.clone(),
+        max_iterations: config.max_iterations,
+        max_depth: crate::subagent::DEFAULT_MAX_DEPTH,
+        max_tokens: config.max_tokens,
+        agent_defs: agent_defs.clone(),
+        approver,
+        permission_mode: PermissionMode::Auto,
+        cancel: None,
+        hooks: Some(hooks_arc),
+    });
+    let subagent_arc: Arc<dyn crate::tools::Tool> = Arc::new(
+        SubAgentTool::new(factory)
+            .with_depth(0)
+            .with_agent_defs(agent_defs),
+    );
+
+    let wfrun = crate::tools::WorkflowRunTool::new(
+        provider.clone(),
+        config.model.clone(),
+        Some(subagent_arc),
+    );
+    let input = serde_json::json!({
+        "script_path": workflow_path.to_string_lossy(),
+        "args": args.unwrap_or(serde_json::Value::Null),
+    });
+    eprintln!("· running workflow {} …", workflow_path.display());
+    match crate::tools::Tool::call(&wfrun, input).await {
+        Ok(out) => {
+            println!("{out}");
+            0
+        }
+        Err(e) => {
+            eprintln!("✗ workflow failed: {e}");
+            1
+        }
+    }
 }
 
 /// Recompose the REPL agent's system prompt from current project
@@ -4637,9 +5086,8 @@ fn refresh_repl_system_prompt(
     // shares this Arc<RwLock<FactorySnapshot>> with us, so writing
     // here is the only update needed for both system AND tools.
     {
-        let mut snap = factory_snapshot
-            .write()
-            .expect("factory snapshot write lock");
+        // L2: recover from a poisoned lock rather than panicking.
+        let mut snap = factory_snapshot.write().unwrap_or_else(|e| e.into_inner());
         snap.system = new_system;
         snap.tools = tool_registry.clone();
     }
@@ -4689,6 +5137,11 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         tool_registry.register(Arc::new(crate::tools::TextToVideoTool));
         tool_registry.register(Arc::new(crate::tools::ImageToVideoTool));
         tool_registry.register(Arc::new(crate::tools::MediaJobStatusTool));
+    }
+
+    if config.hal_enabled {
+        tool_registry.register(Arc::new(crate::tools::YouTubeTranscriptTool::new()));
+        tool_registry.register(Arc::new(crate::tools::WebScrapeTool::new()));
     }
 
     // KMS tools always-on (pre-fix this was gated by
@@ -4949,6 +5402,14 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     // filtering — Task became a privilege-escalation primitive
     // (model spawns subagent → subagent has tools the parent was
     // forbidden from using).
+    // I1: a CLI-side cancel token so Ctrl-C during a turn reaches a
+    // runaway *subagent*. The parent turn is already cancelled by the
+    // select!/drop in the turn loops below; this token propagates
+    // cooperatively to Task-spawned children via the factory (their
+    // `collect_agent_turn_with_cancel` observes it). Each turn loop
+    // resets it before `run_turn` so a prior Ctrl-C doesn't pre-cancel
+    // the next turn.
+    let repl_cancel = crate::cancel::CancelToken::new();
     let factory_snapshot =
         std::sync::Arc::new(std::sync::RwLock::new(crate::subagent::FactorySnapshot {
             system: system.clone(),
@@ -4969,9 +5430,10 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
             agent_defs: agent_defs.clone(),
             approver: approver.clone(),
             permission_mode: perm_mode,
-            // CLI doesn't have a CancelToken plumbing today; subagents
-            // run uninterruptibly here. GUI passes Some via build_state.
-            cancel: None,
+            // I1: propagate the CLI cancel token so Ctrl-C reaches a
+            // runaway subagent (the parent turn is already cut by the
+            // loop's select!/drop). GUI passes its worker token the same way.
+            cancel: Some(repl_cancel.clone()),
             hooks: Some(hooks_arc.clone()),
         });
         let subagent_arc: Arc<dyn crate::tools::Tool> = Arc::new(
@@ -5070,6 +5532,15 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     "{COLOR_YELLOW}session not found: {resume_id} — starting fresh{COLOR_RESET}"
                 );
             }
+        }
+    } else if let Some(ref store) = session_store {
+        // No explicit --resume. Reuse the most-recent session if it's
+        // still empty rather than leaving yet another empty file behind
+        // each launch (a non-empty latest is left alone, so we still land
+        // on a clean session). The reused one takes the current model.
+        if let Ok(Some(mut empty)) = store.reuse_empty_latest() {
+            empty.model = config.model.clone();
+            session = empty;
         }
     }
 
@@ -5232,31 +5703,64 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         team_println!("[{agent_name}] waiting for messages...");
 
         let poll_ms = crate::team::POLL_INTERVAL_MS;
+        // Wall-clock cap on a single teammate turn. A teammate runs headless
+        // (never receives SIGINT), so without this a chain of slow tools can
+        // occupy one "turn" for many minutes and look hung. Generous, bounded.
+        const TEAMMATE_TURN_BUDGET: std::time::Duration = std::time::Duration::from_secs(600);
         let mut pending_queue: std::collections::VecDeque<crate::team::TeamMessage> =
             std::collections::VecDeque::new();
+        // ids read into pending_queue but not yet marked read on disk, so the
+        // next poll's read_unread doesn't re-push them. mark-as-read is
+        // deferred until a message's turn finishes (at-least-once delivery: a
+        // crash mid-turn re-delivers rather than silently dropping the work).
+        let mut in_flight: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Soft retry counter for tasks left un-completed.
+        let mut task_retries: std::collections::HashMap<String, u8> =
+            std::collections::HashMap::new();
+
+        // Drain any AbortTurn protocol message (marks it read); true if found.
+        // The only way to interrupt a headless teammate mid-turn.
+        fn poll_abort_request(mailbox: &crate::team::Mailbox, agent: &str) -> bool {
+            let unread = mailbox.read_unread(agent).unwrap_or_default();
+            let abort_ids: Vec<String> = unread
+                .iter()
+                .filter(|m| {
+                    matches!(
+                        crate::team::parse_protocol_message(m.content()),
+                        Some(crate::team::ProtocolMessage::AbortTurn { .. })
+                    )
+                })
+                .map(|m| m.id.clone())
+                .collect();
+            if abort_ids.is_empty() {
+                false
+            } else {
+                let _ = mailbox.mark_as_read(agent, &abort_ids);
+                true
+            }
+        }
 
         loop {
-            // 1. Read unread messages from inbox.
-            let unread = mailbox.read_unread(agent_name).unwrap_or_default();
-            if !unread.is_empty() {
-                let ids: Vec<String> = unread.iter().map(|m| m.id.clone()).collect();
-                let _ = mailbox.mark_as_read(agent_name, &ids);
+            // Reclaim tasks stranded InProgress by a crashed/stopped peer.
+            let _ = mailbox.reap_stale_tasks();
 
-                for msg in unread {
-                    // Check for protocol messages (shutdown, etc.).
-                    if let Some(proto) = crate::team::parse_protocol_message(msg.content()) {
-                        if let crate::team::ProtocolMessage::ShutdownRequest { from } = proto {
-                            // Check if we have unfinished work.
-                            let has_work = !pending_queue.is_empty();
+            // 1. Read unread; DEFER mark-as-read until each msg is handled.
+            let unread = mailbox.read_unread(agent_name).unwrap_or_default();
+            for msg in unread {
+                if in_flight.contains(&msg.id) {
+                    continue; // already queued, awaiting its turn
+                }
+                if let Some(proto) = crate::team::parse_protocol_message(msg.content()) {
+                    match proto {
+                        crate::team::ProtocolMessage::ShutdownRequest { from } => {
+                            let _ = mailbox.mark_as_read(agent_name, &[msg.id.clone()]);
                             let has_active_task = mailbox
                                 .task_queue()
                                 .list(Some(crate::team::TaskStatus::InProgress))
                                 .unwrap_or_default()
                                 .iter()
                                 .any(|t| t.owner.as_deref() == Some(agent_name));
-
-                            if has_work || has_active_task {
-                                // Reject shutdown — still working.
+                            if !pending_queue.is_empty() || has_active_task {
                                 team_println!(
                                     "[{agent_name}] shutdown rejected — still have unfinished work"
                                 );
@@ -5267,10 +5771,11 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                     },
                                 )
                                 .unwrap_or_default();
-                                let reject_msg = crate::team::TeamMessage::new(agent_name, &reject);
-                                let _ = mailbox.write_to_mailbox(&from, reject_msg);
+                                let _ = mailbox.write_to_mailbox(
+                                    &from,
+                                    crate::team::TeamMessage::new(agent_name, &reject),
+                                );
                             } else {
-                                // Approve shutdown — idle, no tasks.
                                 team_println!("[{agent_name}] shutdown approved — exiting");
                                 let approve = serde_json::to_string(
                                     &crate::team::ProtocolMessage::ShutdownApproved {
@@ -5278,24 +5783,43 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                     },
                                 )
                                 .unwrap_or_default();
-                                let approve_msg =
-                                    crate::team::TeamMessage::new(agent_name, &approve);
-                                let _ = mailbox.write_to_mailbox(&from, approve_msg);
+                                let _ = mailbox.write_to_mailbox(
+                                    &from,
+                                    crate::team::TeamMessage::new(agent_name, &approve),
+                                );
                                 let _ = mailbox.write_status(agent_name, "stopped", None);
                                 return Ok(());
                             }
                         }
-                    } else {
-                        pending_queue.push_back(msg);
+                        // AbortTurn while idle = nothing to abort; just ack.
+                        crate::team::ProtocolMessage::AbortTurn { .. } => {
+                            let _ = mailbox.mark_as_read(agent_name, &[msg.id.clone()]);
+                        }
+                        // Other protocol messages (idle/shutdown replies) must
+                        // NOT be silently dropped — surface them to the model.
+                        _ => {
+                            team_println!(
+                                "[{agent_name}] note from '{}': {}",
+                                msg.from,
+                                msg.content()
+                            );
+                            in_flight.insert(msg.id.clone());
+                            pending_queue.push_back(msg);
+                        }
                     }
+                } else {
+                    in_flight.insert(msg.id.clone());
+                    pending_queue.push_back(msg);
                 }
             }
 
             // 2. If no messages, try claiming a task from the queue.
+            let mut claimed_task_id: Option<String> = None;
             if pending_queue.is_empty() {
                 let tq = mailbox.task_queue();
                 if let Ok(Some(task)) = tq.claim_next(agent_name) {
                     team_println!("[{agent_name}] claimed task #{}: {}", task.id, task.subject);
+                    claimed_task_id = Some(task.id.clone());
                     let synthetic = crate::team::TeamMessage::new(
                         "task-queue",
                         &format!(
@@ -5321,12 +5845,17 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 let _ = mailbox.write_status(agent_name, "working", Some(&msg.id));
                 let mut last_heartbeat = std::time::Instant::now();
                 let turn_start = std::time::Instant::now();
+                let turn_deadline = tokio::time::Instant::now() + TEAMMATE_TURN_BUDGET;
                 let mut team_active_tools: std::collections::HashMap<
                     String,
                     crate::tool_display::ActiveToolDisplay,
                 > = std::collections::HashMap::new();
+                let mut turn_errored: Option<String> = None;
+                let mut capped = false;
+                let mut aborted = false;
 
                 // Run the agent turn.
+                repl_cancel.reset();
                 let mut stream = Box::pin(agent.run_turn(prompt));
                 loop {
                     let heartbeat_delay =
@@ -5335,7 +5864,19 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         ev = stream.next() => ev,
                         _ = tokio::signal::ctrl_c() => {
                             team_println!("\n[cancelled]");
+                            repl_cancel.cancel();
                             drop(stream);
+                            aborted = true;
+                            break;
+                        }
+                        _ = tokio::time::sleep_until(turn_deadline) => {
+                            team_println!(
+                                "\n[{agent_name}] turn exceeded {}s budget — aborting",
+                                TEAMMATE_TURN_BUDGET.as_secs()
+                            );
+                            repl_cancel.cancel();
+                            drop(stream);
+                            aborted = true;
                             break;
                         }
                         _ = tokio::time::sleep(heartbeat_delay) => {
@@ -5344,6 +5885,19 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                     team_println!("\n{}", crate::tool_display::format_tool_heartbeat(&td.label, td.elapsed()));
                                     td.last_heartbeat_at = std::time::Instant::now();
                                 }
+                            }
+                            // Keep the lead's liveness view fresh while busy.
+                            if last_heartbeat.elapsed().as_secs() >= 5 {
+                                let _ = mailbox.write_status(agent_name, "working", None);
+                                last_heartbeat = std::time::Instant::now();
+                            }
+                            // Cooperative cancel (headless teammate gets no SIGINT).
+                            if poll_abort_request(&mailbox, agent_name) {
+                                team_println!("\n[{agent_name}] abort requested — cancelling turn");
+                                repl_cancel.cancel();
+                                drop(stream);
+                                aborted = true;
+                                break;
                             }
                             continue;
                         }
@@ -5383,13 +5937,22 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             let _ = mailbox.write_status(agent_name, "working", None);
                             last_heartbeat = std::time::Instant::now();
                         }
-                        Ok(AgentEvent::Done { usage, .. }) => {
+                        Ok(AgentEvent::Done { usage, stop_reason }) => {
+                            capped = stop_reason.as_deref() == Some("max_iterations");
                             // Record teammate usage to project's .thclaws/usage/.
                             // Use team_dir parent to find project root (team_dir is absolute).
-                            let usage_path = team_dir.parent().unwrap_or(&team_dir).join("usage");
+                            let project_root = team_dir.parent().unwrap_or(&team_dir);
                             let provider_name = config.detect_provider().unwrap_or("unknown");
-                            let tracker = crate::usage::UsageTracker::new(usage_path);
+                            let tracker =
+                                crate::usage::UsageTracker::new(project_root.join("usage"));
                             tracker.record(provider_name, &config.model, &usage);
+                            crate::usage::append_usage_ledger(
+                                project_root,
+                                "main",
+                                provider_name,
+                                &config.model,
+                                &usage,
+                            );
                             team_println!(
                                 "\n[tokens: {}in/{}out · {}]",
                                 usage.input_tokens,
@@ -5397,23 +5960,101 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 format_duration(turn_start.elapsed())
                             );
                         }
+                        Err(e) => {
+                            // F5: do NOT swallow provider/config errors — they
+                            // would otherwise be reported to the lead as a
+                            // clean "finished", and the work silently lost.
+                            team_println!("\n[{agent_name}] turn error: {e}");
+                            turn_errored = Some(e.to_string());
+                        }
                         _ => {}
                     }
                 }
                 team_println!("");
 
-                // Turn completed (Stop hook equivalent) — always send idle notification.
-                // This tells the lead we finished the current work, even if more is queued.
-                // The teammate will pick up queued work on the next loop iteration.
-                let _ = mailbox.write_status(agent_name, "idle", None);
-                let idle = crate::team::make_idle_notification(
-                    agent_name,
-                    None,
-                    None,
-                    Some("finished current turn"),
-                );
-                let idle_msg = crate::team::TeamMessage::new(agent_name, &idle);
-                let _ = mailbox.write_to_mailbox("lead", idle_msg);
+                // This message's turn ran — mark it read (consume it) and drop
+                // it from in_flight so it isn't re-pushed next poll.
+                let _ = mailbox.mark_as_read(agent_name, &[msg.id.clone()]);
+                in_flight.remove(&msg.id);
+
+                let tq = mailbox.task_queue();
+                if let Some(err) = turn_errored {
+                    // Failure: tell the lead and release any claimed task so it
+                    // isn't stranded under an erroring teammate.
+                    let _ = mailbox.write_status(agent_name, "error", None);
+                    if let Some(tid) = &claimed_task_id {
+                        let _ = tq.release(tid);
+                    }
+                    let note = crate::team::make_failure_notification(
+                        agent_name,
+                        &format!("turn failed: {err}"),
+                    );
+                    let _ = mailbox
+                        .write_to_mailbox("lead", crate::team::TeamMessage::new(agent_name, &note));
+                } else if aborted || capped {
+                    // Gave up mid-task: release it and tell the lead it's
+                    // incomplete (so it re-drives rather than assuming success).
+                    let _ = mailbox.write_status(agent_name, "idle", None);
+                    if let Some(tid) = &claimed_task_id {
+                        let _ = tq.release(tid);
+                    }
+                    let reason = if capped {
+                        "hit max_iterations — incomplete"
+                    } else {
+                        "turn aborted (time/abort budget) — incomplete"
+                    };
+                    let note = crate::team::make_blocked_notification(
+                        agent_name,
+                        claimed_task_id.as_deref(),
+                        reason,
+                    );
+                    let _ = mailbox
+                        .write_to_mailbox("lead", crate::team::TeamMessage::new(agent_name, &note));
+                } else {
+                    // Clean finish.
+                    let _ = mailbox.write_status(agent_name, "idle", None);
+                    if let Some(tid) = &claimed_task_id {
+                        let still_owns = tq
+                            .get(tid)
+                            .ok()
+                            .flatten()
+                            .map(|t| {
+                                t.status == crate::team::TaskStatus::InProgress
+                                    && t.owner.as_deref() == Some(agent_name)
+                            })
+                            .unwrap_or(false);
+                        if still_owns {
+                            // Turn ended without TeamTaskComplete — release so
+                            // it can be retried/reassigned (else the busy-check
+                            // wedges this teammate forever).
+                            let n = task_retries.entry(tid.clone()).or_insert(0);
+                            *n += 1;
+                            let summary = if *n >= 3 {
+                                "did not complete after retries — released for reassignment"
+                            } else {
+                                "turn ended without TeamTaskComplete — released to retry"
+                            };
+                            let _ = tq.release(tid);
+                            let note = crate::team::make_blocked_notification(
+                                agent_name,
+                                Some(tid),
+                                summary,
+                            );
+                            let _ = mailbox.write_to_mailbox(
+                                "lead",
+                                crate::team::TeamMessage::new(agent_name, &note),
+                            );
+                        } else {
+                            // Completed — TeamTaskComplete already notified the lead.
+                            task_retries.remove(tid);
+                        }
+                    }
+                    // F26: a plain reply turn (no claimed task) sends NO
+                    // content-free idle notification — that was the lead<->
+                    // teammate ping-pong source. The teammate replies via
+                    // SendMessage if it has something to say; otherwise it
+                    // settles to quiet.
+                }
             } else {
                 // Nothing to do — update heartbeat and poll.
                 let _ = mailbox.write_status(agent_name, "idle", None);
@@ -5465,9 +6106,15 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     let mut active_loop_handle: Option<tokio::task::AbortHandle> = None;
     let mut active_loop_body: Option<String> = None;
     if team_enabled {
-        let mailbox = crate::team::Mailbox::new(crate::team::Mailbox::default_dir());
+        // Absolute team dir (not the relative default) so a mid-session
+        // ChangeCwd doesn't make this long-lived poller read a different
+        // project's inbox than the one teammates write to.
+        let mailbox = crate::team::Mailbox::new(crate::team::resolved_team_dir());
         tokio::spawn(async move {
             loop {
+                // Lead heartbeat so teammates / staleness checks can tell a
+                // live lead from a crashed one.
+                let _ = mailbox.write_status("lead", "active", None);
                 let unread = mailbox.read_unread("lead").unwrap_or_default();
                 if !unread.is_empty() {
                     let ids: Vec<String> = unread.iter().map(|m| m.id.clone()).collect();
@@ -5533,7 +6180,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 if let Some(proto) = crate::team::parse_protocol_message(msg.content()) {
                     match proto {
                         crate::team::ProtocolMessage::IdleNotification {
-                            ref from, ref completed_task_id, ref summary, ..
+                            ref from, ref completed_task_id, ref completed_status, ref summary, ..
                         } => {
                             let task_info = completed_task_id.as_ref()
                                 .map(|id| format!(" (task #{id})"))
@@ -5543,8 +6190,14 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 "\n{COLOR_CYAN}[{from} is idle{task_info}]{COLOR_RESET} {COLOR_DIM}{sum}{COLOR_RESET}"
                             );
                             lead_log!("\n{COLOR_CYAN}[{from} is idle{task_info}]{COLOR_RESET} {COLOR_DIM}{sum}{COLOR_RESET}\n");
-                            // Feed to agent so it can coordinate next steps.
-                            regular.push(msg);
+                            // F26: only run a lead turn for ACTIONABLE idles (a
+                            // completed task, or a blocked/failed status). A
+                            // content-free "available" idle just prints —
+                            // feeding it as a turn caused an unbounded
+                            // lead<->teammate ping-pong with no convergence.
+                            if completed_task_id.is_some() || completed_status.is_some() {
+                                regular.push(msg);
+                            }
                         }
                         crate::team::ProtocolMessage::ShutdownApproved { ref from } => {
                             println!(
@@ -5590,6 +6243,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 println!("{COLOR_GREEN}");
                 lead_log!("{COLOR_GREEN}");
                 let _ = std::io::stdout().flush();
+                repl_cancel.reset();
                 let mut stream = Box::pin(agent.run_turn(team_prompt));
                 let mut last_was_thinking = false;
                 let mut active_tools: std::collections::HashMap<String, crate::tool_display::ActiveToolDisplay> =
@@ -5601,6 +6255,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         _ = tokio::signal::ctrl_c() => {
                             println!("{COLOR_RESET}\n{COLOR_YELLOW}[cancelled]{COLOR_RESET}");
                             lead_log!("{COLOR_RESET}\n{COLOR_YELLOW}[cancelled]{COLOR_RESET}\n");
+                            repl_cancel.cancel();
                             drop(stream);
                             break;
                         }
@@ -5697,10 +6352,38 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         &config.model,
     );
 
+    // F31: lead-side watchdog. The lead is otherwise purely event-driven on
+    // its inbox, so a teammate that died silently (and whose SendMessage the
+    // lead already issued) would hang coordination forever. This ticks every
+    // 10s and surfaces any teammate whose heartbeat went stale, feeding the
+    // lead a synthetic notice so it can respawn/reassign. Each unresponsive
+    // episode is surfaced once (cleared when the teammate recovers).
+    let watchdog_mb = crate::team::Mailbox::new(crate::team::resolved_team_dir());
+    let mut team_watchdog = tokio::time::interval(tokio::time::Duration::from_secs(10));
+    team_watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut warned_unresponsive: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
+    // F29: teammate messages that arrived DURING a lead turn (the turn's
+    // stream borrows `agent`, so we can't run a follow-up turn inline). They
+    // were already consumed from the channel + printed for visibility; we
+    // process them at the top of the next loop iteration where `agent` is
+    // free — so the lead reacts right after its turn instead of waiting for
+    // the user to press Enter.
+    let mut deferred_team: Vec<crate::team::TeamMessage> = Vec::new();
+
     // ── Normal interactive REPL ──────────────────────────────────────
     // Uses select! to race user input against team inbox messages so the
     // lead can respond to teammates without the user needing to press Enter.
     loop {
+        // F29: process teammate messages buffered during the previous turn.
+        // `agent` is free here (last turn's stream was dropped at the end of
+        // the prior iteration), so a follow-up lead turn is safe.
+        if !deferred_team.is_empty() {
+            let deferred = std::mem::take(&mut deferred_team);
+            process_team_messages!(deferred);
+        }
+
         // Drain Cardputer reset notifications quietly — when the user
         // hits Backspace on the device we zero the session counter so
         // both displays stay in sync. Silent on purpose; the device
@@ -5799,6 +6482,39 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     );
                     line = loop_line;
                     break;
+                }
+                _ = team_watchdog.tick(), if team_enabled => {
+                    // F31: surface newly-unresponsive teammates so the lead
+                    // can react instead of waiting on a dead inbox.
+                    let mut newly: Vec<crate::team::TeamMessage> = Vec::new();
+                    for s in watchdog_mb.all_status().unwrap_or_default() {
+                        if s.agent == "lead" || s.status == "stopped" {
+                            continue;
+                        }
+                        if s.is_stale() {
+                            if warned_unresponsive.insert(s.agent.clone()) {
+                                println!(
+                                    "\n{COLOR_YELLOW}[watchdog: teammate '{}' is unresponsive — no heartbeat for >10s (status={})]{COLOR_RESET}",
+                                    s.agent, s.status
+                                );
+                                newly.push(crate::team::TeamMessage::new(
+                                    "watchdog",
+                                    &format!(
+                                        "Teammate '{}' is unresponsive (no heartbeat for over 10s, last status={}). It likely crashed or stalled — respawn it with SpawnTeammate or reassign its work.",
+                                        s.agent, s.status
+                                    ),
+                                ));
+                            }
+                        } else {
+                            // Recovered → allow a future episode to re-warn.
+                            warned_unresponsive.remove(&s.agent);
+                        }
+                    }
+                    if !newly.is_empty() {
+                        process_team_messages!(newly);
+                        print!("{COLOR_CYAN}{REPL_PROMPT}{COLOR_RESET}");
+                        let _ = std::io::stdout().flush();
+                    }
                 }
             }
         }
@@ -8100,6 +8816,163 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         }
                     }
                 }
+                SlashCommand::SubagentMarketplace { refresh } => {
+                    if refresh {
+                        if let Err(e) = crate::marketplace::refresh_from_remote().await {
+                            println!("{COLOR_YELLOW}refresh failed ({e}){COLOR_RESET}");
+                        }
+                    }
+                    let mp = crate::marketplace::load();
+                    let age_suffix = match crate::marketplace::cache_age_label() {
+                        Some(label) => format!(", {label}"),
+                        None => String::new(),
+                    };
+                    println!(
+                        "{COLOR_DIM}marketplace ({}, {} subagent(s){age_suffix}){COLOR_RESET}",
+                        mp.source,
+                        mp.subagents.len(),
+                    );
+                    let mut by_cat: std::collections::BTreeMap<
+                        String,
+                        Vec<&crate::marketplace::MarketplaceSubagent>,
+                    > = std::collections::BTreeMap::new();
+                    for s in &mp.subagents {
+                        let cat = if s.category.is_empty() {
+                            "other".to_string()
+                        } else {
+                            s.category.clone()
+                        };
+                        by_cat.entry(cat).or_default().push(s);
+                    }
+                    for (cat, items) in by_cat {
+                        println!("{COLOR_DIM}── {cat} ──{COLOR_RESET}");
+                        for s in items {
+                            let tags = crate::marketplace::entry_tags(s);
+                            println!(
+                                "{COLOR_DIM}  {:<24}{tags} — {}{COLOR_RESET}",
+                                s.name,
+                                s.short_line()
+                            );
+                        }
+                    }
+                    println!(
+                        "{COLOR_DIM}install with: /subagent install <name>   |   detail: /subagent info <name>{COLOR_RESET}"
+                    );
+                }
+                SlashCommand::SubagentSearch(query) => {
+                    let mp = crate::marketplace::load();
+                    let hits = mp.search_subagent(&query);
+                    if hits.is_empty() {
+                        println!(
+                            "{COLOR_DIM}no matches for '{query}' — try /subagent marketplace to browse all{COLOR_RESET}"
+                        );
+                    } else {
+                        println!(
+                            "{COLOR_DIM}{} match(es) for '{query}':{COLOR_RESET}",
+                            hits.len()
+                        );
+                        for s in hits {
+                            println!(
+                                "{COLOR_DIM}  {:<24} — {}{COLOR_RESET}",
+                                s.name,
+                                s.short_line()
+                            );
+                        }
+                    }
+                }
+                SlashCommand::SubagentInfo(name) => {
+                    let mp = crate::marketplace::load();
+                    match mp.find_subagent(&name) {
+                        Some(s) => {
+                            println!("{COLOR_DIM}name:        {}{COLOR_RESET}", s.name);
+                            println!("{COLOR_DIM}description: {}{COLOR_RESET}", s.description);
+                            if !s.category.is_empty() {
+                                println!("{COLOR_DIM}category:    {}{COLOR_RESET}", s.category);
+                            }
+                            println!(
+                                "{COLOR_DIM}license:     {} ({}){COLOR_RESET}",
+                                s.license, s.license_tier
+                            );
+                            if !s.homepage.is_empty() {
+                                println!("{COLOR_DIM}homepage:    {}{COLOR_RESET}", s.homepage);
+                            }
+                            match (s.license_tier.as_str(), s.install_url.as_ref()) {
+                                ("linked-only", _) => {
+                                    println!(
+                                        "{COLOR_YELLOW}install:     not redistributable — install from {}{COLOR_RESET}",
+                                        if s.homepage.is_empty() {
+                                            "the upstream repo"
+                                        } else {
+                                            &s.homepage
+                                        }
+                                    );
+                                }
+                                (_, Some(url)) => {
+                                    println!(
+                                        "{COLOR_DIM}install:     /subagent install {} (resolves to {url}){COLOR_RESET}",
+                                        s.name
+                                    );
+                                }
+                                (_, None) => {
+                                    println!(
+                                        "{COLOR_YELLOW}install:     no install_url in catalogue{COLOR_RESET}"
+                                    );
+                                }
+                            }
+                        }
+                        None => {
+                            println!(
+                                "{COLOR_YELLOW}no subagent named '{name}' in marketplace — try /subagent search <query>{COLOR_RESET}"
+                            );
+                        }
+                    }
+                }
+                SlashCommand::SubagentInstall { arg, name, project } => {
+                    let (effective_url, abort_msg) =
+                        crate::agent_defs::resolve_subagent_install_target(&arg);
+                    if let Some(msg) = abort_msg {
+                        println!("{COLOR_YELLOW}{msg}{COLOR_RESET}");
+                    } else {
+                        match crate::agent_defs::install_subagent_from_url(
+                            &effective_url,
+                            name.as_deref(),
+                            project,
+                        )
+                        .await
+                        {
+                            Ok(report) => {
+                                for line in report {
+                                    println!("{COLOR_DIM}  {line}{COLOR_RESET}");
+                                }
+                                println!(
+                                    "{COLOR_DIM}  available to Task(agent: \"…\") / /agent on the next session{COLOR_RESET}"
+                                );
+                            }
+                            Err(e) => {
+                                println!("{COLOR_YELLOW}subagent install failed: {e}{COLOR_RESET}");
+                            }
+                        }
+                    }
+                }
+                SlashCommand::Marketplace { refresh } => {
+                    if refresh {
+                        if let Err(e) = crate::marketplace::refresh_from_remote().await {
+                            println!("{COLOR_YELLOW}refresh failed ({e}){COLOR_RESET}");
+                        }
+                    }
+                    let mp = crate::marketplace::load();
+                    println!(
+                        "{COLOR_DIM}marketplace ({}): {} skill(s), {} mcp server(s), {} plugin(s), {} subagent(s){COLOR_RESET}",
+                        mp.source,
+                        mp.skills.len(),
+                        mp.mcp_servers.len(),
+                        mp.plugins.len(),
+                        mp.subagents.len(),
+                    );
+                    println!(
+                        "{COLOR_DIM}browse a type: /skill · /mcp · /plugin · /subagent  marketplace  (GUI: /marketplace opens the browser){COLOR_RESET}"
+                    );
+                }
                 SlashCommand::McpMarketplace { refresh } => {
                     if refresh {
                         if let Err(e) = crate::marketplace::refresh_from_remote().await {
@@ -8543,7 +9416,15 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     file,
                     alias,
                     force,
+                    vision,
                 } => {
+                    if vision {
+                        println!(
+                            "{COLOR_YELLOW}--vision ingest needs the agent loop (render + transcribe) — \
+                             run it in the desktop GUI. The CLI does text-only ingest.{COLOR_RESET}"
+                        );
+                        continue;
+                    }
                     let Some(k) = crate::kms::resolve(&name) else {
                         println!("{COLOR_YELLOW}no KMS named '{name}'{COLOR_RESET}");
                         continue;
@@ -8608,6 +9489,17 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         "{COLOR_YELLOW}/kms reconcile is only available in GUI mode \
                          (thclaws or thclaws --serve). It dispatches the built-in \
                          kms-reconcile agent as a side channel.{COLOR_RESET}"
+                    );
+                }
+                SlashCommand::KmsMaintain { name, .. } => {
+                    let Some(_k) = crate::kms::resolve(&name) else {
+                        println!("{COLOR_YELLOW}no KMS named '{name}'{COLOR_RESET}");
+                        continue;
+                    };
+                    println!(
+                        "{COLOR_YELLOW}/kms maintain is only available in GUI mode \
+                         (thclaws or thclaws --serve). It dispatches the built-in \
+                         kms-maintain agent as a side channel.{COLOR_RESET}"
                     );
                 }
                 // dev-plan/36 follow-up: `/kms search <name|*> <query>`
@@ -9030,19 +9922,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         );
                         continue;
                     };
-                    let stem: String = title
-                        .trim()
-                        .chars()
-                        .map(|c| {
-                            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                                c
-                            } else {
-                                '_'
-                            }
-                        })
-                        .collect::<String>()
-                        .trim_matches('_')
-                        .to_string();
+                    let stem = crate::kms::sanitize_alias(&title);
                     if stem.is_empty() {
                         println!(
                             "{COLOR_YELLOW}title sanitises to empty — pick another{COLOR_RESET}"
@@ -9118,13 +9998,15 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     budget_tokens,
                     budget_time_secs,
                     auto_continue,
+                    require_paths,
                 } => {
                     let new_goal = crate::goal_state::GoalState::new(
                         objective.clone(),
                         budget_tokens,
                         budget_time_secs,
                         auto_continue,
-                    );
+                    )
+                    .with_require_paths(require_paths);
                     crate::goal_state::set(Some(new_goal));
                     // Phase C1: register the three split goal-lifecycle
                     // tools (RecordGoalProgress / MarkGoalComplete /
@@ -9450,9 +10332,10 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 .unwrap_or_else(|| "(timeout)".into());
                             println!(
                                 "{COLOR_DIM}/schedule run '{id_for_print}': exit={exit} \
-                                 duration={}.{:03}s log={}{COLOR_RESET}",
+                                 duration={}.{:03}s → result={} (log={}){COLOR_RESET}",
                                 outcome.duration.as_secs(),
                                 outcome.duration.subsec_millis(),
+                                outcome.result_path.display(),
                                 outcome.log_path.display(),
                             );
                         }
@@ -9720,6 +10603,17 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             "{COLOR_YELLOW}/agent cancel not available in thclaws-cli.{COLOR_RESET}"
                         );
                     }
+                }
+                SlashCommand::AgentNew(name) | SlashCommand::AgentEdit(name) => {
+                    // GUI-only: the editor is a modal with no terminal
+                    // surface. Point CLI users at the file they can edit
+                    // by hand instead.
+                    let _ = name;
+                    println!(
+                        "{COLOR_YELLOW}/agent new and /agent edit are only available in GUI mode \
+                         (thclaws or thclaws --serve). In the terminal, edit \
+                         .thclaws/agents/<name>.md directly.{COLOR_RESET}"
+                    );
                 }
                 SlashCommand::Dream { focus, all_sessions } => {
                     let _ = (focus, all_sessions);
@@ -10439,6 +11333,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         print!("{COLOR_GREEN}");
         let _ = std::io::stdout().flush();
         let turn_start = std::time::Instant::now();
+        repl_cancel.reset();
         let mut stream = Box::pin(agent.run_turn(line.to_string()));
         let mut _cancelled = false;
         let mut last_was_thinking = false;
@@ -10462,8 +11357,25 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     print!("{}", crate::tool_display::clear_thinking_line());
                     _cancelled = true;
                     println!("{COLOR_RESET}\n{COLOR_YELLOW}[cancelled by Ctrl-C]{COLOR_RESET}");
+                    repl_cancel.cancel();
                     drop(stream);
                     break;
+                }
+                Some(msgs) = inbox_rx.recv(), if team_enabled => {
+                    // F29: a teammate reported mid-turn. Show it now for
+                    // visibility and buffer it; we handle it after this turn
+                    // (can't run a nested turn while `stream` borrows `agent`).
+                    print!("{}", crate::tool_display::clear_thinking_line());
+                    for m in &msgs {
+                        println!(
+                            "{COLOR_RESET}\n{COLOR_CYAN}[{} reported — handling after this turn]{COLOR_RESET}",
+                            m.from
+                        );
+                    }
+                    print!("{COLOR_GREEN}");
+                    let _ = std::io::stdout().flush();
+                    deferred_team.extend(msgs);
+                    continue;
                 }
                 _ = tokio::time::sleep(anim_delay) => {
                     spinner_tick += 1;
@@ -10751,6 +11663,15 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     let usage_tracker =
                         crate::usage::UsageTracker::new(crate::usage::UsageTracker::default_path());
                     usage_tracker.record(provider_name, &config.model, &usage);
+                    if let Ok(cwd) = std::env::current_dir() {
+                        crate::usage::append_usage_ledger(
+                            &cwd,
+                            "main",
+                            provider_name,
+                            &config.model,
+                            &usage,
+                        );
+                    }
 
                     // Auto-save the session after each completed turn.
                     if let Some(store) = &session_store {
@@ -12030,6 +12951,47 @@ mod tests {
     }
 
     #[test]
+    fn parse_slash_kms_maintain_basic() {
+        match parse_slash("/kms maintain notes") {
+            Some(SlashCommand::KmsMaintain { name, apply }) => {
+                assert_eq!(name, "notes");
+                assert!(!apply); // dry-run by default
+            }
+            other => panic!("expected KmsMaintain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_slash_kms_maintain_apply_and_alias() {
+        assert!(matches!(
+            parse_slash("/kms maintain notes --apply"),
+            Some(SlashCommand::KmsMaintain { apply: true, .. })
+        ));
+        // order-insensitive
+        assert!(matches!(
+            parse_slash("/kms maintain --apply notes"),
+            Some(SlashCommand::KmsMaintain { apply: true, .. })
+        ));
+        // `tidy` alias
+        assert!(matches!(
+            parse_slash("/kms tidy notes"),
+            Some(SlashCommand::KmsMaintain { apply: false, .. })
+        ));
+    }
+
+    #[test]
+    fn parse_slash_kms_maintain_rejects_missing_name_and_bad_flag() {
+        assert!(matches!(
+            parse_slash("/kms maintain"),
+            Some(SlashCommand::Unknown(_))
+        ));
+        assert!(matches!(
+            parse_slash("/kms maintain notes --bogus"),
+            Some(SlashCommand::Unknown(_))
+        ));
+    }
+
+    #[test]
     fn parse_slash_kms_reconcile_rejects_unknown_flag() {
         assert!(matches!(
             parse_slash("/kms reconcile notes --bogus"),
@@ -12247,6 +13209,7 @@ mod tests {
                 budget_tokens: Some(200_000),
                 budget_time_secs: Some(1800),
                 auto_continue: false,
+                require_paths: vec![],
             })
         );
         // Without quotes — objective is words up to first --flag.
@@ -12257,6 +13220,7 @@ mod tests {
                 budget_tokens: Some(50_000),
                 budget_time_secs: None,
                 auto_continue: false,
+                require_paths: vec![],
             })
         );
     }
@@ -12272,6 +13236,7 @@ mod tests {
                 budget_tokens: Some(10_000),
                 budget_time_secs: None,
                 auto_continue: true,
+                require_paths: vec![],
             })
         );
         // --auto-continue alias.
@@ -12282,6 +13247,28 @@ mod tests {
                 budget_tokens: None,
                 budget_time_secs: None,
                 auto_continue: true,
+                require_paths: vec![],
+            })
+        );
+    }
+
+    #[test]
+    fn parse_slash_goal_start_with_require_paths() {
+        // --require (repeatable) collects artifacts the engine will verify
+        // on disk before MarkGoalComplete is accepted.
+        assert_eq!(
+            parse_slash(
+                "/goal start \"build feature\" --auto --require .thclaws/gui-shell/.audit-pass --require dist/index.html"
+            ),
+            Some(SlashCommand::GoalStart {
+                objective: "build feature".into(),
+                budget_tokens: None,
+                budget_time_secs: None,
+                auto_continue: true,
+                require_paths: vec![
+                    ".thclaws/gui-shell/.audit-pass".into(),
+                    "dist/index.html".into(),
+                ],
             })
         );
     }
@@ -12459,6 +13446,72 @@ mod tests {
     }
 
     #[test]
+    fn parse_slash_agent_new_and_edit() {
+        assert_eq!(
+            parse_slash("/agent new reviewer"),
+            Some(SlashCommand::AgentNew("reviewer".into())),
+        );
+        assert_eq!(
+            parse_slash("/agent edit translator"),
+            Some(SlashCommand::AgentEdit("translator".into())),
+        );
+        // Bare keyword → usage hint.
+        match parse_slash("/agent new") {
+            Some(SlashCommand::Unknown(msg)) => assert!(msg.contains("usage: /agent new")),
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+        // `new`/`edit` must be standalone words — `newsletter` is an
+        // agent name with a prompt, not the new-agent subcommand.
+        assert_eq!(
+            parse_slash("/agent newsletter write today's digest"),
+            Some(SlashCommand::Agent {
+                name: "newsletter".into(),
+                prompt: "write today's digest".into(),
+            }),
+        );
+    }
+
+    #[test]
+    fn parse_slash_subagent_and_marketplace() {
+        assert_eq!(
+            parse_slash("/subagent marketplace"),
+            Some(SlashCommand::SubagentMarketplace { refresh: false }),
+        );
+        assert_eq!(
+            parse_slash("/subagent marketplace --refresh"),
+            Some(SlashCommand::SubagentMarketplace { refresh: true }),
+        );
+        assert_eq!(
+            parse_slash("/subagent search review"),
+            Some(SlashCommand::SubagentSearch("review".into())),
+        );
+        assert_eq!(
+            parse_slash("/subagent install reviewer"),
+            Some(SlashCommand::SubagentInstall {
+                arg: "reviewer".into(),
+                name: None,
+                project: true,
+            }),
+        );
+        assert_eq!(
+            parse_slash("/subagent install --user reviewer myrev"),
+            Some(SlashCommand::SubagentInstall {
+                arg: "reviewer".into(),
+                name: Some("myrev".into()),
+                project: false,
+            }),
+        );
+        assert_eq!(
+            parse_slash("/marketplace"),
+            Some(SlashCommand::Marketplace { refresh: false }),
+        );
+        assert_eq!(
+            parse_slash("/marketplace --refresh"),
+            Some(SlashCommand::Marketplace { refresh: true }),
+        );
+    }
+
+    #[test]
     fn parse_slash_agent_bare_errors() {
         match parse_slash("/agent") {
             Some(SlashCommand::Unknown(msg)) => {
@@ -12471,6 +13524,76 @@ mod tests {
     #[test]
     fn parse_slash_agents_list() {
         assert_eq!(parse_slash("/agents"), Some(SlashCommand::AgentsList));
+    }
+
+    /// `/subagent` is the canonical command: besides the marketplace ops
+    /// it now also runs / manages agent defs (merged from the old
+    /// `/agent`). `/agent` remains a working alias.
+    #[test]
+    fn parse_slash_subagent_runs_and_manages() {
+        // Run a named agent.
+        assert_eq!(
+            parse_slash("/subagent researcher find X"),
+            Some(SlashCommand::Agent {
+                name: "researcher".into(),
+                prompt: "find X".into(),
+            }),
+        );
+        // new / edit / cancel / list.
+        assert_eq!(
+            parse_slash("/subagent new reviewer"),
+            Some(SlashCommand::AgentNew("reviewer".into())),
+        );
+        assert_eq!(
+            parse_slash("/subagent edit translator"),
+            Some(SlashCommand::AgentEdit("translator".into())),
+        );
+        assert_eq!(
+            parse_slash("/subagent cancel side-abc123"),
+            Some(SlashCommand::AgentCancel("side-abc123".into())),
+        );
+        assert_eq!(
+            parse_slash("/subagent list"),
+            Some(SlashCommand::AgentsList),
+        );
+        // Subcommands match as standalone words → an agent named
+        // `infosec` / `newsbot` isn't shadowed by `info` / `new`.
+        assert_eq!(
+            parse_slash("/subagent infosec audit the repo"),
+            Some(SlashCommand::Agent {
+                name: "infosec".into(),
+                prompt: "audit the repo".into(),
+            }),
+        );
+        assert_eq!(
+            parse_slash("/subagent newsbot write the digest"),
+            Some(SlashCommand::Agent {
+                name: "newsbot".into(),
+                prompt: "write the digest".into(),
+            }),
+        );
+        // Usage hints carry the canonical label.
+        match parse_slash("/subagent new") {
+            Some(SlashCommand::Unknown(msg)) => assert!(msg.contains("usage: /subagent new")),
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    /// `/agent` stays a deprecated alias — same dispatch, label in hints.
+    #[test]
+    fn parse_slash_agent_alias_still_works() {
+        assert_eq!(
+            parse_slash("/agent install reviewer"),
+            Some(SlashCommand::SubagentInstall {
+                arg: "reviewer".into(),
+                name: None,
+                project: true,
+            }),
+        );
+        assert_eq!(
+            parse_slash("/agent marketplace"),
+            Some(SlashCommand::SubagentMarketplace { refresh: false }),
+        );
     }
 
     #[test]

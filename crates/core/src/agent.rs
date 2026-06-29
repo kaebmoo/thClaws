@@ -635,6 +635,119 @@ pub fn build_todos_reminder() -> Option<String> {
     ))
 }
 
+/// Strip tantivy query-syntax metacharacters so a raw user message can be
+/// used as a search query without `QueryParser` choking on stray `:`/`(`/
+/// `?` etc. Turns the message into a safe bag-of-words.
+#[cfg(feature = "kms_search_index")]
+fn sanitize_kms_query(q: &str) -> String {
+    let cleaned: String = q
+        .chars()
+        .map(|c| match c {
+            '+' | '-' | '&' | '|' | '!' | '(' | ')' | '{' | '}' | '[' | ']' | '^' | '"' | '~'
+            | '*' | '?' | ':' | '\\' | '/' => ' ',
+            other => other,
+        })
+        .collect();
+    // Cap length — the Thai segmenter handles long input but there's no
+    // point feeding a whole paragraph; the first ~200 chars carry the topic.
+    cleaned
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(200)
+        .collect()
+}
+
+/// Deterministic pre-retrieval (RAG, lightweight): before the model answers,
+/// search the active KMS for the user's message and splice a short **pointer
+/// list** of the matching canonical topic pages (name + one-line topic) into
+/// the system prompt. This removes the dependence on the model *choosing* to
+/// call `KmsSearch` — weak/economy models (and even strong ones, for "casual"
+/// phrasings) routinely skip the mandatory-consult instruction and answer from
+/// training data. Naming the relevant pages reliably triggers a `KmsRead`; we
+/// inject pointers, not full bodies, so the per-turn token cost is ~200 bytes
+/// instead of multiple KB (the model pulls only what it needs). Returns `None`
+/// (no injection) when there's no active KMS, the message is too short, or
+/// nothing clears the relevance floor — so greetings / coding turns / off-topic
+/// asks don't pull noise. Provenance (`sess-*`) and audit (`dream-*`) pages are
+/// skipped; only canonical topic pages are surfaced.
+#[cfg(feature = "kms_search_index")]
+pub fn build_kms_context_reminder(query: &str) -> Option<String> {
+    // Below the BM25 score floor we treat a hit as coincidental, not a real
+    // topic match (e.g. a one-word overlap). Tuned against observed scores:
+    // a direct topic match lands ~10-20, the audit page ~1-2.
+    const SCORE_FLOOR: f32 = 4.0;
+    const MAX_PAGES: usize = 3;
+
+    let q = sanitize_kms_query(query);
+    if q.chars().count() < 4 {
+        return None;
+    }
+    let active = crate::config::AppConfig::load().ok()?.kms_active;
+    if active.is_empty() {
+        return None;
+    }
+
+    // (score, kms_name, page, label) for canonical topic pages above the floor.
+    let mut hits: Vec<(f32, String, String, String)> = Vec::new();
+    for name in &active {
+        let Some(kref) = crate::kms::resolve(name) else {
+            continue;
+        };
+        let Ok(idx) = crate::kms_search_index::get_or_open(&kref.root) else {
+            continue;
+        };
+        let Ok(found) = idx.search(&q, &[], None, 5) else {
+            continue;
+        };
+        for h in found {
+            if h.score < SCORE_FLOOR {
+                continue;
+            }
+            // Skip provenance/audit pages — only canonical topic pages are
+            // the answer surface (digests are thin stubs, dream-* is audit).
+            if h.page.starts_with("sess-") || h.page.starts_with("dream-") {
+                continue;
+            }
+            // Prefer the page's one-line `topic:` as the pointer label, then
+            // its title, then the page stem.
+            let label = h
+                .topic
+                .clone()
+                .or_else(|| h.title.clone())
+                .unwrap_or_else(|| h.page.clone());
+            hits.push((h.score, name.clone(), h.page, label));
+        }
+    }
+    if hits.is_empty() {
+        return None;
+    }
+    hits.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    hits.truncate(MAX_PAGES);
+
+    let mut list = String::new();
+    for (_score, name, page, label) in &hits {
+        list.push_str(&format!("- `KMS: {name}/{page}` — {label}\n"));
+    }
+    Some(format!(
+        "## Relevant KMS pages (auto-matched to this message)\n\n\
+         The user's knowledge base has the following page(s) matching the current \
+         message. **Before answering, `KmsRead` the most relevant one(s) and answer \
+         from them** — the user populated the KMS specifically so answers come from \
+         here, not from training data or a fresh web search. Cite the page you used \
+         (`KMS: <name>/<page>`). If none of them actually cover the question, ignore \
+         this block and answer normally.\n\n{list}"
+    ))
+}
+
+/// No-op when the BM25 search index feature is off — auto-retrieval needs
+/// ranked scores to gate on, which only the indexed path provides.
+#[cfg(not(feature = "kms_search_index"))]
+pub fn build_kms_context_reminder(_query: &str) -> Option<String> {
+    None
+}
+
 /// Collect (position, title, output) tuples for completed steps that
 /// have a populated `output` field, for steps prior to `current_step_id`.
 /// Used by both the per-step continuation prompt and the system
@@ -972,12 +1085,26 @@ impl Agent {
         // state every turn (plan mode active? plan submitted but not
         // approved? existing todos.md from a prior session?). Cheap —
         // just a string concat per turn.
+        // Query for deterministic KMS pre-retrieval: the user's text for
+        // this turn. Computed before `user_content` is moved into history.
+        let kms_query: String = user_content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
         let system = {
             let base = self.system.clone();
             let mode = crate::permissions::current_mode();
             let active_plan = crate::tools::plan_state::get();
             let plan_reminder = build_plan_reminder(mode, active_plan.as_ref());
             let todos_reminder = build_todos_reminder();
+            // Deterministic pre-retrieval: pull relevant KMS pages for this
+            // message so the model answers from stored knowledge without
+            // having to decide to call KmsSearch first.
+            let kms_reminder = build_kms_context_reminder(&kms_query);
             // Chain reminders. Plan reminder dominates when active —
             // it has the strongest per-turn discipline and would be
             // redundant with todos guidance. Otherwise surface todos
@@ -986,6 +1113,14 @@ impl Agent {
                 (Some(p), Some(t)) => Some(format!("{p}\n\n{t}")),
                 (Some(p), None) => Some(p),
                 (None, Some(t)) => Some(t),
+                (None, None) => None,
+            };
+            // Retrieved KMS context is independent of plan/todos — always
+            // append it when present.
+            let chained = match (chained, kms_reminder) {
+                (Some(c), Some(k)) => Some(format!("{c}\n\n{k}")),
+                (Some(c), None) => Some(c),
+                (None, Some(k)) => Some(k),
                 (None, None) => None,
             };
             match chained {
@@ -1094,6 +1229,15 @@ impl Agent {
                     // have response messages"). Strip just before
                     // the request leaves the engine.
                     crate::compaction::sanitize_tool_pairs(&mut compacted);
+                    // Bound the base64 image payload to the gateway body cap.
+                    // compact() trims by *tokens*, which doesn't track base64
+                    // byte size — N freshly-read images (e.g. "read all 7
+                    // namecards") can sit within the token budget yet blow the
+                    // 5 MB body cap on the one request that must carry them.
+                    // Shrinks images (then evicts oldest as a last resort) on
+                    // this outgoing copy only; stored history is untouched and
+                    // gets redacted post-send.
+                    fit_outgoing_image_payload(&mut compacted);
                     compacted
                 };
                 let tool_defs = tools.tool_defs();
@@ -1112,9 +1256,10 @@ impl Agent {
                 // run_turn carries through every retry/iteration of
                 // the same turn. Cleared in the end-of-run_turn cleanup
                 // (alongside `model_override`).
-                let chunk_timeout_override = *next_turn_chunk_timeout
+                let chunk_timeout_override = next_turn_chunk_timeout
                     .lock()
-                    .expect("next_turn_chunk_timeout lock");
+                    .expect("next_turn_chunk_timeout lock")
+                    .clone();
                 // Cap the requested max_tokens against the model's
                 // documented `max_output` so we don't hit per-model 400s
                 // (e.g. gpt-4o = 16384, gpt-4-turbo = 4096). Pre-fix the
@@ -1369,7 +1514,120 @@ impl Agent {
 
                 // Execute each tool (after approval, if required) and collect results.
                 let mut result_blocks: Vec<ContentBlock> = Vec::new();
+                // ── Concurrent fast-path (dev-plan/46) ──────────────────
+                // When a turn emits ≥2 tool calls that are ALL parallelizable
+                // (read-only / Task subagents — no approval, no mutation), run
+                // them in one concurrent batch instead of awaiting each in
+                // turn: wall-clock collapses from sum-of-N to max-of-N. This
+                // is behaviourally identical to the sequential loop below for
+                // these tools (they clear every guard anyway). Any other mix
+                // (mutating tools, approvals, parse errors) leaves the flag
+                // false and falls through to the sequential loop unchanged.
+                let mut handled_concurrently = false;
+                {
+                    let exec: Vec<(String, String, Value)> = turn_tool_uses
+                        .iter()
+                        .filter_map(|tu| match tu {
+                            ContentBlock::ToolUse { id, name, input, .. } => {
+                                Some((id.clone(), name.clone(), input.clone()))
+                            }
+                            _ => None,
+                        })
+                        .filter(|(id, _, _)| !turn_parse_errors.iter().any(|(eid, _)| eid == id))
+                        .collect();
+                    let all_parallelizable = exec.len() >= 2
+                        && exec.iter().all(|(_, name, _)| {
+                            tools.get(name).map(|t| t.parallelizable()).unwrap_or(false)
+                        });
+                    if all_parallelizable {
+                        let futs = exec.into_iter().map(|(id, name, input)| {
+                            let tool = tools.get(&name).expect("parallelizable ⇒ tool exists");
+                            let hooks = hooks.clone();
+                            async move {
+                                let hook_denied: Option<String> = if let Some(h) = &hooks {
+                                    let input_str = serde_json::to_string(&input)
+                                        .unwrap_or_else(|_| "<unserializable>".to_string());
+                                    match crate::hooks::fire_pre_tool_use_gate(h, &name, &input_str)
+                                        .await
+                                    {
+                                        crate::hooks::PreToolDecision::Deny(r) => Some(r),
+                                        crate::hooks::PreToolDecision::Allow => None,
+                                    }
+                                } else {
+                                    None
+                                };
+                                let tool_result = match hook_denied {
+                                    Some(reason) => Err(crate::error::Error::Tool(format!(
+                                        "blocked by policy: {reason}"
+                                    ))),
+                                    None => tool.call_multimodal(input).await,
+                                };
+                                let ui_resource = if tool_result.is_ok() {
+                                    tool.fetch_ui_resource().await
+                                } else {
+                                    None
+                                };
+                                (id, name, tool_result, ui_resource)
+                            }
+                        });
+                        // join_all preserves input order → result_blocks +
+                        // events stay in the model's tool_use order.
+                        let results = futures::future::join_all(futs).await;
+                        for (id, name, tool_result, ui_resource) in results {
+                            let (content, is_error) = match &tool_result {
+                                Ok(c) => {
+                                    let truncated = match c {
+                                        crate::types::ToolResultContent::Text(s) => {
+                                            crate::types::ToolResultContent::Text(
+                                                maybe_truncate_to_disk(s),
+                                            )
+                                        }
+                                        crate::types::ToolResultContent::Blocks(_) => c.clone(),
+                                    };
+                                    (truncated, false)
+                                }
+                                Err(e) => (
+                                    crate::types::ToolResultContent::Text(format!("error: {e}")),
+                                    true,
+                                ),
+                            };
+                            let content = if content.is_empty() {
+                                crate::types::ToolResultContent::Text("(no output)".to_string())
+                            } else {
+                                content
+                            };
+                            if let Some(h) = &hooks {
+                                let preview = match &content {
+                                    crate::types::ToolResultContent::Text(s) => s.clone(),
+                                    crate::types::ToolResultContent::Blocks(_) => {
+                                        "<multimodal>".to_string()
+                                    }
+                                };
+                                crate::hooks::fire_post_tool_use(h, &name, &preview, is_error);
+                            }
+                            result_blocks.push(ContentBlock::ToolResult {
+                                tool_use_id: id.clone(),
+                                content: content.clone(),
+                                is_error,
+                            });
+                            yield AgentEvent::ToolCallResult {
+                                id,
+                                name,
+                                output: match tool_result {
+                                    Ok(c) => Ok(c.to_text()),
+                                    Err(e) => Err(format!("{e}")),
+                                },
+                                ui_resource,
+                            };
+                        }
+                        handled_concurrently = true;
+                    }
+                }
+
                 for tu in &turn_tool_uses {
+                    if handled_concurrently {
+                        break;
+                    }
                     let ContentBlock::ToolUse { id, name, input, .. } = tu else { continue };
 
                     // L4 (M6.17): if this tool's JSON input failed to
@@ -1568,7 +1826,7 @@ impl Agent {
                             // tool-level rejections); only the explicit
                             // approver Deny lands here.
                             if let Some(h) = &hooks {
-                                crate::hooks::fire_permission_denied(h, name);
+                                crate::hooks::fire_permission_denied(h, &name);
                             }
                             let denied = format!("denied by user: {name}");
                             result_blocks.push(ContentBlock::ToolResult {
@@ -1585,21 +1843,33 @@ impl Agent {
                     }
 
                     // M6.35 HOOK1: pre_tool_use fires after the approval
-                    // gate but before the tool runs. Fire-and-forget so
-                    // the hook doesn't block dispatch — pre/post strict
-                    // ordering is documented as best-effort, not a
-                    // guarantee, in the user manual.
-                    if let Some(h) = &hooks {
+                    // gate but before the tool runs, as a synchronous GATE —
+                    // a hook that exits 2 denies the call (the tool never
+                    // runs; the model sees the hook's reason). Any other
+                    // outcome allows it (fail-open), so a plain audit hook
+                    // (exit 0) behaves exactly as the old fire-and-forget.
+                    let hook_denied: Option<String> = if let Some(h) = &hooks {
                         let input_str = serde_json::to_string(input)
                             .unwrap_or_else(|_| "<unserializable>".to_string());
-                        crate::hooks::fire_pre_tool_use(h, name, &input_str);
-                    }
+                        match crate::hooks::fire_pre_tool_use_gate(h, &name, &input_str).await {
+                            crate::hooks::PreToolDecision::Deny(reason) => Some(reason),
+                            crate::hooks::PreToolDecision::Allow => None,
+                        }
+                    } else {
+                        None
+                    };
 
                     // ToolCallStart was yielded at parse time (see the
                     // assembled-event loop above) so the UI shows the
                     // tool queued before the approval modal pops. The
-                    // dispatch site here just runs the call.
-                    let tool_result = tool.call_multimodal(input.clone()).await;
+                    // dispatch site here just runs the call (unless the
+                    // pre_tool_use gate denied it).
+                    let tool_result = match hook_denied {
+                        Some(reason) => {
+                            Err(crate::error::Error::Tool(format!("blocked by policy: {reason}")))
+                        }
+                        None => tool.call_multimodal(input.clone()).await,
+                    };
 
                     let (content, is_error) = match &tool_result {
                         Ok(c) => {
@@ -1642,7 +1912,7 @@ impl Agent {
                             crate::types::ToolResultContent::Text(s) => s.clone(),
                             crate::types::ToolResultContent::Blocks(_) => "<multimodal>".to_string(),
                         };
-                        crate::hooks::fire_post_tool_use(h, name, &preview, is_error);
+                        crate::hooks::fire_post_tool_use(h, &name, &preview, is_error);
                     }
                     result_blocks.push(ContentBlock::ToolResult {
                         tool_use_id: id.clone(),
@@ -1656,7 +1926,7 @@ impl Agent {
                     // errored tool call doesn't produce a widget. The
                     // fetch is best-effort — if it fails the user
                     // still sees the text result.
-                    let ui_resource = if tool_result.is_ok() {
+                    let ui_resource = if matches!(tool_result, Ok(_)) {
                         tool.fetch_ui_resource().await
                     } else {
                         None
@@ -1736,6 +2006,172 @@ impl Agent {
 /// is the dominant cause of premature compaction when an agent reads
 /// even one large screenshot. Idempotent — already-redacted entries
 /// are no-ops.
+/// Gateway/body cap is 5 MB. Keep the base64 image payload of an outgoing
+/// request under this so the full assembled body (system prompt + tool defs +
+/// text + JSON framing + images) stays within the cap. Conservative — leaves
+/// headroom for the non-image parts (a large CLAUDE.md/skills/memory cascade
+/// can be hundreds of KB).
+const OUTGOING_IMAGE_BUDGET_BYTES: usize = 3_500_000;
+
+/// Long edge to shrink images toward when the payload is over budget. Tighter
+/// than the per-read 1568 target because one turn can carry many images that
+/// share the budget (e.g. "read all 7 namecards" → 7 image blocks in one
+/// request). 1280px keeps small text legible for OCR while fitting several
+/// images comfortably.
+const FIT_LONG_EDGE: u32 = 1280;
+
+/// Sum of base64 image bytes across all messages — tool-result images (Read)
+/// plus pasted-attachment image blocks.
+fn outgoing_image_b64_bytes(messages: &[Message]) -> usize {
+    use crate::types::{ContentBlock, ImageSource, ToolResultBlock, ToolResultContent};
+    let mut n = 0usize;
+    for m in messages {
+        for b in &m.content {
+            match b {
+                ContentBlock::Image {
+                    source: ImageSource::Base64 { data, .. },
+                } => n += data.len(),
+                ContentBlock::ToolResult {
+                    content: ToolResultContent::Blocks(bs),
+                    ..
+                } => {
+                    for tb in bs {
+                        if let ToolResultBlock::Image {
+                            source: ImageSource::Base64 { data, .. },
+                        } = tb
+                        {
+                            n += data.len();
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    n
+}
+
+/// Re-encode a base64 image smaller: resize to ≤ `FIT_LONG_EDGE` long edge and
+/// JPEG-compress (q80). Returns `None` on decode/encode failure so the caller
+/// keeps the original. JPEG drops alpha — irrelevant for vision.
+fn shrink_b64_image(data: &str) -> Option<String> {
+    use base64::Engine;
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .ok()?;
+    let img = image::load_from_memory(&raw).ok()?;
+    let img = if img.width().max(img.height()) > FIT_LONG_EDGE {
+        img.resize(
+            FIT_LONG_EDGE,
+            FIT_LONG_EDGE,
+            image::imageops::FilterType::Lanczos3,
+        )
+    } else {
+        img
+    };
+    let rgb = image::DynamicImage::ImageRgb8(img.to_rgb8());
+    let mut out = Vec::new();
+    rgb.write_to(
+        &mut std::io::Cursor::new(&mut out),
+        image::ImageOutputFormat::Jpeg(80),
+    )
+    .ok()?;
+    Some(base64::engine::general_purpose::STANDARD.encode(&out))
+}
+
+/// Replace every base64 image in one message with a text placeholder.
+fn drop_images_in_message(msg: &mut Message) {
+    use crate::types::{ContentBlock, ImageSource, ToolResultBlock, ToolResultContent};
+    for b in msg.content.iter_mut() {
+        match b {
+            ContentBlock::Image {
+                source: ImageSource::Base64 { media_type, .. },
+            } => {
+                let mt = media_type.clone();
+                *b = ContentBlock::Text {
+                    text: format!("[{mt} dropped to fit the request size cap]"),
+                };
+            }
+            ContentBlock::ToolResult {
+                content: ToolResultContent::Blocks(bs),
+                ..
+            } => {
+                let new: Vec<ToolResultBlock> = bs
+                    .drain(..)
+                    .map(|tb| match tb {
+                        ToolResultBlock::Image {
+                            source: ImageSource::Base64 { media_type, .. },
+                        } => ToolResultBlock::Text {
+                            text: format!("[{media_type} dropped to fit the request size cap]"),
+                        },
+                        other => other,
+                    })
+                    .collect();
+                *bs = new;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Bound the base64 image payload of an outgoing request. Two passes: (1)
+/// shrink every image toward `FIT_LONG_EDGE` / JPEG; (2) if still over budget
+/// (pathologically many images), evict the oldest image blocks — keeping the
+/// most recent ones the model is actively working with.
+fn fit_image_payload_to(messages: &mut Vec<Message>, budget: usize) {
+    use crate::types::{ContentBlock, ImageSource, ToolResultBlock, ToolResultContent};
+    if outgoing_image_b64_bytes(messages) <= budget {
+        return;
+    }
+
+    // Pass 1: shrink every image in place.
+    for m in messages.iter_mut() {
+        for b in m.content.iter_mut() {
+            match b {
+                ContentBlock::Image {
+                    source: ImageSource::Base64 { media_type, data },
+                } => {
+                    if let Some(small) = shrink_b64_image(data) {
+                        *data = small;
+                        *media_type = "image/jpeg".to_string();
+                    }
+                }
+                ContentBlock::ToolResult {
+                    content: ToolResultContent::Blocks(bs),
+                    ..
+                } => {
+                    for tb in bs.iter_mut() {
+                        if let ToolResultBlock::Image {
+                            source: ImageSource::Base64 { media_type, data },
+                        } = tb
+                        {
+                            if let Some(small) = shrink_b64_image(data) {
+                                *data = small;
+                                *media_type = "image/jpeg".to_string();
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Pass 2: still over budget — evict oldest images until it fits.
+    for i in 0..messages.len() {
+        if outgoing_image_b64_bytes(messages) <= budget {
+            break;
+        }
+        drop_images_in_message(&mut messages[i]);
+    }
+}
+
+/// Bound the outgoing image payload to the gateway body cap. See
+/// [`fit_image_payload_to`].
+fn fit_outgoing_image_payload(messages: &mut Vec<Message>) {
+    fit_image_payload_to(messages, OUTGOING_IMAGE_BUDGET_BYTES);
+}
+
 fn redact_consumed_images_from_history(history: &mut Vec<Message>) {
     use crate::types::{ContentBlock, ImageSource, Role, ToolResultBlock, ToolResultContent};
     for msg in history.iter_mut() {
@@ -1893,6 +2329,24 @@ mod tests {
     use std::collections::VecDeque;
     use tempfile::tempdir;
 
+    #[cfg(feature = "kms_search_index")]
+    #[test]
+    fn sanitize_kms_query_strips_metachars_and_caps() {
+        // tantivy query metacharacters must not survive into the query.
+        let q = sanitize_kms_query("what is foo:bar? (test) +x -y *z");
+        assert!(!q.contains(':'));
+        assert!(!q.contains('?'));
+        assert!(!q.contains('('));
+        assert!(!q.contains('+'));
+        assert!(!q.contains('*'));
+        // whitespace collapsed to single spaces, content preserved
+        assert!(q.contains("foo bar"));
+        assert!(q.contains("test"));
+        // length cap
+        let long = "ก".repeat(500);
+        assert!(sanitize_kms_query(&long).chars().count() <= 200);
+    }
+
     // ── Image redaction ────────────────────────────────────────────────
 
     /// Single Read of an image lands a base64 blob inside a ToolResult's
@@ -1994,6 +2448,127 @@ mod tests {
         let mut history = original.clone();
         redact_consumed_images_from_history(&mut history);
         assert_eq!(history, original);
+    }
+
+    // ── Outgoing image payload budget ──────────────────────────────────
+
+    fn b64_png(w: u32, h: u32) -> String {
+        use base64::Engine;
+        let buf = image::RgbImage::from_fn(w, h, |x, y| {
+            image::Rgb([
+                (x ^ y) as u8,
+                x.wrapping_mul(7) as u8,
+                y.wrapping_mul(13) as u8,
+            ])
+        });
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgb8(buf)
+            .write_to(
+                &mut std::io::Cursor::new(&mut out),
+                image::ImageOutputFormat::Png,
+            )
+            .unwrap();
+        base64::engine::general_purpose::STANDARD.encode(&out)
+    }
+
+    fn img_msg(data: String) -> Message {
+        use crate::types::{ContentBlock, ImageSource, Role, ToolResultBlock, ToolResultContent};
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "id".into(),
+                content: ToolResultContent::Blocks(vec![ToolResultBlock::Image {
+                    source: ImageSource::Base64 {
+                        media_type: "image/png".into(),
+                        data,
+                    },
+                }]),
+                is_error: false,
+            }],
+        }
+    }
+
+    #[test]
+    fn shrink_b64_image_resizes_and_shrinks() {
+        use base64::Engine;
+        let big = b64_png(2000, 1000);
+        let small = shrink_b64_image(&big).expect("shrink ok");
+        assert!(small.len() < big.len(), "expected a smaller payload");
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(&small)
+            .unwrap();
+        let (w, h) = image::io::Reader::new(std::io::Cursor::new(&raw))
+            .with_guessed_format()
+            .unwrap()
+            .into_dimensions()
+            .unwrap();
+        assert_eq!(
+            (w, h),
+            (1280, 640),
+            "fit to FIT_LONG_EDGE, aspect preserved"
+        );
+    }
+
+    #[test]
+    fn fit_payload_noop_when_under_budget() {
+        let original = vec![img_msg(b64_png(64, 64))];
+        let mut msgs = original.clone();
+        fit_image_payload_to(&mut msgs, OUTGOING_IMAGE_BUDGET_BYTES);
+        assert_eq!(msgs, original, "under budget → untouched");
+    }
+
+    #[test]
+    fn fit_payload_shrinks_to_fit_keeping_image() {
+        use crate::types::{ContentBlock, ToolResultBlock, ToolResultContent};
+        let big = b64_png(2000, 1000);
+        let small = shrink_b64_image(&big).unwrap();
+        assert!(small.len() < big.len());
+        // Budget strictly between the shrunk and original size: pass 1 (shrink)
+        // must run and succeed; pass 2 (evict) must NOT fire.
+        let budget = small.len() + (big.len() - small.len()) / 2;
+        let mut msgs = vec![img_msg(big)];
+        fit_image_payload_to(&mut msgs, budget);
+        assert!(
+            outgoing_image_b64_bytes(&msgs) <= budget,
+            "should fit budget"
+        );
+        let ContentBlock::ToolResult {
+            content: ToolResultContent::Blocks(bs),
+            ..
+        } = &msgs[0].content[0]
+        else {
+            panic!("expected tool-result blocks");
+        };
+        assert!(
+            matches!(bs[0], ToolResultBlock::Image { .. }),
+            "image kept (not evicted)"
+        );
+    }
+
+    #[test]
+    fn fit_payload_evicts_when_shrink_insufficient() {
+        use crate::types::{ContentBlock, ToolResultBlock, ToolResultContent};
+        // Budget 0 → even after shrinking nothing fits → all images evicted.
+        let mut msgs = vec![
+            img_msg(b64_png(800, 600)),
+            img_msg(b64_png(800, 600)),
+            img_msg(b64_png(800, 600)),
+        ];
+        fit_image_payload_to(&mut msgs, 0);
+        assert_eq!(outgoing_image_b64_bytes(&msgs), 0, "no image bytes remain");
+        for m in &msgs {
+            let ContentBlock::ToolResult {
+                content: ToolResultContent::Blocks(bs),
+                ..
+            } = &m.content[0]
+            else {
+                panic!("expected tool-result blocks");
+            };
+            assert!(
+                matches!(bs[0], ToolResultBlock::Text { .. }),
+                "evicted to a text placeholder"
+            );
+        }
     }
 
     // ── Builder semantics ──────────────────────────────────────────────
@@ -2758,6 +3333,104 @@ mod tests {
                 usage: None,
             },
         ]
+    }
+
+    /// Two tool_use blocks in a single assistant message.
+    fn two_tool_script(n1: &str, id1: &str, n2: &str, id2: &str) -> Vec<ProviderEvent> {
+        vec![
+            ProviderEvent::MessageStart {
+                model: "test".into(),
+            },
+            ProviderEvent::ToolUseStart {
+                id: id1.into(),
+                name: n1.into(),
+                thought_signature: None,
+            },
+            ProviderEvent::ToolUseDelta {
+                partial_json: "{}".into(),
+            },
+            ProviderEvent::ContentBlockStop,
+            ProviderEvent::ToolUseStart {
+                id: id2.into(),
+                name: n2.into(),
+                thought_signature: None,
+            },
+            ProviderEvent::ToolUseDelta {
+                partial_json: "{}".into(),
+            },
+            ProviderEvent::ContentBlockStop,
+            ProviderEvent::MessageStop {
+                stop_reason: Some("tool_use".into()),
+                usage: None,
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn parallelizable_tools_run_concurrently() {
+        use crate::tools::Tool;
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        struct SleepyTool;
+        #[async_trait::async_trait]
+        impl Tool for SleepyTool {
+            fn name(&self) -> &'static str {
+                "Sleep"
+            }
+            fn description(&self) -> &'static str {
+                "sleeps"
+            }
+            fn input_schema(&self) -> Value {
+                serde_json::json!({"type": "object"})
+            }
+            fn parallelizable(&self) -> bool {
+                true
+            }
+            async fn call(&self, _input: Value) -> Result<String> {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                Ok("slept".into())
+            }
+        }
+
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(SleepyTool));
+        let provider = ScriptedProvider::new(vec![
+            two_tool_script("Sleep", "t1", "Sleep", "t2"),
+            text_script(&["done"]),
+        ]);
+        let agent = Agent::new(provider, reg, "test", "");
+
+        let start = Instant::now();
+        let outcome = collect_agent_turn(agent.run_turn("go".into()))
+            .await
+            .unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(outcome.text, "done");
+        assert_eq!(
+            outcome.tool_calls,
+            vec!["Sleep".to_string(), "Sleep".to_string()]
+        );
+        // Two 200ms sleeps: concurrent ≈200ms, sequential ≈400ms. The bound
+        // sits well below the sequential floor and above concurrent+overhead.
+        assert!(
+            elapsed < Duration::from_millis(330),
+            "took {elapsed:?} — looks sequential, not concurrent"
+        );
+
+        // Results land in tool_use order regardless of completion order.
+        let history = agent.history_snapshot();
+        let trmsg = &history[2];
+        let ids: Vec<String> = trmsg
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec!["t1".to_string(), "t2".to_string()]);
     }
 
     #[tokio::test]

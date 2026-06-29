@@ -249,19 +249,11 @@ pub fn build_full_system_prompt(
         system.push_str(&team_section);
     }
 
-    // (8b) GUI Shells authoring guide — surface only for the desktop
-    // GUI worker (chat + terminal tabs share one worker; both
-    // benefit from being able to help the user build a shell).
-    // Skipped for CLI / headless / agent_runtime — those callers
-    // can't install or open a shell anyway, so the bytes would
-    // just inflate every turn's prompt for no benefit.
-    if surface == SurfaceHints::Gui {
-        let shells_section = gui_shells_authoring_section();
-        if !shells_section.is_empty() {
-            system.push_str("\n\n");
-            system.push_str(&shells_section);
-        }
-    }
+    // (8b) GUI Shells authoring guide is no longer inlined here — it
+    // moved into the bundled `gui-shell` skill (dev-plan/43). The skill's
+    // ~200-char catalog entry is the trigger; invoking it loads the full
+    // guide AND opens the `gui-shell` tool gate (GuiShellCreate etc.), so
+    // the ~3KB manual no longer rides every GUI turn's system prompt.
 
     // (7) Skill catalog + (8) Repl-only priming
     if let Some(store) = skill_store {
@@ -406,124 +398,23 @@ pub(crate) fn services_prompt_section(browser_active: bool) -> String {
 /// see Team tool names it can't actually call when the feature is off.
 /// The fuller team playbook below this section (rendered by
 /// `team_grounding_prompt` when teams are on) stays unchanged.
-/// GUI Shells authoring guide — surfaced only on the desktop GUI
-/// worker (Chat / Terminal tabs) so the model can help the user
-/// scaffold a custom HTML frontend without flipping between docs.
-///
-/// Why baked into the system prompt rather than a Skill: users
-/// asking "build me a UI for X" don't know the trigger word
-/// "GUI Shell" exists; the model needs the knowledge resident to
-/// recognise the intent. Skills get listed at the bottom and
-/// require the user to opt in by name.
-///
-/// Kept tight (~1.5 KB) — covers folder layout, manifest shape,
-/// bridge surface, install + iterate flow, and pointers to the
-/// bundled reference shells. Full reference lives in user-manual
-/// chapter 26; this section is the model's working memory, not a
-/// replacement for the docs.
-pub(crate) fn gui_shells_authoring_section() -> String {
-    String::from(
-        "# GUI Shells (authoring)\n\n\
-         You're running inside the thClaws desktop GUI (Chat / \
-         Terminal tab). Beyond those tabs the user can open a \
-         **GUI Shell** — a custom HTML frontend that talks to you \
-         via a `window.thclaws.*` bridge. When the user asks to \
-         \"build a UI for …\", \"make a custom view that …\", or \
-         \"scaffold an image-gallery / dashboard / form on top of \
-         thClaws\", they almost certainly mean a GUI Shell. Help \
-         them create one rather than describing it abstractly.\n\n\
-         ## Folder layout\n\n\
-         A shell is a folder dropped at:\n\
-         - `~/.config/thclaws/gui-shell/<id>/`  — user-scoped (all projects)\n\
-         - `./.thclaws/gui-shell/<id>/`         — project-scoped (this repo only)\n\n\
-         Project shell wins on id clash. Required files: \
-         `manifest.json` + `index.html`. Recommended: `icon.svg`, \
-         `style.css`, `main.js`, `AGENTS.md` (shell-specific system \
-         prompt addendum applied when this shell runs).\n\n\
-         ## Manifest\n\n\
-         ```json\n\
-         {\n  \
-           \"id\": \"kebab-case-id\",\n  \
-           \"name\": \"Display Name\",\n  \
-           \"version\": \"0.1.0\",\n  \
-           \"description\": \"one-line summary\",\n  \
-           \"entry\": \"index.html\",\n  \
-           \"icon\": \"icon.svg\",\n  \
-           \"minBridgeVersion\": \"1\",\n  \
-           \"permissions\": [\"agent.run\"]\n\
-         }\n\
-         ```\n\n\
-         Permissions (declared here, enforced at call time): \
-         `agent.run` (run the agent loop), \
-         `tools.invoke:<tool-name>` (per-tool direct invocation), \
-         `session.read` / `session.list` (read sidecar session \
-         data), `fs.shell-scoped` (read/write inside the shell \
-         folder), `network.outbound:<host>` (fetch() to that host \
-         — CSP injected). Anything not declared throws.\n\n\
-         ## Bridge — `window.thclaws.*`\n\n\
-         ```js\n\
-         // identity\n\
-         thclaws.shell.id; thclaws.shell.sessionId; thclaws.transport;  // 'tauri' | 'ws'\n\
-         \n\
-         // agent loop (same engine as Chat/Terminal)\n\
-         const { runId } = await thclaws.run(\"user message\");\n\
-         thclaws.cancel(runId);\n\
-         thclaws.on(\"text\" | \"tool_call\" | \"tool_result\" | \"done\" | \"error\", cb);\n\
-         \n\
-         // direct tool invocation — skips model, deterministic\n\
-         const out = await thclaws.tools.invoke(\"ToolName\", args);\n\
-         \n\
-         // per-shell, per-session persistence (file-backed JSON)\n\
-         await thclaws.storage.set(key, value);\n\
-         const v = await thclaws.storage.get(key);\n\
-         ```\n\n\
-         The bridge is the ONLY API the shell has. Iframe sandbox \
-         blocks direct workspace fs access, cross-shell storage \
-         leaks, and arbitrary network egress.\n\n\
-         ## Install + iterate\n\n\
-         1. Create the folder + write `manifest.json` + `index.html`.\n\
-         2. GUI → \"+ New Tab\" → \"GUI Shell\" → click **Refresh shells** \
-         → the new tile appears alongside the built-ins.\n\
-         3. Click the tile to open. No thClaws restart; bridge is \
-         injected at iframe load.\n\
-         4. To iterate after edits: close + reopen the shell tab \
-         (no hot-reload in v1).\n\n\
-         Set a project default in `.thclaws/settings.json`:\n\
-         `{ \"guiShell\": \"<id>\" }` — \"+ New Tab\" then opens this \
-         shell directly instead of the picker.\n\n\
-         ## Reference shells (read before authoring)\n\n\
-         Source-bundled at `<thclaws-source>/crates/core/assets/gui-shells/`:\n\
-         - `chatbot/` — minimal `thclaws.run()` + `thclaws.storage` demo, ~120 LOC frontend\n\
-         - `session-explorer/` — tree-of-sessions browser with on-demand summaries\n\n\
-         Full reference: user-manual chapter 26 \
-         (`user-manual/ch26-gui-shells.md` / `ch26-gui-shells.html` \
-         in the docs site).\n",
-    )
-}
-
 pub(crate) fn collaboration_primitives_section(team_enabled: bool) -> String {
-    let teams_line = if team_enabled {
-        "**Agent Teams** — `TeamCreate` + `SpawnTeammate` start \
-         persistent parallel teammates with optional worktree \
-         isolation; `TeamTaskCreate` / `Claim` / `Complete` for the \
-         shared task queue; `SendMessage` / `CheckInbox` for async \
-         coordination. See the detailed playbook below."
-    } else {
-        "**Agent Teams** — disabled in this workspace \
-         (`teamEnabled: false`). The Team* tools are NOT registered; \
-         do not try to call them. For multi-step parallel work, \
-         reach for Subagent or WorkflowRun above."
-    };
-    format!(
-        "# Collaboration primitives\n\n\
-         Three ways to decompose work — pick by shape, not size:\n\n\
-         1. **Subagent** — the `Task` tool launches one scoped child \
+    // Prompt hygiene: when Agent Teams are OFF, the section must not mention
+    // teams or the `teamEnabled` flag AT ALL — naming a disabled feature (and
+    // a config flag) only invites the model to reason about it and conflate
+    // it with the always-available Subagent (`Task`) tool. So we omit the
+    // Teams item entirely when off, rather than printing a "disabled" notice.
+    let subagent = "**Subagent** — the `Task` tool launches one scoped child \
          agent that returns a transcript when done. Always available. \
          Use for a single side-quest that would clutter history, a \
          read-only sweep, or a well-defined delegation. NOT for \
-         parallel fan-out (one call = one child).\n\n\
-         2. {teams_line}\n\n\
-         3. **WorkflowRun** — `WorkflowRun(prompt: \"…\")` authors a \
+         parallel fan-out (one call = one child).";
+    let teams = "**Agent Teams** — `TeamCreate` + `SpawnTeammate` start \
+         persistent parallel teammates with optional worktree \
+         isolation; `TeamTaskCreate` / `Claim` / `Complete` for the \
+         shared task queue; `SendMessage` / `CheckInbox` for async \
+         coordination. See the detailed playbook below.";
+    let workflow = "**WorkflowRun** — `WorkflowRun(prompt: \"…\")` authors a \
          JavaScript orchestration script and runs it in a Boa \
          sandbox. Use for deterministic fan-out across N items, \
          retry loops, multistep pipelines with budget control, or \
@@ -531,7 +422,25 @@ pub(crate) fn collaboration_primitives_section(team_enabled: bool) -> String {
          Requires user approval per invocation. Nested WorkflowRun \
          calls (from inside a running workflow) are rejected — \
          orchestrate via `thclaws.subagent(...)` / \
-         `thclaws.parallel(...)` inside the script instead.\n"
+         `thclaws.parallel(...)` inside the script instead.";
+
+    let mut items: Vec<&str> = vec![subagent];
+    if team_enabled {
+        items.push(teams);
+    }
+    items.push(workflow);
+
+    let count_word = if items.len() == 3 { "Three" } else { "Two" };
+    let numbered = items
+        .iter()
+        .enumerate()
+        .map(|(i, s)| format!("{}. {}", i + 1, s))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    format!(
+        "# Collaboration primitives\n\n\
+         {count_word} ways to decompose work — pick by shape, not size:\n\n\
+         {numbered}\n"
     )
 }
 
@@ -1025,30 +934,44 @@ mod tests {
         eprintln!("  diff /tmp/thclaws-prompt-gui.txt /tmp/thclaws-prompt-headless.txt");
     }
 
-    /// `collaboration_primitives_section` always includes Subagent +
-    /// WorkflowRun (both always-available) and a team line that
-    /// swaps based on `team_enabled`. The swap matters because the
-    /// model otherwise would see Team tool names it can't call.
+    /// `collaboration_primitives_section`: Subagent + WorkflowRun are always
+    /// listed; the Agent Teams item appears ONLY when `team_enabled`. When
+    /// off, the section must not mention teams or the `teamEnabled` flag at
+    /// all — naming a disabled feature lets the model conflate it with the
+    /// always-available Subagent (`Task`) tool (observed: a model decided
+    /// "no Task tool because teamEnabled: false", which is nonsense).
     #[test]
-    fn collaboration_section_lists_all_three_primitives() {
+    fn collaboration_section_lists_primitives_by_team_state() {
         let on = collaboration_primitives_section(true);
         assert!(on.starts_with("# Collaboration primitives"));
+        assert!(on.contains("Three ways"));
         assert!(on.contains("**Subagent**"));
         assert!(on.contains("`Task`"));
         assert!(on.contains("**Agent Teams**"));
         assert!(on.contains("`TeamCreate`"));
         assert!(on.contains("**WorkflowRun**"));
-        assert!(on.contains("`WorkflowRun(prompt"));
 
         let off = collaboration_primitives_section(false);
-        assert!(off.contains("disabled in this workspace"));
-        assert!(
-            !off.contains("`TeamCreate`"),
-            "team-off prompt must not name Team tools"
-        );
-        // Subagent + WorkflowRun appear regardless of team_enabled.
+        assert!(off.contains("Two ways"), "team-off → only 2 primitives");
         assert!(off.contains("**Subagent**"));
         assert!(off.contains("**WorkflowRun**"));
+        // The whole point: ZERO team / flag mentions when off.
+        assert!(
+            !off.contains("Agent Teams"),
+            "team-off must not mention Agent Teams"
+        );
+        assert!(
+            !off.contains("teamEnabled"),
+            "team-off must not mention the teamEnabled flag"
+        );
+        assert!(
+            !off.contains("`TeamCreate`"),
+            "team-off must not name Team tools"
+        );
+        assert!(
+            !off.to_lowercase().contains("team"),
+            "team-off must not say 'team' at all"
+        );
     }
 
     /// The unified builder slots the Collaboration section between
@@ -1078,34 +1001,23 @@ mod tests {
         }
     }
 
-    /// GUI Shells authoring guide is GUI-only — CLI / headless /
-    /// agent_runtime users can't install or open a shell, so the
-    /// section would just inflate every turn's prompt for no
-    /// benefit. Verifies the gate.
+    /// The GUI Shells authoring guide is no longer inlined in the system
+    /// prompt on ANY surface — it moved into the bundled `gui-shell`
+    /// skill (dev-plan/43), which loads the guide + opens the tool gate
+    /// only when invoked. Guards against the ~3KB block creeping back.
     #[test]
-    fn gui_shells_section_gated_to_gui_surface_only() {
+    fn gui_shells_authoring_prose_not_inlined_in_system_prompt() {
         let tmp = tempfile::tempdir().unwrap();
         let config = crate::config::AppConfig::default();
-
-        let gui = build_full_system_prompt(&config, tmp.path(), None, &[], SurfaceHints::Gui);
-        assert!(
-            gui.contains("# GUI Shells (authoring)"),
-            "GUI surface must include the GUI Shells authoring guide",
-        );
-        assert!(
-            gui.contains("window.thclaws"),
-            "GUI surface must name the bridge API",
-        );
-        assert!(
-            gui.contains("manifest.json"),
-            "GUI surface must mention the manifest",
-        );
-
-        for surface in [SurfaceHints::Repl, SurfaceHints::Headless] {
+        for surface in [
+            SurfaceHints::Gui,
+            SurfaceHints::Repl,
+            SurfaceHints::Headless,
+        ] {
             let p = build_full_system_prompt(&config, tmp.path(), None, &[], surface);
             assert!(
                 !p.contains("# GUI Shells (authoring)"),
-                "{surface:?}: GUI Shells section must NOT be included for non-GUI surfaces",
+                "{surface:?}: GUI Shells authoring prose must NOT be inlined — it's a skill now",
             );
         }
     }

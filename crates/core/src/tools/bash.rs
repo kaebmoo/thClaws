@@ -187,8 +187,28 @@ impl Tool for BashTool {
         }
 
         let effective_timeout = if is_server { 5000 } else { timeout_ms };
-        let server_output =
+        let mut server_output =
             run_shell_command(&command, &resolved_cwd, effective_timeout, is_server).await?;
+
+        // F30: concurrent team members sharing one git index collide on
+        // `.git/index.lock` ("fatal: Unable to create '.../.git/index.lock':
+        // File exists"). That's a transient race, not a real failure — retry
+        // a few times with a short backoff before surfacing it. Gated on the
+        // specific error signature so ordinary output isn't re-run, and
+        // skipped for server commands (which are expected to keep running).
+        if !is_server {
+            let mut tries: u32 = 0;
+            while tries < 3
+                && server_output.contains("index.lock")
+                && server_output.contains("File exists")
+            {
+                tries += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(250 * tries as u64)).await;
+                server_output =
+                    run_shell_command(&command, &resolved_cwd, effective_timeout, is_server)
+                        .await?;
+            }
+        }
 
         // Combine setup output with server output.
         if setup_output.is_empty() {
@@ -208,7 +228,40 @@ async fn run_shell_command(
     timeout_ms: u64,
     is_server: bool,
 ) -> Result<String> {
-    let mut cmd = crate::util::shell_command_async(command);
+    let out = run_shell_command_inner(command, cwd, timeout_ms, is_server, true).await?;
+    // If the OS confiner couldn't enforce, it bailed BEFORE running the
+    // command (exiting with a no-enforce sentinel, NOT the command's output).
+    // Re-run unconfined so the command actually executes — the workspace /
+    // container remains the security boundary in environments where the
+    // kernel confiner is unavailable (e.g. a hosted runner whose container
+    // kernel returns EINVAL from the Landlock syscalls). Without this, every
+    // Bash call (and `!` shell escape) fails with "landlock setup failed,
+    // exit 78" and no output.
+    if crate::confine::output_shows_no_enforce(&out) {
+        // Remember so later commands skip the doomed confined attempt.
+        crate::confine::mark_no_enforce();
+        return run_shell_command_inner(command, cwd, timeout_ms, is_server, false).await;
+    }
+    Ok(out)
+}
+
+async fn run_shell_command_inner(
+    command: &str,
+    cwd: &std::path::Path,
+    timeout_ms: u64,
+    is_server: bool,
+    confined: bool,
+) -> Result<String> {
+    // dev-plan/49: route through the OS confiner — returns a sandbox-exec /
+    // bwrap-wrapped `sh -c` when bash.sandbox is on and a confiner is
+    // available, else a plain `sh -c` (unchanged). One chokepoint, so
+    // subagent/workflow Bash is confined identically. `confined=false` is the
+    // unconfined re-run path when the confiner couldn't enforce.
+    let mut cmd = if confined {
+        crate::confine::shell_command_async(command)
+    } else {
+        crate::util::shell_command_async(command)
+    };
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -222,6 +275,7 @@ async fn run_shell_command(
     // is additive; user shells can still override per-command via
     // `VAR=value cmd` syntax.
     apply_noninteractive_env(&mut cmd);
+    scrub_sensitive_env(&mut cmd);
 
     let mut child = cmd
         .spawn()
@@ -304,7 +358,13 @@ async fn run_shell_command(
             let stdout = String::from_utf8_lossy(&stdout_bytes);
             let stderr = String::from_utf8_lossy(&stderr_bytes);
             let exit_code = status.code().unwrap_or(-1);
-            Ok(format_output(&stdout, &stderr, exit_code))
+            let out = format_output(&stdout, &stderr, exit_code);
+            // dev-plan/49: if the OS sandbox likely blocked a write, tell the
+            // model it's the sandbox (not a real perms error) + how to allow it.
+            Ok(match crate::confine::denied_hint(&out) {
+                Some(hint) => format!("{out}\n\n{hint}"),
+                None => out,
+            })
         }
     }
 }
@@ -1007,10 +1067,12 @@ fn classify_leaf_as_server(leaf: &str, sub: &str, third: &str) -> bool {
         // Python web frameworks
         "flask" => sub == "run",
         "django-admin" => sub == "runserver",
-        "python" | "python3" => matches!(
-            sub,
-            "app.py" | "main.py" | "server.py" | "run.py" | "wsgi.py" | "asgi.py"
-        ),
+        "python" | "python3" => {
+            matches!(
+                sub,
+                "app.py" | "main.py" | "server.py" | "run.py" | "wsgi.py" | "asgi.py"
+            ) || (sub == "manage.py" && third == "runserver") // Django dev server
+        }
         // After `python -m`, the leaf becomes the module name.
         "http.server" => true,
 
@@ -1025,12 +1087,25 @@ fn classify_leaf_as_server(leaf: &str, sub: &str, third: &str) -> bool {
         "go" => sub == "run",
 
         // Docker
-        "docker" => sub == "compose" && third == "up",
-        "docker-compose" => sub == "up",
+        "docker" => {
+            (sub == "compose" && third == "up")
+                || (sub == "logs" && matches!(third, "-f" | "--follow"))
+        }
+        "docker-compose" => sub == "up" || (sub == "logs" && matches!(third, "-f" | "--follow")),
 
         // Kubernetes
-        "kubectl" => sub == "port-forward",
+        "kubectl" => sub == "port-forward" || (sub == "logs" && matches!(third, "-f" | "--follow")),
         "cloudflared" => sub == "tunnel",
+
+        // Long-blocking utilities that never return on their own — these
+        // would otherwise foreground-hang for the full Bash timeout.
+        "tail" => matches!(sub, "-f" | "-F" | "--follow"),
+        "watch" => true,
+        "nc" | "ncat" | "netcat" => sub == "-l" || sub.starts_with("-l"),
+        "ssh" => {
+            matches!(sub, "-N" | "-L" | "-R" | "-D" | "-W")
+                || matches!(third, "-N" | "-L" | "-R" | "-D" | "-W")
+        }
 
         // `serve <dir>` — the `serve` npm package serves static files.
         // Only treat as server when there's a path argument.
@@ -1120,6 +1195,49 @@ fn looks_like_tty_required(stdout: &str, stderr: &str) -> bool {
 /// Most modern CLIs honour at least one of these to skip prompts and
 /// auto-accept defaults. M6.8 B1 — workaround for the lack of a real
 /// PTY in the Bash sandbox.
+/// Keep platform credentials out of the shell's environment so a
+/// `printenv` / `cat /proc/self/environ` can't exfiltrate them. Platform
+/// internals (the gateway access key, the multiuser HMAC secret, the cloud
+/// token) are *always* removed — they're never useful to a user's command
+/// and absent on desktop anyway (no-op). Provider API keys are removed only
+/// in a multiuser/shared session, where the shell belongs to a guest who
+/// must not read the owner's billable credentials; on a single-user desktop
+/// the user's own keys stay available to their commands.
+fn scrub_sensitive_env(cmd: &mut tokio::process::Command) {
+    const ALWAYS: &[&str] = &[
+        "THCLAWS_CLOUD_HMAC_SECRET",
+        "THCLAWS_GATEWAY_API_KEY",
+        "THCLAWS_CLOUD_TOKEN",
+    ];
+    for k in ALWAYS {
+        cmd.env_remove(k);
+    }
+    if crate::workdir::is_multiuser() {
+        const SCOPED: &[&str] = &[
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "OPENROUTER_API_KEY",
+            "DASHSCOPE_API_KEY",
+            "QWENCLOUD_API_KEY",
+            "ZAI_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "MINIMAX_API_KEY",
+            "THAILLM_API_KEY",
+            "XAI_API_KEY",
+            "MOONSHOT_API_KEY",
+            "BRAVE_SEARCH_API_KEY",
+            "BRAVE_API_KEY",
+            "TAVILY_API_KEY",
+            "HAL_API_KEY",
+        ];
+        for k in SCOPED {
+            cmd.env_remove(k);
+        }
+    }
+}
+
 fn apply_noninteractive_env(cmd: &mut tokio::process::Command) {
     // CI=1 is the most-respected signal. npm, pnpm, yarn, vite, jest,
     // ESLint, Prettier, Cypress, etc. all use it.
@@ -1147,6 +1265,34 @@ fn apply_noninteractive_env(cmd: &mut tokio::process::Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrub_removes_platform_secrets_keeps_others() {
+        let mut cmd = crate::util::shell_command_async("true");
+        cmd.env("THCLAWS_GATEWAY_API_KEY", "spend-me")
+            .env("THCLAWS_CLOUD_HMAC_SECRET", "forge-me")
+            .env("KEEP_ME", "1");
+        scrub_sensitive_env(&mut cmd);
+        let std = cmd.as_std();
+        let removed = |key: &str| {
+            std.get_envs()
+                .any(|(k, v)| k == std::ffi::OsStr::new(key) && v.is_none())
+        };
+        assert!(
+            removed("THCLAWS_GATEWAY_API_KEY"),
+            "gateway key must be scrubbed"
+        );
+        assert!(
+            removed("THCLAWS_CLOUD_HMAC_SECRET"),
+            "hmac secret must be scrubbed"
+        );
+        assert!(
+            std.get_envs()
+                .any(|(k, v)| k == std::ffi::OsStr::new("KEEP_ME")
+                    && v == Some(std::ffi::OsStr::new("1"))),
+            "non-secret env must be preserved"
+        );
+    }
     use tempfile::tempdir;
 
     #[test]
