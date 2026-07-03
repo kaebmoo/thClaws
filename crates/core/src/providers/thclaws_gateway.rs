@@ -142,6 +142,34 @@ pub fn hides_unpriced_models(config: &AppConfig, provider_name: &str) -> bool {
         .iter()
         .any(|p| p.eq_ignore_ascii_case(segment))
         && resolve_access_key().is_some()
+        && !(!gateway_forced() && native_key_present_by_segment(segment))
+}
+
+/// Segment-name flavour of [`native_key_present`] for picker-side
+/// checks that carry a provider NAME instead of a kind.
+fn native_key_present_by_segment(segment: &str) -> bool {
+    let var = match segment {
+        "openai" => "OPENAI_API_KEY",
+        "anthropic" => "ANTHROPIC_API_KEY",
+        "google" => "GEMINI_API_KEY",
+        "openrouter" => "OPENROUTER_API_KEY",
+        "dashscope" => "DASHSCOPE_API_KEY",
+        "qwen-cloud" => "QWENCLOUD_API_KEY",
+        "zai" => "ZAI_API_KEY",
+        "deepseek" => "DEEPSEEK_API_KEY",
+        "minimax" => "MINIMAX_API_KEY",
+        "thaillm" => "THAILLM_API_KEY",
+        "xai" => "XAI_API_KEY",
+        "moonshot" => "MOONSHOT_API_KEY",
+        _ => return false,
+    };
+    match std::env::var(var) {
+        Ok(v) => {
+            let t = v.trim().trim_matches('"').trim_matches('\'');
+            !t.is_empty() && t != "gateway-placeholder"
+        }
+        Err(_) => false,
+    }
 }
 
 /// Compute the overlay for this provider kind. Returns `None` when
@@ -157,6 +185,16 @@ pub fn for_kind(config: &AppConfig, kind: ProviderKind) -> Option<GatewayOverlay
     {
         return None;
     }
+    // BYOK wins over the proxy: a user who supplies their own provider
+    // key pays that provider directly — the gateway must never meter
+    // (and mark up) a key the user owns. This mirrors the media path
+    // (`media/provider.rs::resolve_endpoint`, native-key-first).
+    // Exception: shared-agent and multiuser pods, where metering is the
+    // governance contract (dev-plan/41/42/45) and member BYOK would
+    // bypass the owner's billing caps.
+    if !gateway_forced() && native_key_present(kind) {
+        return None;
+    }
     let access_key = resolve_access_key()?;
     let segment = provider_segment(kind)?;
     let base_url = format!("{}/{}", resolve_base_url().trim_end_matches('/'), segment);
@@ -164,6 +202,28 @@ pub fn for_kind(config: &AppConfig, kind: ProviderKind) -> Option<GatewayOverlay
         base_url,
         access_key,
     })
+}
+
+/// Metering is non-negotiable in these environments — BYOK never
+/// bypasses it (dev-plan/41/42/45).
+fn gateway_forced() -> bool {
+    crate::workdir::is_multiuser() || crate::shared::is_active()
+}
+
+/// A real BYOK key for `kind`: non-empty and not the hosted pods'
+/// `gateway-placeholder` sentinel. Keychain keys are snapshotted into
+/// the process env at startup, so one env read covers every source.
+fn native_key_present(kind: ProviderKind) -> bool {
+    let Some(var) = kind.api_key_env() else {
+        return false;
+    };
+    match std::env::var(var) {
+        Ok(v) => {
+            let t = v.trim().trim_matches('"').trim_matches('\'');
+            !t.is_empty() && t != "gateway-placeholder"
+        }
+        Err(_) => false,
+    }
 }
 
 /// The gateway overlay for ROUTING the active model — `for_kind` plus a
@@ -244,6 +304,40 @@ mod tests {
         let mut c = AppConfig::default();
         c.gateway_use_for = providers.iter().map(|s| s.to_string()).collect();
         c
+    }
+
+    #[test]
+    fn byok_beats_gateway_overlay() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw-test-key");
+        std::env::set_var("DEEPSEEK_API_KEY", "sk-own-key");
+        let c = cfg(&["deepseek"]);
+        assert!(
+            for_kind(&c, ProviderKind::DeepSeek).is_none(),
+            "a real BYOK key must suppress the gateway overlay"
+        );
+        // placeholder sentinel is NOT a real key -> overlay stays
+        std::env::set_var("DEEPSEEK_API_KEY", "gateway-placeholder");
+        assert!(for_kind(&c, ProviderKind::DeepSeek).is_some());
+        std::env::remove_var("DEEPSEEK_API_KEY");
+        assert!(for_kind(&c, ProviderKind::DeepSeek).is_some());
+        std::env::remove_var("THCLAWS_GATEWAY_API_KEY");
+    }
+
+    #[test]
+    fn shared_agent_mode_keeps_gateway_forced() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw-test-key");
+        std::env::set_var("ZAI_API_KEY", "sk-own-key");
+        std::env::set_var("THCLAWS_SHARED_AGENT_DIR", "/tmp/shared-agent-test");
+        let c = cfg(&["zai"]);
+        assert!(
+            for_kind(&c, ProviderKind::ZAi).is_some(),
+            "governance environments meter even with BYOK present"
+        );
+        std::env::remove_var("THCLAWS_SHARED_AGENT_DIR");
+        std::env::remove_var("ZAI_API_KEY");
+        std::env::remove_var("THCLAWS_GATEWAY_API_KEY");
     }
 
     #[test]

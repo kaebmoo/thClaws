@@ -584,6 +584,15 @@ pub enum SlashCommand {
         src: String,
         dst: String,
     },
+    /// `/kms consolidate <dst> [--user|--project] [--drop]` — merge every
+    /// writable KMS into `<dst>` (created if missing); Shared/read-only KMSes
+    /// are skipped. With `--drop`, source KMSes are removed afterwards so only
+    /// `<dst>` remains; otherwise sources are kept for you to verify + drop.
+    KmsConsolidate {
+        dst: String,
+        scope: crate::kms::KmsScope,
+        drop: bool,
+    },
     /// Delete a KMS from disk. Dry-run by default — prints the
     /// pages/sources count that *would* be removed and stops.
     /// `--force` actually removes the directory tree.
@@ -851,6 +860,23 @@ pub enum CloudSlash {
     /// instead of trying to update someone else's. Used when forking
     /// an agent you `/cloud get`'d from another publisher.
     Unbind,
+    /// `/cloud push [<slug>] [--delete] [--dry-run] [--force-rebind]` — mirror
+    /// the working dir UP to a hosted cloud workspace (dev-plan/51). A bare
+    /// `<slug>` (or `--workspace <slug>`) selects the target when you have more
+    /// than one. Em/en dashes are normalized to `--` (smart-dash tolerance).
+    Push {
+        delete: bool,
+        dry_run: bool,
+        workspace: Option<String>,
+        force_rebind: bool,
+    },
+    /// `/cloud pull […]` — mirror a hosted cloud workspace DOWN to the cwd.
+    Pull {
+        delete: bool,
+        dry_run: bool,
+        workspace: Option<String>,
+        force_rebind: bool,
+    },
 }
 
 /// Subcommands of `/sso`. `/sso` with no arg defaults to `Status`.
@@ -1851,10 +1877,48 @@ fn parse_cloud_subcommand(args: &str) -> SlashCommand {
         }
         "publish" => SlashCommand::Cloud(CloudSlash::Publish),
         "unbind" => SlashCommand::Cloud(CloudSlash::Unbind),
+        "push" | "pull" => {
+            // Smart-dash tolerance: terminals / IMEs can turn "--" into an em (—)
+            // or en (–) dash. Normalize before flag parsing.
+            let norm = rest.replace('—', "--").replace('–', "--");
+            let toks: Vec<&str> = norm.split_whitespace().collect();
+            let has = |f: &str| toks.iter().any(|t| *t == f);
+            let delete = has("--delete");
+            let dry_run = has("--dry-run");
+            let force_rebind = has("--force-rebind");
+            // Target workspace: `--workspace <slug>` or the first positional
+            // (non-flag) token, so `/cloud push <slug>` works without the flag.
+            let workspace = toks
+                .iter()
+                .position(|t| *t == "--workspace")
+                .and_then(|i| toks.get(i + 1))
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    toks.iter()
+                        .find(|t| !t.starts_with("--"))
+                        .map(|s| s.to_string())
+                });
+            if sub == "push" {
+                SlashCommand::Cloud(CloudSlash::Push {
+                    delete,
+                    dry_run,
+                    workspace,
+                    force_rebind,
+                })
+            } else {
+                SlashCommand::Cloud(CloudSlash::Pull {
+                    delete,
+                    dry_run,
+                    workspace,
+                    force_rebind,
+                })
+            }
+        }
         other => SlashCommand::Unknown(format!(
             "unknown cloud subcommand: '{other}' \
              (try: /cloud status, /cloud list [--mine], /cloud get <slug>, \
-             /cloud publish, /cloud unbind)"
+             /cloud publish, /cloud unbind, \
+             /cloud push|pull [<slug>] [--delete] [--dry-run] [--force-rebind])"
         )),
     }
 }
@@ -3076,6 +3140,30 @@ fn parse_kms_subcommand(args: &str) -> SlashCommand {
                     }
                 }
                 _ => SlashCommand::Unknown("usage: /kms merge <src> <dst>".into()),
+            }
+        }
+        "consolidate" | "merge-all" | "unify" => {
+            // `/kms consolidate <dst> [--user|--project] [--drop]` — fold every
+            // writable KMS into <dst> (created if missing).
+            let mut name: Option<String> = None;
+            let mut scope = crate::kms::KmsScope::Project;
+            let mut drop = false;
+            for tok in rest.split_whitespace() {
+                match tok {
+                    "--user" => scope = crate::kms::KmsScope::User,
+                    "--project" => scope = crate::kms::KmsScope::Project,
+                    "--drop" => drop = true,
+                    other if !other.starts_with("--") && name.is_none() => {
+                        name = Some(other.to_string())
+                    }
+                    _ => {}
+                }
+            }
+            match name {
+                Some(dst) => SlashCommand::KmsConsolidate { dst, scope, drop },
+                None => SlashCommand::Unknown(
+                    "usage: /kms consolidate <dst> [--user|--project] [--drop]".into(),
+                ),
             }
         }
         "link" | "autolink" | "cross-link" => {
@@ -9793,6 +9881,18 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         }
                     }
                 }
+                SlashCommand::KmsConsolidate { dst, scope, drop } => {
+                    match crate::kms::consolidate(&dst, scope, drop) {
+                        Ok(report) => {
+                            for line in report.summary_lines() {
+                                println!("{COLOR_DIM}{line}{COLOR_RESET}");
+                            }
+                        }
+                        Err(e) => {
+                            println!("{COLOR_YELLOW}/kms consolidate failed: {e}{COLOR_RESET}");
+                        }
+                    }
+                }
                 SlashCommand::KmsExportOkf { name, output_dir } => {
                     let out = output_dir.unwrap_or_else(|| format!("{name}-okf"));
                     match crate::kms::export_okf(&name, std::path::Path::new(&out)) {
@@ -10382,6 +10482,14 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                     "{COLOR_DIM}  {exit}  {:24}  {}{COLOR_RESET}",
                                     s.id, last
                                 );
+                                if !matches!(s.last_exit, Some(0)) {
+                                    if let Some(log) = crate::schedule::latest_log(&s.id) {
+                                        println!(
+                                            "{COLOR_DIM}       \u{21b3} log: {}{COLOR_RESET}",
+                                            log.display()
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
@@ -10712,6 +10820,16 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             for line in crate::cloud::cmd::unbind_lines() {
                                 println!("{line}");
                             }
+                        }
+                        CloudSlash::Push { delete, dry_run, workspace, force_rebind } => {
+                            let cwd = std::env::current_dir().unwrap_or_default();
+                            let opts = crate::cloud::cmd::SyncOpts { delete, dry_run, workspace, force_rebind };
+                            crate::cloud::cmd::push_streaming(&cwd, None, cloud_cfg.as_ref(), opts, &mut |line| println!("{line}")).await;
+                        }
+                        CloudSlash::Pull { delete, dry_run, workspace, force_rebind } => {
+                            let cwd = std::env::current_dir().unwrap_or_default();
+                            let opts = crate::cloud::cmd::SyncOpts { delete, dry_run, workspace, force_rebind };
+                            crate::cloud::cmd::pull_streaming(&cwd, None, cloud_cfg.as_ref(), opts, &mut |line| println!("{line}")).await;
                         }
                     }
                 }
@@ -11729,6 +11847,53 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloud_push_pull_positional_slug_and_em_dash() {
+        // positional slug (no --workspace)
+        match parse_cloud_subcommand("push my-agent") {
+            SlashCommand::Cloud(CloudSlash::Push {
+                workspace, delete, ..
+            }) => {
+                assert_eq!(workspace.as_deref(), Some("my-agent"));
+                assert!(!delete);
+            }
+            other => panic!("expected Push, got {other:?}"),
+        }
+        // em-dash flags normalize to "--", positional still resolves
+        match parse_cloud_subcommand("pull my-agent —delete —dry-run") {
+            SlashCommand::Cloud(CloudSlash::Pull {
+                workspace,
+                delete,
+                dry_run,
+                ..
+            }) => {
+                assert_eq!(workspace.as_deref(), Some("my-agent"));
+                assert!(delete);
+                assert!(dry_run);
+            }
+            other => panic!("expected Pull, got {other:?}"),
+        }
+        // --workspace still works; flags-only has no positional
+        match parse_cloud_subcommand("push --workspace ws1 --delete") {
+            SlashCommand::Cloud(CloudSlash::Push {
+                workspace, delete, ..
+            }) => {
+                assert_eq!(workspace.as_deref(), Some("ws1"));
+                assert!(delete);
+            }
+            other => panic!("expected Push, got {other:?}"),
+        }
+        match parse_cloud_subcommand("push --dry-run") {
+            SlashCommand::Cloud(CloudSlash::Push {
+                workspace, dry_run, ..
+            }) => {
+                assert_eq!(workspace, None);
+                assert!(dry_run);
+            }
+            other => panic!("expected Push, got {other:?}"),
+        }
+    }
 
     #[test]
     fn format_token_count_thresholds() {

@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::cloud::{client::Client, pack, resolve_cloud_url, CloudConfig};
+use crate::cloud::{client::Client, pack, resolve_cloud_url, wssync, CloudConfig};
 
 pub async fn login(
     cloud_url: Option<&str>,
@@ -784,4 +784,439 @@ mod tests {
             serde_json::json!(false)
         );
     }
+}
+
+// ---- workspace sync: /cloud push|pull (dev-plan/51) ----
+
+/// Options for `/cloud push|pull`.
+#[derive(Debug, Clone, Default)]
+pub struct SyncOpts {
+    pub delete: bool,
+    pub dry_run: bool,
+    pub workspace: Option<String>,
+    pub force_rebind: bool,
+}
+
+/// Push, streaming each progress line to `emit` the moment it is produced.
+pub async fn push_streaming(
+    cwd: &Path,
+    cloud_url: Option<&str>,
+    cloud_cfg: Option<&CloudConfig>,
+    opts: SyncOpts,
+    emit: &mut (dyn FnMut(String) + Send),
+) {
+    if let Err(e) = sync_inner(cwd, cloud_url, cloud_cfg, opts, true, emit).await {
+        emit(format!("push failed: {}", e));
+    }
+}
+
+/// Pull, streaming each progress line to `emit` the moment it is produced.
+pub async fn pull_streaming(
+    cwd: &Path,
+    cloud_url: Option<&str>,
+    cloud_cfg: Option<&CloudConfig>,
+    opts: SyncOpts,
+    emit: &mut (dyn FnMut(String) + Send),
+) {
+    if let Err(e) = sync_inner(cwd, cloud_url, cloud_cfg, opts, false, emit).await {
+        emit(format!("pull failed: {}", e));
+    }
+}
+
+pub async fn push_lines(
+    cwd: &Path,
+    cloud_url: Option<&str>,
+    cloud_cfg: Option<&CloudConfig>,
+    opts: SyncOpts,
+) -> Vec<String> {
+    let mut log = Vec::new();
+    push_streaming(cwd, cloud_url, cloud_cfg, opts, &mut |l| log.push(l)).await;
+    log
+}
+
+pub async fn pull_lines(
+    cwd: &Path,
+    cloud_url: Option<&str>,
+    cloud_cfg: Option<&CloudConfig>,
+    opts: SyncOpts,
+) -> Vec<String> {
+    let mut log = Vec::new();
+    pull_streaming(cwd, cloud_url, cloud_cfg, opts, &mut |l| log.push(l)).await;
+    log
+}
+
+async fn resolve_workspace(
+    client: &Client,
+    want: Option<&str>,
+) -> Result<crate::cloud::client::WorkspaceSummary, String> {
+    let mut wss = client.list_workspaces().await?;
+    if wss.is_empty() {
+        return Err("no hosted workspaces on your account — create one at /dashboard".into());
+    }
+    if let Some(slug) = want {
+        return wss
+            .into_iter()
+            .find(|w| w.slug == slug)
+            .ok_or_else(|| format!("no hosted workspace with slug '{}'", slug));
+    }
+    if wss.len() == 1 {
+        return Ok(wss.remove(0));
+    }
+    let slugs: Vec<String> = wss.iter().map(|w| w.slug.clone()).collect();
+    Err(format!(
+        "you have {} workspaces — pass --workspace <slug>: {}",
+        slugs.len(),
+        slugs.join(", ")
+    ))
+}
+
+async fn sync_inner(
+    cwd: &Path,
+    cloud_url: Option<&str>,
+    cloud_cfg: Option<&CloudConfig>,
+    opts: SyncOpts,
+    is_push: bool,
+    emit: &mut (dyn FnMut(String) + Send),
+) -> Result<(), String> {
+    // dev-plan/51 #3: both ends must be idle. Refuse if a local turn is running.
+    if crate::agent_activity::busy_count() > 0 {
+        return Err("a local turn is active — wait for it to finish before syncing".into());
+    }
+    let url = resolve_cloud_url(cloud_url, cloud_cfg);
+    let token = crate::cloud::token();
+    if token.is_none() {
+        return Err("not logged in — paste your CLI token in Settings → thClaws.cloud".into());
+    }
+    emit("Connecting to thClaws.cloud…".into());
+    let client = Client::new(&url, token);
+    let ws = resolve_workspace(&client, opts.workspace.as_deref()).await?;
+    emit(format!("Workspace: {} ({})", ws.slug, ws.id));
+    let jwt = client.cli_exchange().await?;
+    // Probe the runner directly — status strings ("ready"/"running") aren't a
+    // reliable "is it up" signal, so try /sync/stat and only wake on failure.
+    let stat = match client.ws_sync_stat(&ws.url, &jwt).await {
+        Ok(s) => s,
+        Err(e) if e.contains("404") => {
+            return Err(format!(
+                "'{}' is up but its engine doesn't expose /workspace/sync yet — \
+                 restart it (pause→resume) to pick up the v0.81+ engine",
+                ws.slug
+            ));
+        }
+        Err(_) => {
+            emit(format!(
+                "Workspace not responding ({}) — resuming…",
+                ws.status
+            ));
+            client.wake_workspace(&ws.id).await?;
+            wait_for_runner(&client, &ws.url, &jwt, emit).await?
+        }
+    };
+    if stat.busy {
+        return Err("the cloud workspace has an active turn — try again when it's idle".into());
+    }
+    let local_binding = wssync::read_binding(cwd);
+    let local_bound = local_binding.workspace_id.clone();
+    let bound_note = local_bound
+        .as_deref()
+        .map(|l| format!(" (folder bound to {})", l))
+        .unwrap_or_default();
+
+    if is_push {
+        if !stat.empty && local_bound.as_deref() != Some(ws.id.as_str()) && !opts.force_rebind {
+            return Err(format!(
+                "cloud workspace '{}' is not empty and this folder isn't bound to it{} — re-run with --force-rebind to overwrite it deliberately",
+                ws.slug, bound_note
+            ));
+        }
+        // P2: incremental when the runner exposes a manifest; else full tarball.
+        match client.ws_sync_manifest(&ws.url, &jwt).await? {
+            Some(remote) => {
+                let local = wssync::build_manifest(cwd)?;
+                let (upload, extraneous) = wssync::diff(&local, &remote);
+                if opts.dry_run {
+                    emit(format!(
+                        "[dry-run] incremental push → '{}': {} file(s) to upload{}",
+                        ws.slug,
+                        upload.len(),
+                        if opts.delete {
+                            format!(", {} to delete on cloud", extraneous.len())
+                        } else {
+                            String::new()
+                        }
+                    ));
+                    return Ok(());
+                }
+                emit(format!("Pushing {} changed file(s)…", upload.len()));
+                let tarball = wssync::tar_paths(cwd, &upload)?;
+                let r = push_with_progress(&client, &ws.url, &jwt, tarball, false, &ws.id, emit)
+                    .await?;
+                let deleted = if opts.delete && !extraneous.is_empty() {
+                    client
+                        .ws_sync_trash(&ws.url, &jwt, &extraneous)
+                        .await?
+                        .deleted
+                } else {
+                    0
+                };
+                write_push_binding(cwd, &ws, &url, &local_binding)?;
+                emit(format!(
+                    "✓ pushed {} file(s){} to '{}' (incremental)",
+                    r.written,
+                    if deleted > 0 {
+                        format!(", deleted {}", deleted)
+                    } else {
+                        String::new()
+                    },
+                    ws.slug
+                ));
+            }
+            None => {
+                let local = wssync::stat_workspace(cwd)?;
+                if opts.dry_run {
+                    emit(format!(
+                        "[dry-run] would push {} local file(s) → cloud '{}' (cloud has {}){}",
+                        local.file_count,
+                        ws.slug,
+                        stat.file_count,
+                        if opts.delete {
+                            ", deleting extraneous on cloud"
+                        } else {
+                            ""
+                        }
+                    ));
+                    return Ok(());
+                }
+                emit(format!(
+                    "Packing {} file(s) ({:.1} KB)…",
+                    local.file_count,
+                    local.bytes as f64 / 1024.0
+                ));
+                let tarball = wssync::tar_workspace(cwd, false)?;
+                let r =
+                    push_with_progress(&client, &ws.url, &jwt, tarball, opts.delete, &ws.id, emit)
+                        .await?;
+                write_push_binding(cwd, &ws, &url, &local_binding)?;
+                emit(format!(
+                    "✓ pushed {} file(s){} to '{}'",
+                    r.written,
+                    if r.deleted > 0 {
+                        format!(", deleted {}", r.deleted)
+                    } else {
+                        String::new()
+                    },
+                    ws.slug
+                ));
+            }
+        }
+    } else {
+        let local_empty = wssync::is_empty(cwd)?;
+        if !local_empty && local_bound.as_deref() != Some(ws.id.as_str()) && !opts.force_rebind {
+            return Err(format!(
+                "local folder is not empty and isn't bound to '{}'{} — re-run with --force-rebind to overwrite it deliberately",
+                ws.slug, bound_note
+            ));
+        }
+        match client.ws_sync_manifest(&ws.url, &jwt).await? {
+            Some(remote) => {
+                let local = wssync::build_manifest(cwd)?;
+                let (download, extraneous) = wssync::diff(&remote, &local);
+                if opts.dry_run {
+                    emit(format!(
+                        "[dry-run] incremental pull ← '{}': {} file(s) to download{}",
+                        ws.slug,
+                        download.len(),
+                        if opts.delete {
+                            format!(", {} to delete locally", extraneous.len())
+                        } else {
+                            String::new()
+                        }
+                    ));
+                    return Ok(());
+                }
+                emit(format!("Pulling {} changed file(s)…", download.len()));
+                if !download.is_empty() {
+                    let bytes = client.ws_sync_export(&ws.url, &jwt, &download).await?;
+                    wssync::untar_workspace(&bytes, cwd, false)?;
+                }
+                let deleted = if opts.delete && !extraneous.is_empty() {
+                    wssync::trash_paths(cwd, &extraneous)?.deleted
+                } else {
+                    0
+                };
+                write_pull_binding(cwd, &ws, &url, &local_binding)?;
+                emit(format!(
+                    "✓ pulled {} file(s){} into {} (incremental)",
+                    download.len(),
+                    if deleted > 0 {
+                        format!(", deleted {}", deleted)
+                    } else {
+                        String::new()
+                    },
+                    cwd.display()
+                ));
+            }
+            None => {
+                if opts.dry_run {
+                    let local = wssync::stat_workspace(cwd)?;
+                    emit(format!(
+                        "[dry-run] would pull cloud '{}' ({} file(s)) → local (has {}){}",
+                        ws.slug,
+                        stat.file_count,
+                        local.file_count,
+                        if opts.delete {
+                            ", deleting extraneous locally"
+                        } else {
+                            ""
+                        }
+                    ));
+                    return Ok(());
+                }
+                emit(format!(
+                    "Pulling cloud '{}' ({} file(s))…",
+                    ws.slug, stat.file_count
+                ));
+                let bytes = client.ws_sync_pull(&ws.url, &jwt, false).await?;
+                let r = wssync::untar_workspace(&bytes, cwd, opts.delete)?;
+                write_pull_binding(cwd, &ws, &url, &local_binding)?;
+                emit(format!(
+                    "✓ pulled {} file(s){} into {}",
+                    r.written,
+                    if r.deleted > 0 {
+                        format!(", deleted {}", r.deleted)
+                    } else {
+                        String::new()
+                    },
+                    cwd.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Upload the tarball, emitting a live percentage readout for uploads large
+/// enough that the transfer is the slow part. Small tarballs skip the ticker
+/// (the surrounding "Pushing…"/"✓ pushed" lines already bracket them).
+async fn push_with_progress(
+    client: &Client,
+    ws_url: &str,
+    jwt: &str,
+    tarball: Vec<u8>,
+    delete: bool,
+    workspace_id: &str,
+    emit: &mut (dyn FnMut(String) + Send),
+) -> Result<crate::cloud::client::SyncPushResp, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    const TICKER_THRESHOLD: u64 = 256 * 1024;
+    let total = tarball.len() as u64;
+    if total < TICKER_THRESHOLD {
+        return client
+            .ws_sync_push(ws_url, jwt, tarball, delete, workspace_id, None)
+            .await;
+    }
+    let sent = Arc::new(AtomicU64::new(0));
+    let fut = client.ws_sync_push(
+        ws_url,
+        jwt,
+        tarball,
+        delete,
+        workspace_id,
+        Some(sent.clone()),
+    );
+    tokio::pin!(fut);
+    let total_mb = total as f64 / 1_048_576.0;
+    let mut last_pct = u64::MAX;
+    loop {
+        tokio::select! {
+            r = &mut fut => return r,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(300)) => {
+                let done = sent.load(Ordering::Relaxed).min(total);
+                let pct = done * 100 / total;
+                if pct != last_pct {
+                    last_pct = pct;
+                    emit(format!(
+                        "  uploading… {:.1}/{:.1} MB ({}%)",
+                        done as f64 / 1_048_576.0,
+                        total_mb,
+                        pct
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// Poll the runner's `/sync/stat` until it answers (after a resume) or times out.
+async fn wait_for_runner(
+    client: &Client,
+    ws_url: &str,
+    jwt: &str,
+    emit: &mut (dyn FnMut(String) + Send),
+) -> Result<crate::cloud::client::SyncStatResp, String> {
+    let mut last = String::new();
+    for attempt in 0..30 {
+        match client.ws_sync_stat(ws_url, jwt).await {
+            Ok(s) => return Ok(s),
+            Err(e) if e.contains("404") => {
+                return Err(format!(
+                    "engine doesn't expose /workspace/sync — restart the workspace \
+                     for the v0.81+ engine ({e})"
+                ));
+            }
+            Err(e) => last = e,
+        }
+        if attempt == 0 {
+            emit("Waiting for the workspace to come up…".into());
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    Err(format!(
+        "workspace didn't become reachable in time: {}",
+        last
+    ))
+}
+
+fn write_push_binding(
+    cwd: &Path,
+    ws: &crate::cloud::client::WorkspaceSummary,
+    url: &str,
+    prev: &wssync::Binding,
+) -> Result<(), String> {
+    wssync::write_binding(
+        cwd,
+        &wssync::Binding {
+            workspace_id: Some(ws.id.clone()),
+            slug: Some(ws.slug.clone()),
+            cloud_url: Some(url.to_string()),
+            last_push: Some(now_string()),
+            last_pull: prev.last_pull.clone(),
+        },
+    )
+}
+
+fn write_pull_binding(
+    cwd: &Path,
+    ws: &crate::cloud::client::WorkspaceSummary,
+    url: &str,
+    prev: &wssync::Binding,
+) -> Result<(), String> {
+    wssync::write_binding(
+        cwd,
+        &wssync::Binding {
+            workspace_id: Some(ws.id.clone()),
+            slug: Some(ws.slug.clone()),
+            cloud_url: Some(url.to_string()),
+            last_push: prev.last_push.clone(),
+            last_pull: Some(now_string()),
+        },
+    )
+}
+
+fn now_string() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_default()
 }

@@ -2511,6 +2511,16 @@ pub async fn dispatch(
             }
             Err(e) => emit(events_tx, format!("/kms merge failed: {e}")),
         },
+        SlashCommand::KmsConsolidate { dst, scope, drop } => {
+            match crate::kms::consolidate(&dst, scope, drop) {
+                Ok(report) => {
+                    emit(events_tx, report.summary_lines().join("\n"));
+                    // dst created and/or sources dropped → refresh the sidebar.
+                    broadcast_kms_update(events_tx);
+                }
+                Err(e) => emit(events_tx, format!("/kms consolidate failed: {e}")),
+            }
+        }
         SlashCommand::KmsExportOkf { name, output_dir } => {
             let out = output_dir.unwrap_or_else(|| format!("{name}-okf"));
             match crate::kms::export_okf(&name, std::path::Path::new(&out)) {
@@ -3281,6 +3291,11 @@ pub async fn dispatch(
                             None => "—  ",
                         };
                         out.push_str(&format!("  {exit}  {:24}  {}\n", s.id, last));
+                        if !matches!(s.last_exit, Some(0)) {
+                            if let Some(log) = crate::schedule::latest_log(&s.id) {
+                                out.push_str(&format!("       \u{21b3} log: {}\n", log.display()));
+                            }
+                        }
                     }
                 }
             }
@@ -3628,21 +3643,86 @@ pub async fn dispatch(
             let cloud_cfg = crate::config::ProjectConfig::load().and_then(|c| c.cloud.clone());
             let events_tx_clone = events_tx.clone();
             tokio::spawn(async move {
-                let lines = match sub {
-                    CloudSlash::Status => crate::cloud::cmd::status_lines(None, cloud_cfg.as_ref()),
+                // Stream every progress line the moment it is produced, so
+                // long-running syncs show life instead of a silent wait.
+                let mut emit = |line: String| {
+                    let _ = events_tx_clone.send(ViewEvent::SlashOutput(line));
+                };
+                match sub {
+                    CloudSlash::Status => {
+                        for line in crate::cloud::cmd::status_lines(None, cloud_cfg.as_ref()) {
+                            emit(line);
+                        }
+                    }
                     CloudSlash::List { mine } => {
-                        crate::cloud::cmd::list_lines(mine, None, cloud_cfg.as_ref()).await
+                        for line in
+                            crate::cloud::cmd::list_lines(mine, None, cloud_cfg.as_ref()).await
+                        {
+                            emit(line);
+                        }
                     }
                     CloudSlash::Get { slug } => {
-                        crate::cloud::cmd::get_into_cwd_lines(slug, None, cloud_cfg.as_ref()).await
+                        for line in
+                            crate::cloud::cmd::get_into_cwd_lines(slug, None, cloud_cfg.as_ref())
+                                .await
+                        {
+                            emit(line);
+                        }
                     }
                     CloudSlash::Publish => {
-                        crate::cloud::cmd::publish_cwd_lines(None, cloud_cfg.as_ref()).await
+                        for line in
+                            crate::cloud::cmd::publish_cwd_lines(None, cloud_cfg.as_ref()).await
+                        {
+                            emit(line);
+                        }
                     }
-                    CloudSlash::Unbind => crate::cloud::cmd::unbind_lines(),
-                };
-                for line in lines {
-                    let _ = events_tx_clone.send(ViewEvent::SlashOutput(line));
+                    CloudSlash::Unbind => {
+                        for line in crate::cloud::cmd::unbind_lines() {
+                            emit(line);
+                        }
+                    }
+                    CloudSlash::Push {
+                        delete,
+                        dry_run,
+                        workspace,
+                        force_rebind,
+                    } => {
+                        let cwd = std::env::current_dir().unwrap_or_default();
+                        crate::cloud::cmd::push_streaming(
+                            &cwd,
+                            None,
+                            cloud_cfg.as_ref(),
+                            crate::cloud::cmd::SyncOpts {
+                                delete,
+                                dry_run,
+                                workspace,
+                                force_rebind,
+                            },
+                            &mut emit,
+                        )
+                        .await;
+                    }
+                    CloudSlash::Pull {
+                        delete,
+                        dry_run,
+                        workspace,
+                        force_rebind,
+                    } => {
+                        let cwd = std::env::current_dir().unwrap_or_default();
+                        crate::cloud::cmd::pull_streaming(
+                            &cwd,
+                            None,
+                            cloud_cfg.as_ref(),
+                            crate::cloud::cmd::SyncOpts {
+                                delete,
+                                dry_run,
+                                workspace,
+                                force_rebind,
+                            },
+                            &mut emit,
+                        )
+                        .await;
+                    }
                 }
             });
         }

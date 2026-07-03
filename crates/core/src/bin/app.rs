@@ -1691,6 +1691,11 @@ fn run_schedule_subcommand(cmd: ScheduleCmd) -> i32 {
                             None => "—  ",
                         };
                         println!("  {exit}  {:24}  {}", s.id, last);
+                        if !matches!(s.last_exit, Some(0)) {
+                            if let Some(log) = schedule::latest_log(&s.id) {
+                                println!("       \u{21b3} log: {}", log.display());
+                            }
+                        }
                     }
                 }
                 _ => {}

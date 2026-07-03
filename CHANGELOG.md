@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.85.0] — 2026-07-03
+
+FilmScript: turn a screenplay into a finished AI short. A new `.film` DSL and the Movie Maker agent compile a script into a multi-backend video with Thai dialogue, and the agent can now watch its own output back. Plus scheduled-run error visibility.
+
+### Added
+- **FilmScript (`.film`) DSL + Movie Maker agent.** Write a screenplay, compile it, and generate a finished short — character/scene consistency, dialogue, music, and subtitles. A pure two-phase compiler produces the backend payload; a harness runs TTS + generation + assembly. You author; the tools run the deterministic pipeline, showing a cost estimate before anything is spent.
+- **Multi-backend video generation.** Grok Imagine by default (best Thai dialogue + scene consistency), with LTX-2, Google Veo, Seedance, and Alibaba Happy Horse selectable per film or per shot via `backend:` / `@backend:`. Each backend's capabilities (image refs, continuation, audio, resolution) are validated at compile time.
+- **`WatchVideo` tool — the model can watch a video.** Extracts scene-aware, deduplicated key frames from a local video and returns them as inline images so a vision model actually *sees* the footage, plus an optional Whisper transcript (via `GROQ_API_KEY`). Use it to review or critique a clip or answer questions about what happens on screen.
+- **Subtitles rendered onto the film.** Every spoken line becomes a caption: soft-muxed as a toggle-able track by default, or hardcoded into the picture with `subtitle_burn: on` (styled Thai captions for social platforms).
+- **Multi-provider TTS.** ElevenLabs (`eleven_v3`, the default Thai voice) and OpenAI (`gpt-4o-mini-tts`) join Gemini and MiniMax; each voice picks its provider and model in `voices.json`.
+- **Dialogue voicing modes.** `dialogue_sync: native` (default — the backend speaks the line), `overlay` (swap in an exact TTS voice), or `lipsync` (re-sync the mouth to the TTS voice).
+- **Movie Maker genre playbooks.** Loadable skill references for drama (dialogue coverage — shot/reverse-shot, eyelines, shot-size by beat) and documentary (voice-over master clock, silent b-roll, subject lock).
+
+### Fixed
+- **Scheduled runs: see *why* a fire failed.** `schedule status` now prints the diagnostic log path under any errored fire, so a bare `err` is no longer a dead end — the actual error is one `cat` away.
+
+## [0.84.0] — 2026-07-01
+
+Major UI and cloud-dashboard refreshes: dedicated Access Keys page, refined workspace visuals, and a surge of new features for custom GUI shells.
+
+### Added
+- **Dedicated "thClaws.cloud Access Keys" page.** Added a full-page management view for access keys at `/access-keys`, accessible independently of the dashboard.
+- **GUI Shell: standard theme and header.** Introduced a standard theme, `<thc-header>` chrome, sidebar layout with a pinned model picker, and full-screen toggles for GUI Shell extensions.
+- **GUI Shell: deterministic research data APIs.** Added deterministic `thclaws.kms/research` data APIs for GUI Shells, enabling non-LLM-backed access to research data.
+- **GUI Shell: shared conversation component.** Provided a standard `<thc-chat>` conversation block, including contextual grey tool chips, for all GUI Shells.
+- **GUI Shell: searchable model picker.** Added a main-app-style, searchable model picker component for custom shells.
+- **GUI Shell: permission-gated model picker.** Enabled permission-scoped `<thc-model>` provider + model picker for shell environments.
+- **Cloud: live workspace push/pull streaming.** `/cloud` sync commands now stream transfer progress live with upload percentages.
+
+### Fixed
+- **Access Keys link and menu.** Updated both the Access Keys menu and credit link to point to `/access-keys`, fixing previous routing issues.
+- **Access Keys page discoverability.** Moved Access Keys to its new location, ensuring the page is reachable from the dashboard.
+- **Workspace-list visuals.** Workspace list icon now uses a 16:9 uncropped image, and agent entries show a small icon instead of a cropped banner.
+- **Sidebar model selection.** Prevents flashing a stale model when exiting full-screen mode.
+- **Research Agent.** Improved adaptive depth, page-scoped gates, and final re-verification logic in the research-agent.
+
+### Changed
+- **Cloud: removed gateway-key API.** Deprecated and removed the user-facing gateway-key API library, REST endpoint, and related router hooks.
+
+## [0.83.0] — 2026-06-30
+
+Auto-discovers OpenCode-Go model routing from the live model list, so new models reach the correct API dialect without a code change.
+
+### Added
+- **Auto-discovered wire routing for OpenCode-Go.** The OpenCode-Go provider now probes `/v1/models` on first use and caches each model's `wire` hint, so newly added models route to the correct API dialect (OpenAI / Anthropic / Alibaba) automatically — no static-list edit or release required. Probe failures, or models without a hint, fall back silently to the built-in tables, preserving offline and backward-compatible behavior. (#175)
+
+## [0.82.0] — 2026-06-30
+
+Consolidates all KMS stores with a new `/kms consolidate` command and documents cloud workspace sync in the tutorial capstone.
+
+### Added
+- **KMS consolidate command.** `/kms consolidate` now folds every writable knowledge base into a single unified KMS for streamlined organization.
+- **Cloud Workspace Sync tutorial.** Adds Chapter 23 to the tutorial covering `/cloud push|pull` workflows, completing the Capstone with up-to-date cloud sync guidance.
+
+## [0.81.0] — 2026-06-30
+
+Introduces seamless desktop–cloud workspace sync with resilient push/pull flows, and polishes cloud onboarding with broader user auto-grants.
+
+### Added
+- **Desktop-to-cloud workspace sync.** `/cloud push|pull <slug>` commands and Settings panel now enable direct and incremental sync between local and hosted workspaces, with robust em-dash and Unicode slug support.
+- **Push/Pull UI in Settings.** Adds one-click Push/Pull buttons to the desktop app for immediate workspace transfers to and from thClaws.cloud.
+- **Auto-grant for cloud guests.** Whitelisted cloud guests are now automatically granted user status on every sign-in for smoother onboarding.
+
+### Changed
+- **Incremental sync and resume.** Push/pull operations now use a manifest-diff with built-in auto-resume for interrupted transfers.
+
+### Fixed
+- **Sync endpoint reliability on single-tenant runners.** Repairs 404 errors when syncing workspaces in single-tenant cloud runner environments, resuming stalled probes.
+
 ## [0.80.0] — 2026-06-29
 
 Strengthens PDF and KMS ingest for Thai documents, advances agent publishing via source-level visibility and batch tooling, and brings tutorial documentation current with capstone and GUI coverage.

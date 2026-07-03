@@ -1,7 +1,7 @@
 {
   "schema": 4,
   "source": "baseline 2026-06-10 — pricing synced from LiteLLM (github.com/BerriAI/litellm)",
-  "fetched_at": "2026-06-26T00:00:00Z",
+  "fetched_at": "2026-06-30T00:00:00Z",
   "providers": {
     "anthropic": {
       "list_url": "https://api.anthropic.com/v1/models",
@@ -1078,6 +1078,26 @@
           "source": "https://dashscope.aliyuncs.com/compatible-mode/v1/models",
           "verified_at": "2026-06-02",
           "chat": false
+        },
+        "dashscope/happyhorse-1.0-t2v": {
+          "source": "https://help.aliyun.com/zh/model-studio/ — happyhorse video, per-second billing",
+          "verified_at": "2026-07-02",
+          "chat": false,
+          "kind": "video",
+          "video_price_per_second_usd": {
+            "720P": 0.14,
+            "1080P": 0.24
+          }
+        },
+        "dashscope/happyhorse-1.0-i2v": {
+          "source": "https://help.aliyun.com/zh/model-studio/ — happyhorse video, per-second billing",
+          "verified_at": "2026-07-02",
+          "chat": false,
+          "kind": "video",
+          "video_price_per_second_usd": {
+            "720P": 0.14,
+            "1080P": 0.24
+          }
         }
       }
     },
@@ -7353,6 +7373,11 @@
           "source": "https://api.tokenrouter.com/v1/models",
           "verified_at": "2026-06-14"
         },
+        "tokenrouter/bytedance-seed/seedream-5.0-lite": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-30"
+        },
         "tokenrouter/claude-haiku-4-5": {
           "context": 200000,
           "source": "https://api.tokenrouter.com/v1/models + litellm:claude-haiku-4-5",
@@ -7440,6 +7465,11 @@
           "context": 128000,
           "source": "https://api.tokenrouter.com/v1/models",
           "verified_at": "2026-06-14"
+        },
+        "tokenrouter/kling-v3-omni": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-30"
         },
         "tokenrouter/minimax/minimax-m2-her": {
           "context": 128000,
