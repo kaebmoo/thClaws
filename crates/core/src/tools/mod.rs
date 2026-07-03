@@ -19,6 +19,7 @@ pub mod docx_edit;
 pub mod docx_read;
 pub mod edit;
 pub mod epub_create;
+pub mod filmscript;
 pub mod glob;
 pub mod grep;
 pub mod gui_shell;
@@ -43,6 +44,7 @@ pub mod todo;
 pub mod todo_state;
 pub mod update_goal;
 pub mod video_gen;
+pub mod watch_video;
 pub mod web;
 pub mod workflow_run;
 pub mod write;
@@ -79,6 +81,7 @@ pub use session_rename::SessionRenameTool;
 pub use todo::TodoWriteTool;
 pub use update_goal::{MarkGoalBlockedTool, MarkGoalCompleteTool, RecordGoalProgressTool};
 pub use video_gen::{ImageToVideoTool, MediaJobStatusTool, TextToVideoTool};
+pub use watch_video::WatchVideoTool;
 pub use web::WebFetchTool;
 pub use workflow_run::WorkflowRunTool;
 pub use write::WriteTool;
@@ -329,6 +332,7 @@ impl ToolRegistry {
         let mut r = Self::new();
         r.register(Arc::new(LsTool));
         r.register(Arc::new(ReadTool));
+        r.register(Arc::new(WatchVideoTool));
         r.register(Arc::new(WriteTool));
         r.register(Arc::new(EditTool));
         r.register(Arc::new(GlobTool));
@@ -363,6 +367,7 @@ impl ToolRegistry {
         // (the `gui-shell` skill opens it), so they're invisible to the
         // model until a user asks to build a shell.
         gui_shell::register(&mut r);
+        filmscript::register(&mut r);
         r
     }
 

@@ -3293,6 +3293,11 @@ pub async fn dispatch(
                             None => "—  ",
                         };
                         out.push_str(&format!("  {exit}  {:24}  {}\n", s.id, last));
+                        if !matches!(s.last_exit, Some(0)) {
+                            if let Some(log) = crate::schedule::latest_log(&s.id) {
+                                out.push_str(&format!("       \u{21b3} log: {}\n", log.display()));
+                            }
+                        }
                     }
                 }
             }

@@ -10482,6 +10482,14 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                     "{COLOR_DIM}  {exit}  {:24}  {}{COLOR_RESET}",
                                     s.id, last
                                 );
+                                if !matches!(s.last_exit, Some(0)) {
+                                    if let Some(log) = crate::schedule::latest_log(&s.id) {
+                                        println!(
+                                            "{COLOR_DIM}       \u{21b3} log: {}{COLOR_RESET}",
+                                            log.display()
+                                        );
+                                    }
+                                }
                             }
                         }
                     }

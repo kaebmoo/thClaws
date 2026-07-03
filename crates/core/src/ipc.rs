@@ -387,7 +387,14 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             // media tools into the invoke registry only when the flag is on
             // OR the calling shell is media-studio. (Other shells stay
             // gated by the flag.)
+            // Built-in studios are the on-ramp for their tool families:
+            // opening them enables the tools without a settings toggle
+            // or a prior skill turn (dev-plan/40 + dev-plan/52).
+            if shell_id == "film-studio" {
+                crate::tools::activate_gate(crate::tools::filmscript::GATE);
+            }
             let media_enabled = shell_id == "media-studio"
+                || shell_id == "film-studio"
                 || crate::config::AppConfig::load()
                     .map(|c| c.image_tools_enabled)
                     .unwrap_or(false);

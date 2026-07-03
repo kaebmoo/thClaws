@@ -527,6 +527,19 @@ pub fn log_dir_for(id: &str) -> Result<PathBuf> {
     Ok(home.join(".local/share/thclaws/logs").join(id))
 }
 
+/// Newest diagnostic log for a schedule, if any. Each fire writes one
+/// timestamped `<ts>.log` (its stderr — where the actual error is), so the
+/// lexicographically-largest name is the most recent fire's log. Used by
+/// `schedule status` to point the user at the error behind an `err`.
+pub fn latest_log(id: &str) -> Option<PathBuf> {
+    let dir = log_dir_for(id).ok()?;
+    std::fs::read_dir(&dir)
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "log"))
+        .max_by(|a, b| a.file_name().cmp(&b.file_name()))
+}
+
 // ─── Step 2: in-process scheduler ────────────────────────────────────
 //
 // Long-running tokio task that polls the schedule store every

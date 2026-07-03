@@ -91,7 +91,10 @@ fn encode_image(img: &image::DynamicImage, fmt: image::ImageOutputFormat) -> Res
 /// the cap. `mime` is the sniffed input type; the returned mime reflects the
 /// re-encoded format (WebP/GIF can't be re-encoded in-place, so they become
 /// PNG or JPEG — the caller re-reports the mime, so this stays consistent).
-fn downscale_for_vision(bytes: &[u8], mime: &str) -> Result<Option<(Vec<u8>, &'static str)>> {
+pub(crate) fn downscale_for_vision(
+    bytes: &[u8],
+    mime: &str,
+) -> Result<Option<(Vec<u8>, &'static str)>> {
     // Header-only dimension probe — avoids a full decode when we don't need one.
     let dims = image::io::Reader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()

@@ -1078,6 +1078,26 @@
           "source": "https://dashscope.aliyuncs.com/compatible-mode/v1/models",
           "verified_at": "2026-06-02",
           "chat": false
+        },
+        "dashscope/happyhorse-1.0-t2v": {
+          "source": "https://help.aliyun.com/zh/model-studio/ — happyhorse video, per-second billing",
+          "verified_at": "2026-07-02",
+          "chat": false,
+          "kind": "video",
+          "video_price_per_second_usd": {
+            "720P": 0.14,
+            "1080P": 0.24
+          }
+        },
+        "dashscope/happyhorse-1.0-i2v": {
+          "source": "https://help.aliyun.com/zh/model-studio/ — happyhorse video, per-second billing",
+          "verified_at": "2026-07-02",
+          "chat": false,
+          "kind": "video",
+          "video_price_per_second_usd": {
+            "720P": 0.14,
+            "1080P": 0.24
+          }
         }
       }
     },

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.85.0] — 2026-07-03
+
+FilmScript: turn a screenplay into a finished AI short. A new `.film` DSL and the Movie Maker agent compile a script into a multi-backend video with Thai dialogue, and the agent can now watch its own output back. Plus scheduled-run error visibility.
+
+### Added
+- **FilmScript (`.film`) DSL + Movie Maker agent.** Write a screenplay, compile it, and generate a finished short — character/scene consistency, dialogue, music, and subtitles. A pure two-phase compiler produces the backend payload; a harness runs TTS + generation + assembly. You author; the tools run the deterministic pipeline, showing a cost estimate before anything is spent.
+- **Multi-backend video generation.** Grok Imagine by default (best Thai dialogue + scene consistency), with LTX-2, Google Veo, Seedance, and Alibaba Happy Horse selectable per film or per shot via `backend:` / `@backend:`. Each backend's capabilities (image refs, continuation, audio, resolution) are validated at compile time.
+- **`WatchVideo` tool — the model can watch a video.** Extracts scene-aware, deduplicated key frames from a local video and returns them as inline images so a vision model actually *sees* the footage, plus an optional Whisper transcript (via `GROQ_API_KEY`). Use it to review or critique a clip or answer questions about what happens on screen.
+- **Subtitles rendered onto the film.** Every spoken line becomes a caption: soft-muxed as a toggle-able track by default, or hardcoded into the picture with `subtitle_burn: on` (styled Thai captions for social platforms).
+- **Multi-provider TTS.** ElevenLabs (`eleven_v3`, the default Thai voice) and OpenAI (`gpt-4o-mini-tts`) join Gemini and MiniMax; each voice picks its provider and model in `voices.json`.
+- **Dialogue voicing modes.** `dialogue_sync: native` (default — the backend speaks the line), `overlay` (swap in an exact TTS voice), or `lipsync` (re-sync the mouth to the TTS voice).
+- **Movie Maker genre playbooks.** Loadable skill references for drama (dialogue coverage — shot/reverse-shot, eyelines, shot-size by beat) and documentary (voice-over master clock, silent b-roll, subject lock).
+
+### Fixed
+- **Scheduled runs: see *why* a fire failed.** `schedule status` now prints the diagnostic log path under any errored fire, so a bare `err` is no longer a dead end — the actual error is one `cat` away.
+
 ## [0.84.0] — 2026-07-01
 
 Major UI and cloud-dashboard refreshes: dedicated Access Keys page, refined workspace visuals, and a surge of new features for custom GUI shells.
