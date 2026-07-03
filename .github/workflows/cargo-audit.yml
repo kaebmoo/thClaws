@@ -37,4 +37,8 @@ jobs:
         # RUSTSEC-2026-0187 (lopdf 0.31 stack overflow) ignored temporarily.
         # Real fix needs printpdf 0.7→0.9 + lopdf 0.42 (major API port):
         # JimmySoftware/agentic-workspace#1. Drop --ignore when that lands.
-        run: cargo audit --ignore RUSTSEC-2026-0187
+        # RUSTSEC-2026-0194 / -0195 (quick-xml DoS: quadratic duplicate-attr
+        # scan + unbounded namespace-decl allocation) — transitive via the
+        # office-doc (docx/xlsx/pptx) parsers; low-severity DoS on
+        # user-supplied files. Drop when those deps allow a patched quick-xml.
+        run: cargo audit --ignore RUSTSEC-2026-0187 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
