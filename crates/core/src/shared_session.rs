@@ -3287,6 +3287,13 @@ async fn run_worker(
 
                 state.cwd = new_cwd.clone();
 
+                // Opening a project in the GUI: migrate its `.thclaws/`
+                // layout (v1 flat → v2 `state/`) before the config reload
+                // resolves any project paths. Process cwd was already
+                // switched by the dispatcher, so this acts on the NEW
+                // workspace. No-op once migrated / in multiuser.
+                crate::config::ProjectConfig::migrate_workspace_if_needed();
+
                 // Reload config — `AppConfig::load` reads project settings
                 // via `ProjectConfig::project_dir()`, which honors
                 // $THCLAWS_PROJECT_ROOT first and otherwise current_dir

@@ -192,6 +192,21 @@ for its own session regardless of this flag — it's the no-config,
 point-and-click on-ramp for people who aren't driving the agent from
 chat.
 
+## Video review & movie-making
+
+| Tool | Approval | What it does |
+|---|---|---|
+| `WatchVideo` | prompt | Lets the model **watch** a local video: pulls scene-aware key frames (so it can *see* what happens) + a Whisper transcript when `GROQ_API_KEY` is set. Use it to review or critique a clip. |
+| `FilmCompile` / `FilmGenerate` / `FilmJobStatus` / `FilmJobCancel` / `FilmAssetImport` | `FilmGenerate` + `FilmAssetImport` prompt | The **Movie Maker** toolkit — turn a `.film` screenplay into a finished AI video. Hidden until you install the Movie Maker agent (which opens the `filmscript` gate). `FilmGenerate` needs a `budgetUsd` — that's your spend cap + consent. See Chapter 29. |
+
+## Other tools
+
+- **`FetchImages`** — downloads every remote image in a Markdown file into a
+  sibling `images/` folder and rewrites the links (used by content-extractor
+  agents). Confined to your workspace.
+- **`EpubCreate`** — Markdown → EPUB e-book (joins the Word/Excel/PowerPoint/PDF
+  document tools above).
+
 ## User interaction
 
 | Tool | Approval | Summary |

@@ -209,7 +209,7 @@ pub fn validate_folder(folder: &Path) -> ValidateReport {
     }
 
     // Workflow scripts: flag stripped globals that would fail at runtime.
-    let wf_dir = folder.join(".thclaws/workflows");
+    let wf_dir = folder.join(".thclaws/agent_workflow");
     if let Ok(entries) = std::fs::read_dir(&wf_dir) {
         for entry in entries.flatten() {
             let path = entry.path();

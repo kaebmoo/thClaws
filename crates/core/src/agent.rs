@@ -575,14 +575,14 @@ pub fn build_step_continuation_prompt(
     }
 }
 
-/// Read `.thclaws/todos.md` from the working directory and, if it
+/// Read `.thclaws/state/todos.md` from the working directory and, if it
 /// exists and has any incomplete items (`[ ]` pending or `[-]`
 /// in_progress), return a system-reminder string surfacing the list.
 /// Returns `None` if the file is missing, empty, or has only completed
 /// items — no point nagging the model with a fully-checked list.
 ///
 /// This is the programmatic counterpart to the system-prompt directive
-/// that says "check `.thclaws/todos.md` BEFORE asking for context."
+/// that says "check `.thclaws/state/todos.md` BEFORE asking for context."
 /// Real-world testing showed that prompt-only guidance isn't enough on
 /// some models — gpt-4.1 in particular still asks the user instead of
 /// reading the file. Auto-injecting the contents removes the model's
@@ -597,6 +597,7 @@ pub fn build_todos_reminder() -> Option<String> {
     let path = std::env::current_dir()
         .ok()?
         .join(".thclaws")
+        .join("state")
         .join("todos.md");
     let raw = std::fs::read_to_string(&path).ok()?;
     if raw.trim().is_empty() {
@@ -616,9 +617,9 @@ pub fn build_todos_reminder() -> Option<String> {
     // unbounded tokens every turn. 80 lines / 6 KB is generous for a
     // typical scratchpad — headers + bullets average ~50 bytes/line.
     let bounded =
-        crate::memory::truncate_for_prompt(raw.trim_end(), 80, 6_000, ".thclaws/todos.md");
+        crate::memory::truncate_for_prompt(raw.trim_end(), 80, 6_000, ".thclaws/state/todos.md");
     Some(format!(
-        "## Existing todos (.thclaws/todos.md)\n\n\
+        "## Existing todos (.thclaws/state/todos.md)\n\n\
          A scratchpad todo list from a prior session is present in this \
          workspace. Surface this to the user before asking what to work \
          on, and offer to resume incomplete items (`[ ]` pending or \
@@ -3164,14 +3165,14 @@ mod tests {
     fn todos_reminder_returns_none_when_file_missing() {
         let tmp = tempdir().unwrap();
         let r = with_cwd(tmp.path(), build_todos_reminder);
-        assert!(r.is_none(), "no .thclaws/todos.md → no reminder");
+        assert!(r.is_none(), "no .thclaws/state/todos.md → no reminder");
     }
 
     #[test]
     fn todos_reminder_returns_none_when_file_empty() {
         let tmp = tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".thclaws")).unwrap();
-        std::fs::write(tmp.path().join(".thclaws/todos.md"), "").unwrap();
+        std::fs::create_dir_all(tmp.path().join(".thclaws/state")).unwrap();
+        std::fs::write(tmp.path().join(".thclaws/state/todos.md"), "").unwrap();
         let r = with_cwd(tmp.path(), build_todos_reminder);
         assert!(r.is_none(), "empty file → no reminder");
     }
@@ -3181,9 +3182,9 @@ mod tests {
         // A list where everything is checked off shouldn't nag the
         // model — there's nothing to resume.
         let tmp = tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".thclaws")).unwrap();
+        std::fs::create_dir_all(tmp.path().join(".thclaws/state")).unwrap();
         std::fs::write(
-            tmp.path().join(".thclaws/todos.md"),
+            tmp.path().join(".thclaws/state/todos.md"),
             "# Todos\n\n- [x] Done thing (id: 1)\n- [x] Other done thing (id: 2)\n",
         )
         .unwrap();
@@ -3194,15 +3195,18 @@ mod tests {
     #[test]
     fn todos_reminder_surfaces_pending_items() {
         let tmp = tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".thclaws")).unwrap();
+        std::fs::create_dir_all(tmp.path().join(".thclaws/state")).unwrap();
         std::fs::write(
-            tmp.path().join(".thclaws/todos.md"),
+            tmp.path().join(".thclaws/state/todos.md"),
             "# Todos\n\n- [ ] Add tests (id: 1)\n- [-] Fix bug (id: 2)\n- [x] Old task (id: 3)\n",
         )
         .unwrap();
         let r = with_cwd(tmp.path(), build_todos_reminder).expect("reminder fires");
         // Header naming the file path so the model sees what the source is.
-        assert!(r.contains(".thclaws/todos.md"), "missing file path: {r}");
+        assert!(
+            r.contains(".thclaws/state/todos.md"),
+            "missing file path: {r}"
+        );
         // Anti-ask framing — the rule that gpt-4.1 violated in the
         // M6.6 manual test.
         assert!(
@@ -3236,9 +3240,9 @@ mod tests {
         // Edge case: a single `[-]` (in_progress) item with everything
         // else `[x]` should still fire — the user paused mid-task.
         let tmp = tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".thclaws")).unwrap();
+        std::fs::create_dir_all(tmp.path().join(".thclaws/state")).unwrap();
         std::fs::write(
-            tmp.path().join(".thclaws/todos.md"),
+            tmp.path().join(".thclaws/state/todos.md"),
             "# Todos\n\n- [x] Done (id: 1)\n- [-] Halfway (id: 2)\n",
         )
         .unwrap();

@@ -211,6 +211,12 @@ impl Tool for WatchVideoTool {
         })
     }
 
+    fn requires_approval(&self, _input: &Value) -> bool {
+        // Frame extraction is local + free, but the Whisper transcript is
+        // a paid, gateway-metered call — gate it like other spend tools.
+        true
+    }
+
     async fn call(&self, input: Value) -> Result<String> {
         // Text-only fallback: real output is images, via call_multimodal.
         let _ = req_str(&input, "path")?;

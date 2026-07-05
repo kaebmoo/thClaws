@@ -194,7 +194,13 @@ impl Tool for FetchImagesTool {
     }
 
     async fn call(&self, input: Value) -> Result<String> {
-        let md_path = PathBuf::from(req_str(&input, "markdown_path")?);
+        // Sandbox the path — FetchImages reads AND rewrites the file in
+        // place and writes a sibling `images/` dir. In multiuser mode
+        // approval is auto-granted, so without this a subagent could
+        // read/rewrite any absolute or co-tenant path. `check_write`
+        // confines it to the per-user workspace root (rejects absolute /
+        // `..` / symlink-escape / another member's subtree).
+        let md_path = crate::sandbox::Sandbox::check_write(req_str(&input, "markdown_path")?)?;
         let base_url = input
             .get("base_url")
             .and_then(Value::as_str)

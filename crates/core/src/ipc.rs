@@ -1522,6 +1522,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let path = std::env::current_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."))
                 .join(".thclaws")
+                .join("state")
                 .join("todos.md");
             let removed = std::fs::remove_file(&path).is_ok();
             // Broadcast through the proper channel so every subscriber

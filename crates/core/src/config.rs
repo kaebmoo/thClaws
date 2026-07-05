@@ -840,6 +840,15 @@ pub struct ProjectConfig {
     /// [`AppConfig::openrouter_fusion`]. Absent ⇒ compiled defaults.
     #[serde(rename = "openrouterFusion", skip_serializing_if = "Option::is_none")]
     pub openrouter_fusion: Option<FusionConfig>,
+    /// Workspace layout schema version for this project's `.thclaws/`.
+    /// `2` = runtime state consolidated under `.thclaws/state/` (sessions,
+    /// team, todos, kms, workflows, …); absent / `< 2` = legacy flat layout
+    /// that [`ProjectConfig::migrate_workspace_if_needed`] moves on open.
+    /// Read RAW from the project file only (never the merged `AppConfig`) —
+    /// it describes this physical directory, not layered config, so a
+    /// user-level flag must NOT make every project look migrated.
+    #[serde(rename = "workspaceVersion", skip_serializing_if = "Option::is_none")]
+    pub workspace_version: Option<u32>,
 }
 
 /// On-disk shape of the `agent` block in `./.thclaws/settings.json`.
@@ -912,6 +921,7 @@ impl Default for ProjectConfig {
             agent: None,
             gui_shell: None,
             openrouter_fusion: None,
+            workspace_version: None,
         }
     }
 }
@@ -1091,6 +1101,7 @@ impl ProjectConfig {
         let template = r#"{
   "_doc": "thClaws project settings. Every available field is listed below at its default value — change a value to override, or delete a field (or set it to null on Option fields) to inherit the global default. windowWidth/windowHeight default to a monitor-resolution-aware size picked at GUI startup (1760x962 on >=1920x1080 displays, 1200x800 otherwise) when left null. See user-manual ch10 for the field reference.",
   "_doc_model": "null = pick automatically from the first provider you have credentials for (DeepSeek → DashScope → OpenAI → Anthropic). Set an explicit id (e.g. \"claude-sonnet-4-6\") to pin one.",
+  "workspaceVersion": 2,
   "model": null,
   "permissions": "auto",
   "maxTokens": 32000,
@@ -1134,6 +1145,7 @@ impl ProjectConfig {
             if std::fs::create_dir_all(parent).is_err() {
                 return false;
             }
+            Self::ensure_state_scaffold(parent);
         }
         std::fs::write(&path, body).is_ok()
     }
@@ -1143,6 +1155,224 @@ impl ProjectConfig {
     /// working if the default model ever changes.
     fn inject_default_gateway_proxy(template: &str) -> String {
         template.replacen("{\n", "{\n  \"gatewayProxy\": true,\n", 1)
+    }
+
+    /// Current `.thclaws/` layout schema version. Bump when the physical
+    /// directory layout changes and add a step to
+    /// [`Self::migrate_workspace_if_needed`].
+    pub const CURRENT_WORKSPACE_VERSION: u32 = 2;
+
+    /// Runtime-state entries that lived at the top of `.thclaws/` before
+    /// workspace v2 and now live under `.thclaws/state/`. Moved wholesale
+    /// (dirs plus the loose files) on first open of a legacy workspace.
+    /// `workflows/` is handled separately (see [`Self::migrate_legacy_workflows`])
+    /// because it mixes authored `.js` (config) with per-run state.
+    const LEGACY_STATE_ENTRIES: &'static [&'static str] = &[
+        "sessions",
+        "team",
+        "todos.md",
+        "phone-home.json",
+        "kms",
+        "schedule",
+        "usage",
+        "usage.jsonl",
+        "cache",
+        "browser-profile",
+    ];
+
+    /// Config-tier directory holding the agent's authored workflow
+    /// scripts (`.js`). Deployable and swapped with the agent; seeded
+    /// into the runtime `state/workflows/` on open by
+    /// [`Self::seed_agent_workflows`].
+    const AGENT_WORKFLOW_DIR: &'static str = "agent_workflow";
+
+    /// Create `.thclaws/state/` and a `state/.gitignore` (`*`) so runtime
+    /// state is never accidentally committed. Best-effort. `thclaws_dir`
+    /// is the project's `.thclaws/`.
+    fn ensure_state_scaffold(thclaws_dir: &std::path::Path) {
+        let state = thclaws_dir.join("state");
+        if std::fs::create_dir_all(&state).is_err() {
+            return;
+        }
+        let gi = state.join(".gitignore");
+        if !gi.exists() {
+            let _ = std::fs::write(&gi, "*\n");
+        }
+    }
+
+    /// Migrate a legacy flat `.thclaws/` to the v2 layout (runtime state
+    /// under `state/`). Idempotent, presence-driven, move-not-delete: only
+    /// entries that exist at the top level AND are absent under `state/`
+    /// are moved, so a re-run heals a partially-migrated tree and never
+    /// clobbers already-migrated data. Reads `workspaceVersion` RAW from
+    /// the project `settings.json` — never the merged `AppConfig`, or a
+    /// user-level flag would make every project look migrated. Skipped in
+    /// multiuser serve pods (shared `/workspace/.thclaws/` would race and
+    /// uses a different per-user layout).
+    ///
+    /// Call BEFORE [`Self::ensure_default_exists`] at every project-open
+    /// hook. A brand-new workspace (no runtime dirs, no settings.json) is
+    /// a no-op here — `ensure_default_exists` then mints a v2 default.
+    pub fn migrate_workspace_if_needed() {
+        if crate::workdir::is_multiuser() {
+            return;
+        }
+        Self::migrate_workspace_at(&Self::project_dir());
+    }
+
+    /// Migration core, parameterised by the project's `.thclaws/` dir so
+    /// it can be exercised against a temp dir without touching process
+    /// cwd or env. `migrate_workspace_if_needed` is the production entry.
+    fn migrate_workspace_at(thclaws_dir: &std::path::Path) {
+        let settings = thclaws_dir.join("settings.json");
+
+        // An existing but unparseable settings.json means we can't trust
+        // the version and must not risk clobbering it — do nothing.
+        let existing: Option<ProjectConfig> = if settings.exists() {
+            match std::fs::read_to_string(&settings) {
+                Ok(raw) => match serde_json::from_str::<ProjectConfig>(&raw) {
+                    Ok(c) => Some(c),
+                    Err(_) => return,
+                },
+                Err(_) => return,
+            }
+        } else {
+            None
+        };
+
+        let version = existing
+            .as_ref()
+            .and_then(|c| c.workspace_version)
+            .unwrap_or(0);
+        if version >= Self::CURRENT_WORKSPACE_VERSION {
+            // Freshly cloned / deployed workspace already declares v2 —
+            // ensure the scaffold and (re)seed authored workflows, then stop.
+            if thclaws_dir.exists() {
+                Self::ensure_state_scaffold(thclaws_dir);
+                Self::seed_agent_workflows(thclaws_dir);
+            }
+            return;
+        }
+
+        // version < CURRENT: legacy or brand-new. Move whatever runtime
+        // entries are present at the top level under `state/`.
+        let state = thclaws_dir.join("state");
+        let mut moved_any = false;
+        for entry in Self::LEGACY_STATE_ENTRIES {
+            let src = thclaws_dir.join(entry);
+            let dst = state.join(entry);
+            if src.exists() && !dst.exists() {
+                if let Some(parent) = dst.parent() {
+                    if std::fs::create_dir_all(parent).is_err() {
+                        continue;
+                    }
+                }
+                if std::fs::rename(&src, &dst).is_ok() {
+                    moved_any = true;
+                }
+            }
+        }
+        moved_any |= Self::migrate_legacy_workflows(thclaws_dir);
+
+        // Stamp the version only when this is an actual project (we moved
+        // legacy state, or a settings.json already exists). A truly
+        // brand-new empty dir is left for `ensure_default_exists` to
+        // initialise as v2, so we don't scatter `.thclaws/` into arbitrary
+        // cwds the user merely opened.
+        if moved_any || existing.is_some() {
+            Self::write_workspace_version(thclaws_dir);
+            Self::ensure_state_scaffold(thclaws_dir);
+            Self::seed_agent_workflows(thclaws_dir);
+        }
+    }
+
+    /// Non-destructively set `workspaceVersion` in
+    /// `thclaws_dir/settings.json`, preserving every other key (`_doc`,
+    /// user config). Creates a minimal file when none exists. Best-effort.
+    fn write_workspace_version(thclaws_dir: &std::path::Path) {
+        let path = thclaws_dir.join("settings.json");
+        let mut base = std::fs::read(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let Some(obj) = base.as_object_mut() else {
+            return;
+        };
+        obj.insert(
+            "workspaceVersion".into(),
+            serde_json::json!(Self::CURRENT_WORKSPACE_VERSION),
+        );
+        if std::fs::create_dir_all(thclaws_dir).is_err() {
+            return;
+        }
+        if let Ok(s) = serde_json::to_string_pretty(&base) {
+            let _ = std::fs::write(&path, s);
+        }
+    }
+
+    /// Split a legacy `.thclaws/workflows/` into the v2 shape: authored
+    /// `*.js` scripts move to `agent_workflow/` (config tier), per-run
+    /// state subdirs move to `state/workflows/`. Presence-driven and
+    /// move-not-delete like the main migration. Returns whether anything
+    /// moved. Drops the legacy dir if it ends up empty.
+    fn migrate_legacy_workflows(thclaws_dir: &std::path::Path) -> bool {
+        let legacy = thclaws_dir.join("workflows");
+        if !legacy.is_dir() {
+            return false;
+        }
+        let authored = thclaws_dir.join(Self::AGENT_WORKFLOW_DIR);
+        let runtime = thclaws_dir.join("state").join("workflows");
+        let entries = match std::fs::read_dir(&legacy) {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+        let mut moved = false;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let is_js = path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("js");
+            let dst_root = if is_js { &authored } else { &runtime };
+            let dst = dst_root.join(&name);
+            if dst.exists() || std::fs::create_dir_all(dst_root).is_err() {
+                continue;
+            }
+            if std::fs::rename(&path, &dst).is_ok() {
+                moved = true;
+            }
+        }
+        // Best-effort: drop the legacy dir once we've emptied it.
+        let _ = std::fs::remove_dir(&legacy);
+        moved
+    }
+
+    /// Seed the runtime workflow dir from the agent's authored scripts:
+    /// copy every `agent_workflow/*.js` into `state/workflows/`,
+    /// overwriting (the authored copy is the source of truth). Per-run
+    /// state subdirs under `state/workflows/` are untouched. No-op when
+    /// `agent_workflow/` is absent. Best-effort.
+    fn seed_agent_workflows(thclaws_dir: &std::path::Path) {
+        let authored = thclaws_dir.join(Self::AGENT_WORKFLOW_DIR);
+        if !authored.is_dir() {
+            return;
+        }
+        let runtime = thclaws_dir.join("state").join("workflows");
+        let entries = match std::fs::read_dir(&authored) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("js") {
+                continue;
+            }
+            let Some(name) = path.file_name() else {
+                continue;
+            };
+            if std::fs::create_dir_all(&runtime).is_err() {
+                return;
+            }
+            let _ = std::fs::copy(&path, runtime.join(name));
+        }
     }
 
     /// Replace the active-KMS list in `.thclaws/settings.json` and
@@ -2665,5 +2895,203 @@ mod tests {
         assert_eq!(cli_model_override().as_deref(), Some("cli-override-model"));
         clear_cli_model_override();
         assert_eq!(cli_model_override(), None);
+    }
+
+    // ── workspace v1 → v2 layout migration ─────────────────────────────
+
+    fn wv(dir: &std::path::Path) -> Option<u32> {
+        let raw = std::fs::read_to_string(dir.join("settings.json")).ok()?;
+        serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()?
+            .get("workspaceVersion")?
+            .as_u64()
+            .map(|v| v as u32)
+    }
+
+    #[test]
+    fn migrate_moves_legacy_runtime_into_state() {
+        let dir = tempdir().unwrap();
+        let tc = dir.path();
+        std::fs::create_dir_all(tc.join("sessions")).unwrap();
+        std::fs::write(tc.join("sessions/x.jsonl"), "s").unwrap();
+        std::fs::create_dir_all(tc.join("kms/ai/pages")).unwrap();
+        std::fs::write(tc.join("todos.md"), "- [ ] a").unwrap();
+        // A config-tier dir must NOT move.
+        std::fs::create_dir_all(tc.join("agents")).unwrap();
+        std::fs::write(tc.join("agents/a.md"), "x").unwrap();
+
+        ProjectConfig::migrate_workspace_at(tc);
+
+        assert_eq!(
+            std::fs::read_to_string(tc.join("state/sessions/x.jsonl")).unwrap(),
+            "s"
+        );
+        assert!(tc.join("state/kms/ai/pages").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(tc.join("state/todos.md")).unwrap(),
+            "- [ ] a"
+        );
+        assert!(!tc.join("sessions").exists(), "legacy dir removed");
+        assert!(!tc.join("todos.md").exists());
+        assert!(tc.join("agents/a.md").is_file(), "config dir untouched");
+        assert_eq!(wv(tc), Some(2), "stamped v2");
+        assert_eq!(
+            std::fs::read_to_string(tc.join("state/.gitignore")).unwrap(),
+            "*\n"
+        );
+    }
+
+    #[test]
+    fn migrate_is_idempotent() {
+        let dir = tempdir().unwrap();
+        let tc = dir.path();
+        std::fs::create_dir_all(tc.join("sessions")).unwrap();
+        std::fs::write(tc.join("sessions/x.jsonl"), "s").unwrap();
+
+        ProjectConfig::migrate_workspace_at(tc);
+        ProjectConfig::migrate_workspace_at(tc);
+
+        assert_eq!(
+            std::fs::read_to_string(tc.join("state/sessions/x.jsonl")).unwrap(),
+            "s"
+        );
+        assert_eq!(wv(tc), Some(2));
+    }
+
+    #[test]
+    fn migrate_presence_driven_does_not_clobber_existing_state() {
+        let dir = tempdir().unwrap();
+        let tc = dir.path();
+        // Both legacy and already-migrated sessions exist (partial state).
+        std::fs::create_dir_all(tc.join("sessions")).unwrap();
+        std::fs::write(tc.join("sessions/x.jsonl"), "LEGACY").unwrap();
+        std::fs::create_dir_all(tc.join("state/sessions")).unwrap();
+        std::fs::write(tc.join("state/sessions/x.jsonl"), "KEEP").unwrap();
+
+        ProjectConfig::migrate_workspace_at(tc);
+
+        // Target present → skipped; migrated copy preserved, not clobbered.
+        assert_eq!(
+            std::fs::read_to_string(tc.join("state/sessions/x.jsonl")).unwrap(),
+            "KEEP"
+        );
+    }
+
+    #[test]
+    fn migrate_gating_skips_when_already_v2() {
+        let dir = tempdir().unwrap();
+        let tc = dir.path();
+        std::fs::write(tc.join("settings.json"), r#"{"workspaceVersion":2}"#).unwrap();
+        // A stray legacy dir must be left untouched once v2 is declared.
+        std::fs::create_dir_all(tc.join("sessions")).unwrap();
+        std::fs::write(tc.join("sessions/x.jsonl"), "s").unwrap();
+
+        ProjectConfig::migrate_workspace_at(tc);
+
+        assert!(tc.join("sessions/x.jsonl").is_file(), "not moved when v2");
+        assert!(!tc.join("state/sessions").exists());
+        assert!(
+            tc.join("state/.gitignore").is_file(),
+            "scaffold still ensured"
+        );
+    }
+
+    #[test]
+    fn migrate_brand_new_is_noop() {
+        let dir = tempdir().unwrap();
+        let tc = dir.path().join("thclaws");
+        std::fs::create_dir_all(&tc).unwrap();
+
+        ProjectConfig::migrate_workspace_at(&tc);
+
+        assert!(
+            !tc.join("settings.json").exists(),
+            "no minting on empty dir"
+        );
+        assert!(!tc.join("state").exists());
+    }
+
+    #[test]
+    fn migrate_unparseable_settings_is_noop() {
+        let dir = tempdir().unwrap();
+        let tc = dir.path();
+        std::fs::write(tc.join("settings.json"), "{ this is not json").unwrap();
+        std::fs::create_dir_all(tc.join("sessions")).unwrap();
+        std::fs::write(tc.join("sessions/x.jsonl"), "s").unwrap();
+
+        ProjectConfig::migrate_workspace_at(tc);
+
+        assert!(
+            tc.join("sessions/x.jsonl").is_file(),
+            "no move on bad settings"
+        );
+        assert!(!tc.join("state").exists());
+        assert_eq!(
+            std::fs::read_to_string(tc.join("settings.json")).unwrap(),
+            "{ this is not json",
+            "bad settings left untouched"
+        );
+    }
+
+    #[test]
+    fn migrate_preserves_existing_settings_keys() {
+        let dir = tempdir().unwrap();
+        let tc = dir.path();
+        std::fs::write(
+            tc.join("settings.json"),
+            r#"{"_doc":"keep me","model":"x"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(tc.join("sessions")).unwrap();
+        std::fs::write(tc.join("sessions/x.jsonl"), "s").unwrap();
+
+        ProjectConfig::migrate_workspace_at(tc);
+
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(tc.join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(v["_doc"], "keep me");
+        assert_eq!(v["model"], "x");
+        assert_eq!(v["workspaceVersion"], 2);
+    }
+
+    #[test]
+    fn migrate_splits_legacy_workflows() {
+        let dir = tempdir().unwrap();
+        let tc = dir.path();
+        std::fs::create_dir_all(tc.join("workflows/wf-1")).unwrap();
+        std::fs::write(tc.join("workflows/run.js"), "// authored").unwrap();
+        std::fs::write(tc.join("workflows/wf-1/state.jsonl"), "{}").unwrap();
+
+        ProjectConfig::migrate_workspace_at(tc);
+
+        // Authored script → config tier; run-state → state/.
+        assert_eq!(
+            std::fs::read_to_string(tc.join("agent_workflow/run.js")).unwrap(),
+            "// authored"
+        );
+        assert!(tc.join("state/workflows/wf-1/state.jsonl").is_file());
+        // Seed copies the authored script into the runtime dir too.
+        assert_eq!(
+            std::fs::read_to_string(tc.join("state/workflows/run.js")).unwrap(),
+            "// authored"
+        );
+        assert!(!tc.join("workflows").exists(), "legacy dir removed");
+    }
+
+    #[test]
+    fn migrate_seeds_authored_workflows_on_v2_open() {
+        let dir = tempdir().unwrap();
+        let tc = dir.path();
+        std::fs::write(tc.join("settings.json"), r#"{"workspaceVersion":2}"#).unwrap();
+        std::fs::create_dir_all(tc.join("agent_workflow")).unwrap();
+        std::fs::write(tc.join("agent_workflow/run.js"), "// v2").unwrap();
+
+        ProjectConfig::migrate_workspace_at(tc);
+
+        assert_eq!(
+            std::fs::read_to_string(tc.join("state/workflows/run.js")).unwrap(),
+            "// v2"
+        );
     }
 }

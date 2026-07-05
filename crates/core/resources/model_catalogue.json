@@ -1312,6 +1312,13 @@
       "list_url": "https://api.minimax.io/v1/models",
       "default_context": 200000,
       "models": {
+        "minimax/speech-02-hd": {
+          "chat": false,
+          "kind": "tts",
+          "tts_price_per_kchar_usd": 0.15,
+          "source": "MiniMax T2A speech-02-hd; manual estimate — verify + manual:speech-02-hd",
+          "verified_at": "2026-07-05"
+        },
         "minimax/MiniMax-M2": {
           "context": 204800,
           "max_output": 131072,
@@ -2187,6 +2194,13 @@
       "list_url": "https://api.openai.com/v1/models",
       "default_context": 128000,
       "models": {
+        "gpt-4o-mini-tts": {
+          "chat": false,
+          "kind": "tts",
+          "tts_price_per_kchar_usd": 0.015,
+          "source": "OpenAI TTS char-rate basis (tts-1 tier); manual estimate — verify + manual:gpt-4o-mini-tts",
+          "verified_at": "2026-07-05"
+        },
         "gpt-3.5-turbo": {
           "context": 16385,
           "max_output": 4096,

@@ -1,8 +1,8 @@
 # OpenAI Chat Completions provider
 
-`OpenAIProvider` (`providers/openai.rs`, 1429 LOC) speaks the OpenAI Chat Completions SSE format. It's the workhorse: **9 of 17 `ProviderKind` variants** route to this single impl with different URL/auth/prefix-strip configurations. The provider was deliberately built with a configuration knob design (`with_base_url` + `with_strip_model_prefix` + `with_api_key_header` + `with_list_models_url`) so adding a new OpenAI-compat aggregator is a `match` arm in `build_provider` rather than a new file.
+`OpenAIProvider` (`providers/openai.rs`, 1429 LOC) speaks the OpenAI Chat Completions SSE format. It's the workhorse: **16 of the 25 `ProviderKind` variants** route to this single impl with different URL/auth/prefix-strip configurations. The provider was deliberately built with a configuration knob design (`with_base_url` + `with_strip_model_prefix` + `with_api_key_header` + `with_list_models_url`) so adding a new OpenAI-compat aggregator is a `match` arm in `build_provider` rather than a new file.
 
-The 9 variants: `OpenAI` (api.openai.com), `OpenRouter`, `AgenticPress`, `DashScope`, `ZAi`, `LMStudio`, `OpenAICompat`, `DeepSeek`, `ThaiLLM`.
+The 16 variants: `OpenAI` (api.openai.com), `OpenRouter`, `TokenRouter`, `DashScope`, `QwenCloud`, `ZAi`, `LMStudio`, `OpenAICompat`, `DeepSeek`, `ThaiLLM`, `Nvidia`, `Minimax`, `Moonshot`, `XAi`, `Groq`, `OpenCodeGo`.
 
 **Source:** `crates/core/src/providers/openai.rs`
 **Constants:**
@@ -89,7 +89,7 @@ pub struct OpenAIProvider {
     client: Client,
     api_key: String,
     base_url: String,                       // defaults to DEFAULT_API_URL
-    strip_model_prefix: Option<String>,     // e.g. "openrouter/" / "ap/" / "zai/"
+    strip_model_prefix: Option<String>,     // e.g. "openrouter/" / "moonshot/" / "zai/"
     api_key_header: Option<String>,         // None → "authorization" with "Bearer {key}"
     list_models_url: Option<String>,        // override for non-derived /models path
     model_override: Option<String>,         // replace req.model before wire (openrouter/fusion+ → outer; §7)
@@ -138,7 +138,6 @@ if let Some(prefix) = &self.strip_model_prefix {
 
 Mutates `req.model` before serializing. As of v0.61.0 the actual call is `strip_wire_prefix(&req.model, …)`, which guards the OpenRouter vendor collision (`openrouter/fusion` / `openrouter/auto` keep their id — see §7). Configured per-variant:
 - `OpenRouter` → `openrouter/`
-- `AgenticPress` → `ap/`
 - `ZAi` → `zai/`
 - `LMStudio` → `lmstudio/`
 - `OpenAICompat` → `oai/`
@@ -283,7 +282,7 @@ async fn list_models(&self) -> Result<Vec<ModelInfo>> {
 
 URL transform: replaces `/chat/completions` with `/models`. Override via `with_list_models_url` for backends where this doesn't work.
 
-**Prefix re-application:** when a `strip_model_prefix` is configured, the listing prepends it back so users can paste IDs straight into `/model`. E.g. AgenticPress's `/v1/models` returns `gemma4-12b`; the listing surfaces `ap/gemma4-12b` so `/model ap/gemma4-12b` round-trips through `detect()` correctly.
+**Prefix re-application:** when a `strip_model_prefix` is configured, the listing prepends it back so users can paste IDs straight into `/model`. E.g. Moonshot`s `/v1/models` returns `kimi-k2.6`; the listing surfaces `moonshot/kimi-k2.6` so `/model moonshot/kimi-k2.6` round-trips through `detect()` correctly.
 
 ---
 
@@ -369,16 +368,6 @@ if config.model == crate::config::FUSION_PLUS_MODEL {
 - **`tool_choice`** — `FusionConfig::tool_choice_value()` returns `Some(json!("required"))` only for the `required` setting; `auto` is OpenRouter's default and is omitted.
 
 `FusionConfig` (`config.rs`, `settings.json` key `openrouterFusion`, camelCase fields: `outerModel`, `analysisModels[1–8]`, `judgeModel`, `maxToolCalls`, `maxCompletionTokens`, `temperature`, `reasoning`, `toolChoice`) lives on both `AppConfig` (always present, defaulted) and `ProjectConfig` (optional overlay). IPC round-trips it via `fusion_config_get` / `fusion_config_set` (`ipc.rs`), which the GUI's fusion config modal opens when the user picks `openrouter/fusion+`. The catalogue entry is pinned in `refresh-model-catalogue.py` (`PROVIDERS["openrouter"]["pin"]`) so auto-prune doesn't delete the pseudo-id (it has no upstream `/v1/models` row).
-
-### `AgenticPress`
-
-```rust
-OpenAIProvider::new(api_key)
-    .with_base_url("https://llm.artech.cloud/v1/chat/completions")
-    .with_strip_model_prefix("ap/")
-```
-
-Hosted gateway; URL is fixed (no env override). Models look like `ap/gemma4-12b`.
 
 ### `DashScope`
 

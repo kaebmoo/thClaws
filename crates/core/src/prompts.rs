@@ -658,7 +658,7 @@ pub(crate) fn team_grounding_prompt(model: &str, team_enabled: bool) -> String {
              `Agent`, `TodoWrite`, `AskUserQuestion`, `ToolSearch`, \
              `SendMessage` built-ins backed by `~/.claude/teams/` and \
              `~/.claude/tasks/`. DO NOT CALL THEM. Their state is invisible \
-             to thClaws — the Team tab polls `.thclaws/team/agents/` locally \
+             to thClaws — the Team tab polls `.thclaws/state/team/agents/` locally \
              and will never see an SDK-created team, so the user gets a \
              fabricated success story with nothing behind it.\n\n\
              If the user asks you to \"create a team\" / \"spawn agents\" / \
@@ -682,7 +682,7 @@ pub(crate) fn team_grounding_prompt(model: &str, team_enabled: bool) -> String {
          parallel work via a team, use ONLY these thClaws tools — they are the \
          canonical implementation and their state is visible in the Team tab:\n\n\
          - `TeamCreate` — define a team (name + member agents with roles/prompts). \
-         Writes `.thclaws/team/config.json` in the current project root.\n\
+         Writes `.thclaws/state/team/config.json` in the current project root.\n\
          - `SpawnTeammate` — start one named teammate. Spawns a thClaws subprocess \
          that polls its inbox in a tmux pane (or background).\n\
          - `SendMessage` — deliver a message to a teammate's inbox.\n\
@@ -692,7 +692,7 @@ pub(crate) fn team_grounding_prompt(model: &str, team_enabled: bool) -> String {
          a shared task queue teammates can claim from.\n\
          - `TeamMerge` — (lead only) merge each teammate's git worktree back into \
          the main branch.\n\n\
-         Team state lives under `.thclaws/team/` **in the current project root** — \
+         Team state lives under `.thclaws/state/team/` **in the current project root** — \
          NOT under `~/.claude/teams/`, NOT under `~/.claude/tasks/`. Do not reference \
          those paths; they are from a different product.\n\n\
          You are the team **lead**. After `TeamCreate`:\n\
@@ -724,7 +724,7 @@ pub(crate) fn team_grounding_prompt(model: &str, team_enabled: bool) -> String {
          workspace mean the thClaws versions — never the SDK's.\n\
          - Never reference `~/.claude/teams/`, `~/.claude/tasks/`, or \
          `~/.config/thclaws/teams/` paths in your replies. Teams live in \
-         `.thclaws/team/`.\n\
+         `.thclaws/state/team/`.\n\
          - Do not call `AskUserQuestion`, `TodoWrite`, `ToolSearch`, or a bare \
          `Agent` tool. Those belong to Claude Code's interactive flow and do \
          not exist in thClaws. If you need a task list, use `TeamTaskCreate`. \
@@ -741,7 +741,7 @@ pub(crate) fn team_grounding_prompt(model: &str, team_enabled: bool) -> String {
              which ships its own `TeamCreate`, `Agent`, `AskUserQuestion`, \
              `TodoWrite`, and `ToolSearch` built-ins. Calling them will appear \
              to succeed inside Claude Code's own world, but the thClaws Team \
-             tab polls `.thclaws/team/agents/` and will never see a team \
+             tab polls `.thclaws/state/team/agents/` and will never see a team \
              created that way. Treat any impulse to call those tools as a bug.\n",
         );
     }
@@ -1203,7 +1203,7 @@ mod tests {
         // directive is now unconditional and front-loaded.
         let s = defaults::SYSTEM;
         assert!(
-            s.contains(".thclaws/todos.md"),
+            s.contains(".thclaws/state/todos.md"),
             "system prompt must name the todos file path",
         );
         assert!(

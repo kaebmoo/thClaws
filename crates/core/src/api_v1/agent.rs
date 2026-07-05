@@ -403,7 +403,10 @@ fn resolve_session(
     session_id: Option<&str>,
     model: &str,
 ) -> Result<(crate::session::Session, crate::session::SessionStore), Response> {
-    let store_root = workspace_dir.join(".thclaws").join("sessions");
+    let store_root = workspace_dir
+        .join(".thclaws")
+        .join("state")
+        .join("sessions");
     let store = crate::session::SessionStore::new(store_root);
     match session_id.map(str::trim).filter(|s| !s.is_empty()) {
         Some(id) => match store.load(id) {
@@ -576,7 +579,7 @@ mod tests {
         // then resolve with that id — should return the persisted session,
         // not mint a fresh one.
         let dir = tempfile::tempdir().unwrap();
-        let store_root = dir.path().join(".thclaws").join("sessions");
+        let store_root = dir.path().join(".thclaws").join("state").join("sessions");
         std::fs::create_dir_all(&store_root).unwrap();
         let store = crate::session::SessionStore::new(store_root);
         let mut seed =

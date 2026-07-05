@@ -99,6 +99,9 @@ async fn main() {
     }
 
     let cli = Cli::parse();
+    // Workspace layout migration (v1 flat → v2 `state/`) before any
+    // config load resolves project paths. No-op once migrated.
+    thclaws_core::config::ProjectConfig::migrate_workspace_if_needed();
     let mut config = match AppConfig::load() {
         Ok(c) => c,
         Err(e) => {
@@ -135,7 +138,7 @@ async fn main() {
 
     // Team agent mode.
     if let Some(ref agent_name) = cli.team_agent {
-        let team_dir = cli.team_dir.as_deref().unwrap_or(".thclaws/team");
+        let team_dir = cli.team_dir.as_deref().unwrap_or(".thclaws/state/team");
         std::env::set_var("THCLAWS_TEAM_AGENT", agent_name);
         std::env::set_var("THCLAWS_TEAM_DIR", team_dir);
     }

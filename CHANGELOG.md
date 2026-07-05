@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.87.0] — 2026-07-05
+
+Movie Maker polish and a cleaner model list, on top of a full pass to make the manuals match the code.
+
+### Added
+- **Movie Maker: a running budget ceiling.** `FilmGenerate` already refused to start a film that costs more than the `budgetUsd` you confirmed; now it also stops *mid-render* before the next shot once actual spend passes that budget — so per-shot overruns can't quietly blow past your cap. Already-rendered shots are kept; raise the budget and resume to continue.
+
+### Changed
+- **`codex/` models are hidden from the model picker.** The `codex/` (OpenAI Responses) models don't work through the hosted gateway and overlap the plain `gpt-5-codex` rows, so they no longer clutter the picker. Routing still works if you type `/model codex/<id>` explicitly.
+- **Documentation refresh.** The user manual (EN + TH) and the technical manual were audited against the current code and updated end-to-end — the provider list (now 25 providers; Agentic Press removed), the GUI-shell bridge, gateway metering, cloud visibility (public/unlisted/private), and the built-in tools. New chapters cover **Movie Maker / FilmScript**.
+
+### Fixed
+- **Movie Maker TTS is billed, not bypassed.** Gemini / OpenAI / MiniMax text-to-speech in the film pipeline now route through the metered gateway (or fail closed) instead of calling the provider directly, so hosted narration is attributed and billed correctly.
+- **`WatchVideo` and `FilmAssetImport` now ask before running.** Watching a clip runs a paid transcription, and asset import writes up to 30 MB — both now prompt for approval like other spend/side-effecting tools.
+- **Generated media is per-user in shared workspaces.** Images/videos land under your own workspace folder instead of a shared `output/`.
+
 ## [0.86.0] — 2026-07-05
 
 Custom GUI shells graduate to first-class apps: they can approve tool calls in their own UI, stream a turn event-by-event, upload files, and store data — and the catalog now shows exactly what a shell can do before you install it. Plus a fix for `agent/*` models failing when thClaws is opened from the Dock.

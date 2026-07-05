@@ -80,7 +80,7 @@ pub struct AgentDef {
     /// (writes anywhere the parent permits). When non-empty, the file-write
     /// tools (Write/Edit/office create+edit) refuse a target outside these
     /// globs — mechanical write-scoping instead of a prompt promise. Globs
-    /// are workspace-relative (e.g. `.thclaws/kms/**`). NOTE: this scopes
+    /// are workspace-relative (e.g. `.thclaws/state/kms/**`). NOTE: this scopes
     /// the file-write tools, not `Bash`; a writer that also has Bash can
     /// still write via the shell.
     #[serde(default)]
@@ -1153,7 +1153,7 @@ new instructions
             permission_mode: Some("auto".into()),
             output_schema: Some(serde_json::json!({"type": "object"})),
             input_schema: None,
-            write_paths: vec![".thclaws/kms/**".into()],
+            write_paths: vec![".thclaws/state/kms/**".into()],
         };
         let md = def.to_markdown();
         let parsed = AgentDefsConfig::parse_agent_md_str(&md, "fallback", None).unwrap();
@@ -1173,7 +1173,10 @@ new instructions
             Some(serde_json::json!({"type": "object"}))
         );
         // 47.2: writePaths round-trips.
-        assert_eq!(parsed.write_paths, vec![".thclaws/kms/**".to_string()]);
+        assert_eq!(
+            parsed.write_paths,
+            vec![".thclaws/state/kms/**".to_string()]
+        );
         assert!(parsed.instructions.contains("Flag issues."));
     }
 

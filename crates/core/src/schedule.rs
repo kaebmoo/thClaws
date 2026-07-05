@@ -432,6 +432,7 @@ fn spawn_job(schedule: &Schedule, binary_path: &Path) -> Result<RunOutcome> {
     let result_dir = schedule
         .cwd
         .join(".thclaws")
+        .join("state")
         .join("schedule")
         .join(&schedule.id);
     std::fs::create_dir_all(&result_dir)?;
@@ -1829,7 +1830,7 @@ mod tests {
         assert!(
             outcome
                 .result_path
-                .starts_with(work.path().join(".thclaws").join("schedule")),
+                .starts_with(work.path().join(".thclaws").join("state").join("schedule")),
             "result must be saved in the workspace; got: {}",
             outcome.result_path.display()
         );
@@ -2013,7 +2014,7 @@ mod tests {
         // Pre-create the .thclaws directory so the file write below
         // is observed as a child of an existing dir (some platforms
         // emit different events for create-dir vs create-in-dir).
-        let thclaws_dir = work.path().join(".thclaws").join("sessions");
+        let thclaws_dir = work.path().join(".thclaws").join("state").join("sessions");
         std::fs::create_dir_all(&thclaws_dir).unwrap();
 
         let store_dir = tempfile::tempdir().unwrap();

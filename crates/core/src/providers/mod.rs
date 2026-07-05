@@ -1207,6 +1207,14 @@ pub async fn build_all_models_payload() -> String {
     let mut groups: Vec<(u32, serde_json::Value)> = Vec::new();
     for (all_idx, kind) in ProviderKind::ALL.iter().enumerate() {
         let name = kind.name();
+        // Hide `codex/` (OpenAIResponses) from the picker for now: it 401s in
+        // hosted pods (no gateway overlay yet — metering-audit follow-up) and
+        // overlaps the plain openai `gpt-5-codex` rows + the `chatgpt-codex/`
+        // subscription path. Routing still works via an explicit
+        // `/model codex/<id>`; this only drops it from the listed options.
+        if matches!(kind, ProviderKind::OpenAIResponses) {
+            continue;
+        }
         // Hosted multiuser pods have NO BYOK — a non-routable provider or an
         // unpriced model can't be served there, so hide them. On desktop we
         // show EVERYTHING (BYOK works for any model) and tag each row with
@@ -1358,6 +1366,19 @@ pub fn preferred_default_model(cfg: &crate::config::AppConfig) -> Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // `codex/` (OpenAIResponses) models are hidden from the cross-provider
+    // picker (they 401 in hosted + overlap plain openai codex rows). The
+    // catalogue's `openai-responses` block keys are `codex/gpt-5-codex` etc.,
+    // so a regression that drops the filter would resurface `codex/` here.
+    #[tokio::test]
+    async fn picker_hides_codex_openai_responses_models() {
+        let payload = build_all_models_payload().await;
+        assert!(
+            !payload.contains("codex/gpt-5"),
+            "codex/ (OpenAIResponses) models must not appear in the model picker payload"
+        );
+    }
 
     #[test]
     fn accumulate_sums_all_token_fields_including_reasoning() {

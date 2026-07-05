@@ -492,7 +492,7 @@ mod tests {
         write(&src, "a.txt", "hello");
         write(&src, "sub/b.md", "world");
         write(&src, ".thclaws/settings.json", "{}");
-        write(&src, ".thclaws/sessions/x.jsonl", "RUNTIME"); // stripped
+        write(&src, ".thclaws/state/sessions/x.jsonl", "RUNTIME"); // stripped
         let bytes = tar_workspace(&src, false).unwrap();
         let dst = tmp("dst");
         let r = untar_workspace(&bytes, &dst, false).unwrap();
@@ -503,7 +503,7 @@ mod tests {
             "world"
         );
         assert!(
-            !dst.join(".thclaws/sessions/x.jsonl").exists(),
+            !dst.join(".thclaws/state/sessions/x.jsonl").exists(),
             "runtime must be stripped"
         );
     }

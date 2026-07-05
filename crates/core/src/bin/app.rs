@@ -817,6 +817,14 @@ async fn main() {
     // the doomed parent. See `respawn_detached_for_gui_if_needed`.
     respawn_detached_for_gui_if_needed(&cli);
 
+    // Workspace layout migration (v1 flat → v2 `state/`): relocate any
+    // legacy runtime dirs under `.thclaws/state/` and seed authored
+    // workflows. Runs BEFORE the default-settings bootstrap so a legacy
+    // workspace (runtime dirs, no settings.json) is detected as legacy
+    // rather than freshly stamped v2. No-op on already-migrated or
+    // multiuser workspaces.
+    thclaws_core::config::ProjectConfig::migrate_workspace_if_needed();
+
     // First-run bootstrap: drop a `.thclaws/settings.json` with model +
     // permissions defaults into the project so users get a working
     // config the first time they `cd` in. Skipped if a config already
@@ -1068,7 +1076,7 @@ async fn main() {
         config.max_iterations = n;
     }
     if let Some(ref agent_name) = cli.team_agent {
-        let team_dir = cli.team_dir.as_deref().unwrap_or(".thclaws/team");
+        let team_dir = cli.team_dir.as_deref().unwrap_or(".thclaws/state/team");
         std::env::set_var("THCLAWS_TEAM_AGENT", agent_name);
         std::env::set_var("THCLAWS_TEAM_DIR", team_dir);
     }
@@ -1239,7 +1247,7 @@ async fn run_agent_subcommand(cmd: AgentCmd) -> i32 {
             let wf = match workflow {
                 Some(w) => w,
                 None => {
-                    let wfdir = path.join(".thclaws/workflows");
+                    let wfdir = path.join(".thclaws/state/workflows");
                     let js: Vec<std::path::PathBuf> = std::fs::read_dir(&wfdir)
                         .into_iter()
                         .flatten()
@@ -1248,11 +1256,11 @@ async fn run_agent_subcommand(cmd: AgentCmd) -> i32 {
                         .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("js"))
                         .collect();
                     match js.len() {
-                        1 => std::path::Path::new(".thclaws/workflows")
+                        1 => std::path::Path::new(".thclaws/state/workflows")
                             .join(js[0].file_name().unwrap()),
                         0 => {
                             eprintln!(
-                                "✗ no .thclaws/workflows/*.js in {} — pass --workflow",
+                                "✗ no .thclaws/state/workflows/*.js in {} — pass --workflow",
                                 path.display()
                             );
                             return 1;

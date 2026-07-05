@@ -99,7 +99,7 @@ impl Tool for WorkflowRunTool {
          decomposable into N parallel side-quests; for one-off side \
          queries use the Subagent (`Task`) tool instead. To run a \
          PRE-AUTHORED workflow file shipped with an agent (e.g. \
-         `.thclaws/workflows/draft-all-parallel.js`), pass `script_path` \
+         `.thclaws/state/workflows/draft-all-parallel.js`), pass `script_path` \
          instead of `prompt` — the file executes verbatim, no authoring."
     }
 
@@ -119,7 +119,7 @@ impl Tool for WorkflowRunTool {
                     "description": "Workspace-relative path to a pre-authored workflow .js \
                                     file to execute verbatim (skips the authoring step). \
                                     Use for agent-shipped workflows, e.g. \
-                                    '.thclaws/workflows/draft-all-parallel.js'."
+                                    '.thclaws/state/workflows/draft-all-parallel.js'."
                 },
                 "args": {
                     "description": "Structured input exposed to the script as the global \

@@ -4,7 +4,7 @@
 //! contents and a `log.md` change history. Two scopes:
 //!
 //! - **User**: `~/.config/thclaws/kms/<name>/`
-//! - **Project**: `.thclaws/kms/<name>/`
+//! - **Project**: `.thclaws/state/kms/<name>/`
 //!
 //! Users mark any subset of KMS as "active" in `.thclaws/settings.json`'s
 //! `kms.active` array. When a chat turn runs, each active KMS's
@@ -198,7 +198,7 @@ fn user_root() -> Option<PathBuf> {
 fn project_root() -> PathBuf {
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
-        .join(".thclaws/kms")
+        .join(".thclaws/state/kms")
 }
 
 fn scope_root(scope: KmsScope) -> Option<PathBuf> {

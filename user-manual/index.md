@@ -37,6 +37,7 @@ teams.
 | 26 | [GUI Shells](ch26-gui-shells.md) |
 | 27 | [thClaws.cloud (catalog + hosted + gateway)](ch27-thclaws-cloud.md) |
 | 28 | [Browser automation](ch28-browser-automation.md) |
+| 29 | [Movie Maker (AI film from a screenplay)](ch29-movie-maker.md) |
 
 > **Part II — Case studies (chapters 29–31)** — applied walkthroughs
 > for building real projects with thClaws (static sites, Node.js apps,

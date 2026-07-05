@@ -1427,15 +1427,15 @@ mod tests {
                 Ok("wrote".into())
             }
         }
-        let set = build_write_globset(&[".thclaws/kms/**".to_string()]).unwrap();
+        let set = build_write_globset(&[".thclaws/state/kms/**".to_string()]).unwrap();
         let scoped = PathScopedWriteTool {
             inner: Arc::new(OkWrite),
             globs: Arc::new(set),
-            patterns: vec![".thclaws/kms/**".into()],
+            patterns: vec![".thclaws/state/kms/**".into()],
         };
         // Inside the allow-list → delegates to the inner tool.
         let ok = scoped
-            .call(json!({"path": ".thclaws/kms/ai/page.md", "content": "x"}))
+            .call(json!({"path": ".thclaws/state/kms/ai/page.md", "content": "x"}))
             .await
             .unwrap();
         assert_eq!(ok, "wrote");

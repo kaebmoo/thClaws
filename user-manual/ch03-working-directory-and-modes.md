@@ -176,7 +176,7 @@ LINE / browser bridge built on top of `--serve`.
     --port N                 port for --serve mode (default 8443)
     --bind ADDR              bind address for --serve (default 127.0.0.1; 0.0.0.0 needs auth)
     --gui                    open desktop window (compose with --serve to attach to same engine)
--m, --model MODEL            override the model (e.g. claude-sonnet-4-6, ap/gemma4-26b)
+-m, --model MODEL            override the model (e.g. claude-sonnet-4-6, moonshot/kimi-k2.6)
     --accept-all             auto-approve every tool call (dangerous — see ch5)
     --permission-mode MODE   auto | ask
     --max-iterations N       max agent loop iterations per turn (0 = unlimited, default 200)

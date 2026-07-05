@@ -169,7 +169,7 @@ dedicated bullet below and [Chapter 27](ch27-thclaws-cloud.md):
   Code auth), OpenAI (Chat Completions + Responses/Codex), Google
   Gemini & Gemma, Alibaba DashScope (Qwen), DeepSeek, Z.ai (GLM Coding
   Plan), NVIDIA NIM, NSTDA Thai LLM (OpenThaiGPT, Typhoon, Pathumma,
-  THaLLE), OpenRouter, Agentic Press, Azure AI Foundry, Ollama (local,
+  THaLLE), OpenRouter, Moonshot, xAI, Groq, Azure AI Foundry, Ollama (local,
   local Anthropic-compatible, and Ollama Cloud), LMStudio, plus a
   generic **OpenAI-compatible** slot (`oai/*`) for LiteLLM / Portkey /
   Helicone / vLLM / internal proxies — auto-detected by model name
@@ -290,7 +290,7 @@ dedicated bullet below and [Chapter 27](ch27-thclaws-cloud.md):
 - A supported OS: macOS (arm64 or x86_64), Linux (arm64 or x86_64), or
   Windows (arm64 or x86_64).
 - At least one LLM API key — Anthropic, OpenAI, Gemini, OpenRouter,
-  Agentic Press, DashScope, DeepSeek, Z.ai, NVIDIA NIM, NSTDA Thai LLM,
+  Moonshot, xAI, Groq, DashScope, DeepSeek, Z.ai, NVIDIA NIM, NSTDA Thai LLM,
   or Azure AI Foundry. (Or a local Ollama / LMStudio install if you'd
   rather stay offline.)
 
