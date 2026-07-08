@@ -1,7 +1,7 @@
 {
   "schema": 4,
   "source": "baseline 2026-06-10 — pricing synced from LiteLLM (github.com/BerriAI/litellm)",
-  "fetched_at": "2026-07-05T00:00:00Z",
+  "fetched_at": "2026-07-09T00:00:00Z",
   "providers": {
     "anthropic": {
       "list_url": "https://api.anthropic.com/v1/models",
@@ -3000,26 +3000,6 @@
           "chat": true,
           "input_per_mtok": 2.0,
           "output_per_mtok": 8.0
-        },
-        "aion-labs/aion-1.0": {
-          "context": 131072,
-          "max_output": 32768,
-          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-06-10",
-          "free": false,
-          "chat": true,
-          "input_per_mtok": 4.0,
-          "output_per_mtok": 8.0
-        },
-        "aion-labs/aion-1.0-mini": {
-          "context": 131072,
-          "max_output": 32768,
-          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-06-10",
-          "free": false,
-          "chat": true,
-          "input_per_mtok": 0.7,
-          "output_per_mtok": 1.4
         },
         "aion-labs/aion-2.0": {
           "context": 131072,
@@ -7098,6 +7078,13 @@
           "input_per_mtok": 1.25,
           "output_per_mtok": 2.5
         },
+        "xai/grok-4.5": {
+          "context": 262144,
+          "source": "https://api.x.ai/v1/models + manual:grok-4.5",
+          "verified_at": "2026-07-09",
+          "input_per_mtok": 2.0,
+          "output_per_mtok": 6.0
+        },
         "xai/grok-build-0.1": {
           "context": 262144,
           "source": "https://api.x.ai/v1/models + manual:grok-build-0.1",
@@ -7301,6 +7288,11 @@
           "verified_at": "2026-06-22",
           "input_per_mtok": 0.435,
           "output_per_mtok": 0.87
+        },
+        "tokenrouter/dreamina-seedance-2-0-mini-hc": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-07-09"
         },
         "tokenrouter/ex/gpt-5.4": {
           "context": 128000,

@@ -1249,6 +1249,8 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 cwd: std::path::PathBuf::from(cwd),
                 prompt,
                 model,
+                // GUI modal doesn't expose heartbeat/resume yet — CLI-only.
+                resume_session: None,
                 max_iterations,
                 timeout_secs,
                 enabled,

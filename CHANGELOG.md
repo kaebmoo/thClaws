@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.88.0] — 2026-07-09
+
+Tutorial Studio ships as a first-party agent for building AI-native courses end-to-end, the engine gets a working hooks system alongside job artifacts and a full headless surface, and the research / book-author agents level up with cross-linked KMS pages, source caching, and optional chapter targets.
+
+### Added
+- **Tutorial Studio — a new first-party agent for building courses.** Tutorial Studio brings the full movie-maker pipeline into a GUI shell: title-addressed slide editing, AI-powered prose-to-slide drafting, provider-level TTS (Gemini / OpenAI / MiniMax / ElevenLabs) with per-slide voice selection, image generation with user-editable style rules and multi-reference images, batch image+voice gen across a deck, AI-generated slide video from Grok / Seedance / LTX / Veo, and a configurable `output.json` for media defaults. Async submit/poll keeps long video jobs out of Bash timeouts, and a generic background job runner handles the rest.
+- **Job Artifacts — Bearer-authenticated, session-scoped file transfer.** `JobArtifactUpload` and its read counterpart let agents pass tamper-proof files between workflow steps without leaving them in the workspace. Each artifact gets a signed token; the reader verifies the signature before accepting the payload.
+- **`-p` is now a full headless surface.** The `thclaws -p "prompt"` one-shot learned session heartbeats and `--resume-session`, so scheduled / cron-driven prompts share a single session and message history instead of starting cold every time.
+- **Research agent: cross-linked KMS pages with source caching.** Research splits findings into multiple cross-linked KMS pages instead of one monolithic output, caches fetched sources offline into `sources/` for later inspection (via the new `KmsWriteSource` tool), and surfaces a **Depth** control in the quick-actions row so you dial 2–6 research rounds for simple topics.
+- **Book Author: KMS ingest, export folder, and markdown rendering.** The book-author can now read a research agent's KMS as sources (`import-kms`, auto-run from `/sources-ingest`), export books as a self-contained folder (`--format folder`) for direct consumption by Tutorial Studio, render chapter markdown with full GFM support (tables, code blocks, lists), and skip `--target-words` / `--target-chapters` — the outline sizes small books itself.
+- **Book Author: per-chapter regen with live progress.** Each chapter gets a **Regen** button that re-drafts just that chapter using the currently selected model. Parallel drafting shows per-chapter live progress, and figures now appear inline at their reference point instead of being dumped at the chapter end.
+- **`KmsCreate` auto-attaches the new KMS to the active set.** Creating a KMS project now attaches it automatically so you can start writing immediately without the extra attach step.
+- **WorkflowRun: retry with error feedback and live progress streaming.** Subagent retries now feed the rejection reason back into the next attempt so the model can self-correct. WorkflowRun progress streams to the chat mid-run instead of appearing only when complete, and stderr lifecycle breadcrumbs make failures debuggable.
+- **`thc-split` — draggable pane splitters in shell UIs.** The engine ships a shared UI runtime component so any GUI shell can add resizable pane separators with a single custom element.
+- **HTTP Range support on file assets.** The built-in file server now supports range requests so video files stream with proper seeking instead of stuttering through buffered downloads.
+- **Agent Builder v0.2.0.** Wraps the native scaffolder, audits agents against the §0.5 / §4.6 meta-rules, and adds an optional GUI shell build phase.
+
+### Changed
+- **Book Author subagents are model-unpinned.** The outliner, fact-checker, and researcher subagents no longer force a specific model — they follow your active model selection, so you can draft with any provider.
+- **Research, Book Author, and Tutorial Studio share one KMS root.** All three agents now use `.thclaws/state/kms` as the canonical KMS path, so findings pass between agents without path mismatches.
+
+### Fixed
+- **Hooks in `settings.json` never fired.** The config deserializer was silently dropping the `hooks` block — no hook (before/after turns, file watchers, shell triggers) has ever run. They now deserialize and execute.
+- **`KmsWriteSource` was missing from 8 of 12 tool-registry sites.** The tool that lets research cache fetched sources now appears in every context where agents might call it.
+- **Book Author: bold-wrapped citation refs and extension mismatches.** Export now strips the padded bold from `**{cf:...}**` patterns so citations render clean, and chapter figure links no longer 404 when the file is `.png` but the link says `.jpg`.
+- **Research agent: planner resilience and multi-page fix.** The planner now retries on empty angle lists instead of ending the run, accepts bare JSON arrays from models that skip the `{subtopics}` wrapper (Qwen / GLM), and no longer collapses multi-page fetches or skips source caching. One excerpt-less source in a batch no longer fails the entire fetch.
+- **Research agent: budget and citation hygiene.** Output budgets scale properly for book-sized topics, uncited sources are trimmed from the final list, and KMS pages are actually persisted — a missing `KmsWrite` call meant prior runs wrote nothing.
+- **WorkflowRun: JSON-string args and gateway env for Bash children.** Args passed as a JSON string (as Qwen / GLM do) are now tolerated, and the engine re-injects resolved gateway environment into single-user Bash children so provider credentials reach tools launched from workflows.
+- **Content Extractor regression.** Articles save as `articles/<slug>/<slug>.md` (not `article.md`), restoring the per-article directory layout.
+
 ## [0.87.0] — 2026-07-05
 
 Movie Maker polish and a cleaner model list, on top of a full pass to make the manuals match the code.

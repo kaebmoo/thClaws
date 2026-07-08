@@ -887,7 +887,11 @@ impl Tool for KmsCreateTool {
             kref.name,
             scope.as_str(),
             kref.root.display(),
-            if activated { " · attached to active set" } else { "" }
+            if activated {
+                " · attached to active set"
+            } else {
+                ""
+            }
         ))
     }
 }

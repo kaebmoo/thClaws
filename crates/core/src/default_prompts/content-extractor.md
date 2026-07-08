@@ -41,10 +41,10 @@ Never download images by guessing filenames. Division of labour:
 - **Pasted text**: work from the prompt directly.
 
 Pick a short **kebab-case slug** from the title; put the article under
-`articles/<slug>/article.md` (create the folder). Save the raw input to
+`articles/<slug>/<slug>.md` (create the folder). Save the raw input to
 `articles/<slug>/source.*` when it's worth keeping for a re-run.
 
-### 2. Write `article.md`
+### 2. Write `<slug>.md`
 
 - Small front-matter: `title`, `source_url` (or file path / `pasted`),
   `author` / `published` when present, `clipped` (today).
@@ -59,7 +59,7 @@ Pick a short **kebab-case slug** from the title; put the article under
 ### 3. Localize the images — call `FetchImages`
 
 ```
-FetchImages({ markdown_path: "articles/<slug>/article.md", base_url: "<page url>" })
+FetchImages({ markdown_path: "articles/<slug>/<slug>.md", base_url: "<page url>" })
 ```
 
 - `base_url` is needed **only** if the page used relative image paths
@@ -68,11 +68,11 @@ FetchImages({ markdown_path: "articles/<slug>/article.md", base_url: "<page url>
   images need none.
 - Relay the returned counts (`found / downloaded / failed`); name failures
   (paywalled / hotlink-blocked CDNs) rather than papering over them. Re-runnable:
-  fix `article.md` and call again — already-local links are left alone.
+  fix `<slug>.md` and call again — already-local links are left alone.
 
 ### 4. Return
 
-Hand the caller a tight result: the `article.md` path, image count, and anything
+Hand the caller a tight result: the `<slug>.md` path, image count, and anything
 dropped (boilerplate) or that failed to fetch. Do NOT dump the whole article back
 into the response — the file is the artifact.
 

@@ -134,6 +134,33 @@ git hook หรือ pipeline ของ shell:
 git diff | thclaws -p "summarise this diff for a commit message"
 ```
 
+ตั้งแต่ **v0.88.0** `-p` เป็น headless แบบ *เต็มความสามารถ* — เท่า CLI
+แบบโต้ตอบ แค่ทีละหนึ่ง turn:
+
+- **Session ถูกบันทึก** ลง store ของ workspace
+  (`.thclaws/state/sessions/`) และ `--resume <id|last>` ต่อบทสนทนาเดิม
+  พร้อม history ครบ:
+
+  ```bash
+  thclaws -p "จำไว้: โค้ดเนมของ release คือ Falcon"
+  thclaws -p --resume last "โค้ดเนมของ release คืออะไร"   # → Falcon
+  ```
+
+  ใส่ `--no-session` ถ้าอยากได้พฤติกรรมเก่า (ไม่ทิ้งไฟล์) สำหรับ
+  script แบบ one-shot
+- **Subagent ใช้งานได้** — Task tool ถูก register แล้ว prompt ที่ต้อง
+  fan-out (pipeline วิจัย, `WorkflowRun`, งานหลายบทบาท) ทำงานเหมือนบน
+  GUI/CLI แทนที่ model จะ role-play ทุกบทบาทเองใน context เดียว
+- **Hooks ทำงาน** — hooks ใน `settings.json` ชุดเดียวกับทุกโหมด
+  (ดู[บทที่ 13](ch13-hooks.md))
+
+บรรทัดสถานะ (`[session] saved …`, tool trace) ออกทาง **stderr** —
+stdout ยังเป็นคำตอบสะอาดๆ pipe ได้เหมือนเดิม
+
+chain ของ `--resume` นี้คือกลไกเบื้องหลัง **heartbeat schedule** —
+งานประจำที่ต่อบทสนทนาเดียวโตขึ้นเรื่อยๆ แทนที่จะเริ่มจากศูนย์ทุกครั้ง
+ดู[บทที่ 19](ch19-scheduling.md#heartbeats)
+
 ![thClaws Non-Interactive Mode](../user-manual-img/ch-03/thclaws-non-interactive.png)
 
 ### `--serve` (HTTP/WebSocket server)

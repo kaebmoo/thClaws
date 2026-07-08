@@ -1,6 +1,6 @@
 //! `FetchImages` — download every remote image a markdown file references and
 //! rewrite the links to the local copies. The deterministic half of web/content
-//! extraction: the model writes `article.md` with images left as their original
+//! extraction: the model writes `<slug>.md` with images left as their original
 //! URLs, then calls this to localize them (dedupe by content, extension from the
 //! content-type, atomic link rewrite) — no hallucinated filenames, no silent
 //! skips. Gated behind the `content-extractor` subagent (which allow-lists it).

@@ -316,10 +316,7 @@ mod tests {
             json!({"query": "OKF", "kms": "okf"})
         );
         // stringified array likewise.
-        assert_eq!(
-            normalize_args(Value::String("[1,2]".into())),
-            json!([1, 2])
-        );
+        assert_eq!(normalize_args(Value::String("[1,2]".into())), json!([1, 2]));
         // deepseek: already an object → unchanged.
         assert_eq!(normalize_args(json!({"query": "x"})), json!({"query": "x"}));
         // a genuine plain-string arg is not JSON-object/array → left as-is.

@@ -4778,6 +4778,25 @@ fn persist_permission_mode_cli(mode: &str) -> &'static str {
 }
 
 pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> Result<()> {
+    run_print_mode_with(config, prompt, verbose, true).await
+}
+
+/// dev-plan/heartbeat: `-p` upgraded to a full headless surface — Task
+/// (subagents), session persist + `--resume`, and lifecycle hooks, matching
+/// REPL/GUI capability. Pre-upgrade `-p` had none of these: prompts that
+/// needed a subagent role-played it in one context (the "-p measures wrong"
+/// gotcha), every run was amnesiac, and hooks silently didn't fire. Sessions
+/// land in the same per-workspace store as the REPL so
+/// `thclaws -p --resume <id|last>` chains history across fires — the primitive
+/// `thclaws schedule --resume-session` heartbeats build on.
+/// `save_session=false` (`--no-session`) restores the old leave-no-trace
+/// behavior for one-shot scripting.
+pub async fn run_print_mode_with(
+    config: AppConfig,
+    prompt: &str,
+    verbose: bool,
+    save_session: bool,
+) -> Result<()> {
     let cwd = std::env::current_dir()?;
 
     let mut tool_registry = ToolRegistry::with_builtins();
@@ -4925,15 +4944,73 @@ pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> R
         PermissionMode::Ask
     };
 
-    // WorkflowRun: model-callable wrapper around `/workflow run`. Print
-    // mode doesn't register Subagent, so scripts that call
-    // `thclaws.subagent(...)` will error — fine, the model authors
-    // around it. Registered for surface-parity with REPL / GUI; rarely
-    // exercised in one-shot `-p` mode but it works when asked.
+    // Tool filtering MUST run before the Task factory snapshots the
+    // registry (same M6.33 SUB3 ordering as the REPL) — otherwise a
+    // parent forbidden from Bash could spawn a subagent that has it.
+    if let Some(ref allowed) = config.allowed_tools {
+        let allowed_set: std::collections::HashSet<&str> =
+            allowed.iter().map(|s| s.as_str()).collect();
+        let all_names: Vec<String> = tool_registry
+            .names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for name in all_names {
+            if !allowed_set.contains(name.as_str()) {
+                tool_registry.remove(&name);
+            }
+        }
+    }
+    if let Some(ref disallowed) = config.disallowed_tools {
+        for name in disallowed {
+            tool_registry.remove(name);
+        }
+    }
+
+    // dev-plan/heartbeat: `-p` now registers the subagent Task tool —
+    // same headless pattern as run_agent_workflow (AutoApprover sink;
+    // the permission MODE still gates what needs gating). Prompts that
+    // fan out (WorkflowRun pipelines, `Task(agent: …)`) behave like
+    // they do on every other surface instead of role-playing.
+    let hooks_arc = std::sync::Arc::new(config.hooks.clone());
+    let headless_approver: Arc<dyn crate::permissions::ApprovalSink> =
+        Arc::new(crate::permissions::AutoApprover);
+    let mut agent_defs =
+        crate::agent_defs::AgentDefsConfig::load_with_extra(&crate::plugins::plugin_agent_dirs());
+    agent_defs.apply_builtin_subagent_overrides(&config);
+    let factory_snapshot =
+        std::sync::Arc::new(std::sync::RwLock::new(crate::subagent::FactorySnapshot {
+            system: system.clone(),
+            tools: tool_registry.clone(),
+        }));
+    let factory = Arc::new(ProductionAgentFactory {
+        provider: provider.clone(),
+        snapshot: factory_snapshot,
+        model: config.model.clone(),
+        max_iterations: config.max_iterations,
+        max_depth: crate::subagent::DEFAULT_MAX_DEPTH,
+        max_tokens: config.max_tokens,
+        agent_defs: agent_defs.clone(),
+        approver: headless_approver,
+        permission_mode: perm_mode,
+        cancel: None,
+        hooks: Some(hooks_arc.clone()),
+    });
+    let subagent_arc: Arc<dyn crate::tools::Tool> = Arc::new(
+        SubAgentTool::new(factory)
+            .with_depth(0)
+            .with_agent_defs(agent_defs),
+    );
+    tool_registry.register(subagent_arc.clone());
+
+    // WorkflowRun: model-callable wrapper around `/workflow run`.
+    // `subagent_arc` is threaded in so scripts' `thclaws.subagent(...)`
+    // calls dispatch to the Task tool above (pre-upgrade `-p` passed
+    // None here and workflow subagent calls errored).
     tool_registry.register(Arc::new(crate::tools::WorkflowRunTool::new(
         provider.clone(),
         config.model.clone(),
-        None,
+        Some(subagent_arc),
     )));
 
     // Diagnostic run header → STDERR (the scheduler captures stderr into
@@ -4956,7 +5033,49 @@ pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> R
     let agent = Agent::new(provider, tool_registry, config.model.clone(), system)
         .with_max_iterations(config.max_iterations)
         .with_max_tokens(config.max_tokens)
-        .with_permission_mode(perm_mode);
+        .with_permission_mode(perm_mode)
+        .with_hooks(hooks_arc.clone());
+
+    // dev-plan/heartbeat: sessions in print mode. Same per-workspace store
+    // as the REPL; `--resume <id|last>` loads prior history so scheduled
+    // fires chain into one growing conversation. Notices go to STDERR —
+    // stdout stays the clean answer.
+    let session_store = if save_session {
+        SessionStore::default_path().map(SessionStore::new)
+    } else {
+        None
+    };
+    let mut session = Session::new(&config.model, cwd.to_string_lossy());
+    if let Some(ref resume_id) = config.resume_session {
+        if let Some(ref store) = session_store {
+            let loaded = if resume_id == "last" {
+                store.latest().ok().flatten()
+            } else {
+                store.load(resume_id).ok()
+            };
+            if let Some(s) = loaded {
+                agent.set_history(s.messages.clone());
+                // Rehydrate the provider-side session id (SDK provider
+                // resumes its server-side conversation) — same as the
+                // REPL's --resume path.
+                agent
+                    .provider()
+                    .set_provider_session_id(s.provider_session_id.clone());
+                session = s;
+                eprintln!(
+                    "[session] resumed {} ({} messages)",
+                    session.id,
+                    session.messages.len()
+                );
+            } else {
+                eprintln!("[session] not found: {resume_id} — starting fresh");
+            }
+        } else if save_session {
+            eprintln!("[session] no session store — --resume ignored");
+        } else {
+            eprintln!("[session] --no-session set — --resume ignored");
+        }
+    }
 
     let turn_start = std::time::Instant::now();
     // Live reasoning is shown only on a TTY. When piped (`-p | jq`) or
@@ -5038,6 +5157,20 @@ pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> R
                     last_was_thinking = false;
                 }
             }
+        }
+    }
+
+    // dev-plan/heartbeat: persist the turn so the next `-p --resume` (or a
+    // schedule with --resume-session) continues this conversation.
+    if let Some(ref store) = session_store {
+        session.sync(agent.history_snapshot());
+        let provider_sid = agent.provider().provider_session_id();
+        if provider_sid.is_some() {
+            session.provider_session_id = provider_sid;
+        }
+        match store.save(&mut session) {
+            Ok(_) => eprintln!("[session] saved {}", session.id),
+            Err(e) => eprintln!("[session] save failed: {e}"),
         }
     }
     Ok(())

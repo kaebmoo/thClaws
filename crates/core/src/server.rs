@@ -507,21 +507,31 @@ pub async fn run_with_engine(
             // ForwardAuth gates hosted runners (and the multiuser_auth layer
             // below covers multiuser pods); local --serve relies on
             // api_v1/loopback. push raises the body limit for the tarball.
-            .route("/workspace/sync/stat", get(sync_stat))
-            .route("/workspace/sync/pull", get(sync_pull))
-            .route(
-                "/workspace/sync/push",
-                post(sync_push).layer(DefaultBodyLimit::max(300 * 1024 * 1024)),
-            )
-            // P2 incremental: manifest diff + per-subset transfer/trash.
-            .route("/workspace/sync/manifest", get(sync_manifest))
-            .route(
-                "/workspace/sync/export",
-                post(sync_export).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
-            )
-            .route(
-                "/workspace/sync/trash",
-                post(sync_trash).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+            // job-artifacts Tier 1: `THCLAWS_SYNC_REQUIRE_AUTH=1` opts the
+            // whole sync group into the SAME Bearer policy as /v1 (the
+            // route_layer below), so an external orchestrator can use
+            // export/push holding only THCLAWS_API_TOKEN — no tunnel /
+            // ForwardAuth. Unset = classic trusted-network behavior,
+            // existing deployments unaffected.
+            .merge(
+                axum::Router::new()
+                    .route("/workspace/sync/stat", get(sync_stat))
+                    .route("/workspace/sync/pull", get(sync_pull))
+                    .route(
+                        "/workspace/sync/push",
+                        post(sync_push).layer(DefaultBodyLimit::max(300 * 1024 * 1024)),
+                    )
+                    // P2 incremental: manifest diff + per-subset transfer/trash.
+                    .route("/workspace/sync/manifest", get(sync_manifest))
+                    .route(
+                        "/workspace/sync/export",
+                        post(sync_export).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+                    )
+                    .route(
+                        "/workspace/sync/trash",
+                        post(sync_trash).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+                    )
+                    .route_layer(axum::middleware::from_fn(sync_bearer_gate)),
             )
             .with_state(state)
             .merge(crate::api_v1::router())
@@ -789,7 +799,11 @@ fn build_shell_router(
                         let range = headers
                             .get(axum::http::header::RANGE)
                             .and_then(|v| v.to_str().ok());
-                        crate::gui_shell::serve::serve_project_asset(workspace.as_ref(), &rel, range)
+                        crate::gui_shell::serve::serve_project_asset(
+                            workspace.as_ref(),
+                            &rel,
+                            range,
+                        )
                     }
                 },
             ),
@@ -1046,6 +1060,25 @@ async fn serve_index() -> impl IntoResponse {
 /// JSON body is free for the cloud reaper's pre-pause busy check: it GETs
 /// this in-cluster and skips pausing a pod with a turn in flight
 /// (defense-in-depth alongside the busy keepalive heartbeat).
+/// job-artifacts Tier 1: opt-in Bearer gate for `/workspace/sync/*`.
+/// `THCLAWS_SYNC_REQUIRE_AUTH=1` → every sync request must carry the same
+/// `Authorization: Bearer $THCLAWS_API_TOKEN` as `/v1`. Unset/other → pass
+/// through (the classic trusted-network / ForwardAuth / multiuser-HMAC model).
+async fn sync_bearer_gate(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let required = std::env::var("THCLAWS_SYNC_REQUIRE_AUTH")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if required {
+        if let Err(resp) = crate::api_v1::check_bearer_headers(req.headers()) {
+            return resp;
+        }
+    }
+    next.run(req).await
+}
+
 async fn serve_health() -> impl IntoResponse {
     axum::Json(serde_json::json!({
         "ok": true,
@@ -1101,7 +1134,9 @@ async fn serve_file_asset(
     headers: axum::http::HeaderMap,
 ) -> Response {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let range = headers.get(axum::http::header::RANGE).and_then(|v| v.to_str().ok());
+    let range = headers
+        .get(axum::http::header::RANGE)
+        .and_then(|v| v.to_str().ok());
     crate::gui_shell::serve::serve_project_asset(&cwd, &rel, range)
 }
 

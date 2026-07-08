@@ -655,6 +655,13 @@ pub struct ProjectConfig {
     pub model: Option<String>,
     /// Accepts "auto", "ask", or {"allow": [...], "deny": [...]}.
     pub permissions: Option<PermissionsConfig>,
+    /// Lifecycle hooks (ch13): shell snippets fired on agent events.
+    /// Was documented but never deserialized — the key silently dropped
+    /// here, so `config.hooks` stayed default() and no hook ever ran
+    /// (issue #180). `skip_serializing_if` keeps `save()`'s overlay from
+    /// stamping `"hooks": null` into settings files that don't use them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<crate::hooks::HooksConfig>,
     #[serde(rename = "maxTokens")]
     pub max_tokens: Option<u32>,
     #[serde(rename = "maxIterations")]
@@ -887,6 +894,7 @@ impl Default for ProjectConfig {
         Self {
             model: None,
             permissions: None,
+            hooks: None,
             max_tokens: None,
             max_iterations: None,
             plan_context_strategy: None,
@@ -1388,6 +1396,9 @@ impl ProjectConfig {
     pub fn apply_to(&self, config: &mut AppConfig) {
         if let Some(ref m) = self.model {
             config.model = crate::providers::ProviderKind::resolve_alias(m);
+        }
+        if let Some(ref h) = self.hooks {
+            config.hooks = h.clone();
         }
         if let Some(ref p) = self.permissions {
             config.permissions = p.mode().to_string();
@@ -2339,6 +2350,39 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #180: `hooks` in settings.json must reach `config.hooks`.
+    /// The key was documented (ch13) but ProjectConfig had no field for
+    /// it, so serde dropped it and hooks never fired.
+    #[test]
+    fn hooks_in_settings_json_reach_app_config() {
+        let raw = r#"{
+            "model": "claude-sonnet-4-6",
+            "hooks": {
+                "pre_tool_use": "echo pre >> /tmp/h.log",
+                "session_start": "echo start >> /tmp/h.log",
+                "fail_closed": false
+            }
+        }"#;
+        let pc: ProjectConfig = serde_json::from_str(raw).unwrap();
+        assert!(pc.hooks.is_some(), "hooks key must deserialize");
+        let mut cfg = AppConfig::default();
+        pc.apply_to(&mut cfg);
+        assert_eq!(
+            cfg.hooks.pre_tool_use.as_deref(),
+            Some("echo pre >> /tmp/h.log")
+        );
+        assert_eq!(
+            cfg.hooks.session_start.as_deref(),
+            Some("echo start >> /tmp/h.log")
+        );
+        assert!(cfg.hooks.any_configured());
+        // No hooks key → default stays (all None), nothing fires.
+        let pc2: ProjectConfig = serde_json::from_str(r#"{"model":"x"}"#).unwrap();
+        let mut cfg2 = AppConfig::default();
+        pc2.apply_to(&mut cfg2);
+        assert!(!cfg2.hooks.any_configured());
+    }
 
     #[test]
     fn legacy_gateway_use_for_migrates_to_proxy_flag() {

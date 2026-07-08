@@ -73,6 +73,10 @@ struct Cli {
     #[arg(long, alias = "continue")]
     resume: Option<String>,
 
+    /// Print mode: don't persist the session (pre-upgrade `-p` behavior)
+    #[arg(long)]
+    no_session: bool,
+
     /// Output format: text (default), stream-json
     #[arg(long, default_value = "text")]
     output_format: String,
@@ -550,6 +554,12 @@ enum ScheduleCmd {
         /// cwd's `.thclaws/settings.json` picks).
         #[arg(long)]
         model: Option<String>,
+        /// Heartbeat mode: chain every fire into ONE session (history
+        /// accumulates) instead of a fresh run each time. Use "last"
+        /// (recommended — resumes this cwd's most-recent session; the
+        /// first fire starts it) or an existing session id.
+        #[arg(long)]
+        resume_session: Option<String>,
         /// Per-job iteration cap.
         #[arg(long)]
         max_iterations: Option<usize>,
@@ -1112,7 +1122,10 @@ async fn main() {
             eprintln!("\x1b[31m--print requires a prompt argument\x1b[0m");
             std::process::exit(1);
         }
-        if let Err(e) = run_print_mode(config, &prompt, cli.verbose).await {
+        if let Err(e) =
+            thclaws_core::repl::run_print_mode_with(config, &prompt, cli.verbose, !cli.no_session)
+                .await
+        {
             eprintln!("\n\x1b[31merror: {e}\x1b[0m");
             std::process::exit(1);
         }
@@ -1459,6 +1472,7 @@ fn run_schedule_subcommand(cmd: ScheduleCmd) -> i32 {
             prompt,
             cwd,
             model,
+            resume_session,
             max_iterations,
             timeout,
             disabled,
@@ -1523,6 +1537,7 @@ fn run_schedule_subcommand(cmd: ScheduleCmd) -> i32 {
                 cwd: cwd_path,
                 prompt,
                 model,
+                resume_session,
                 max_iterations,
                 timeout_secs: if timeout == 0 { None } else { Some(timeout) },
                 enabled: !disabled,

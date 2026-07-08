@@ -49,6 +49,10 @@ struct Cli {
     #[arg(long, alias = "continue")]
     resume: Option<String>,
 
+    /// Print mode: don't persist the session
+    #[arg(long)]
+    no_session: bool,
+
     /// Output format: text (default), stream-json
     #[arg(long, default_value = "text")]
     output_format: String,
@@ -149,7 +153,10 @@ async fn main() {
             eprintln!("\x1b[31m--print requires a prompt argument\x1b[0m");
             std::process::exit(1);
         }
-        if let Err(e) = run_print_mode(config, &prompt, cli.verbose).await {
+        if let Err(e) =
+            thclaws_core::repl::run_print_mode_with(config, &prompt, cli.verbose, !cli.no_session)
+                .await
+        {
             eprintln!("\n\x1b[31merror: {e}\x1b[0m");
             std::process::exit(1);
         }
