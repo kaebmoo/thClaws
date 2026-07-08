@@ -334,6 +334,13 @@ pub fn unbind() -> Result<(), String> {
 
 /// `/cloud unbind` from inside a session. Same logic as [`unbind`]
 /// but returns lines for the SlashOutput stream instead of eprintln.
+/// `/cloud unbind` — blank the folder's bound agent UUID. This is the single
+/// "detach" operation and it serves both intents: afterwards a DIFFERENT agent
+/// can be `/cloud get`'d over this folder (the get guard treats an unbound
+/// folder as free — see the uuid check in `get_lines`), AND a `/cloud publish`
+/// with no bound uuid registers a NEW catalog entry (the backend mints a fresh
+/// uuid and writes it back) instead of trying to update the original — i.e. a
+/// fork. No separate `/cloud fork` needed; unbind + publish is the fork flow.
 pub fn unbind_lines() -> Vec<String> {
     let mut project = crate::config::ProjectConfig::load().unwrap_or_default();
     let prior = project
@@ -342,14 +349,17 @@ pub fn unbind_lines() -> Vec<String> {
         .and_then(|a| a.uuid.clone())
         .unwrap_or_default();
     if prior.is_empty() {
-        return vec!["Already unbound (no settings.json::agent.uuid).".to_string()];
+        return vec![
+            "Already unbound — `/cloud get <slug>` can replace this folder, or edit + `/cloud publish` for a new entry.".to_string(),
+        ];
     }
     project.clear_agent_uuid();
     if let Err(e) = project.save() {
         return vec![format!("/cloud unbind: write settings.json: {e}")];
     }
     vec![format!(
-        "✓ Cleared agent UUID ({}…). Next /cloud publish will create a new catalog entry.",
+        "✓ Detached agent {}… — folder is now unbound. `/cloud get <slug>` can replace it \
+         with a different agent, or edit + `/cloud publish` to fork it into a new catalog entry.",
         prior.chars().take(8).collect::<String>()
     )]
 }
@@ -473,13 +483,16 @@ async fn get_lines(
                 return lines;
             }
             None => {
+                // No bound UUID = no published agent to protect. The folder was
+                // either explicitly detached (`/cloud unbind`, which blanks the
+                // uuid) or hand-assembled; either way an explicit `/cloud get`
+                // is a clear intent to install here, so replace it. (The guard
+                // exists to stop clobbering a DIFFERENT bound agent — case 2 —
+                // not an unbound folder.)
                 lines.push(
-                    "/cloud get: refusing to overwrite. This folder has agent content \
-                     (AGENTS.md / manifest.json) but no bound UUID in .thclaws/settings.json. \
-                     Cd to an empty directory and run /cloud get again."
+                    "  Folder is unbound (no agent UUID) — replacing it with the downloaded agent."
                         .into(),
                 );
-                return lines;
             }
         }
     }

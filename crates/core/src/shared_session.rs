@@ -1392,6 +1392,7 @@ async fn run_worker(
     // M6.25 BUG #1: KmsWrite + KmsAppend make the LLM an active
     // wiki maintainer (not just a passive reader).
     tools.register(std::sync::Arc::new(crate::tools::KmsWriteTool));
+    tools.register(std::sync::Arc::new(crate::tools::KmsWriteSourceTool));
     tools.register(std::sync::Arc::new(crate::tools::KmsAppendTool));
     tools.register(std::sync::Arc::new(crate::tools::KmsDeleteTool));
     // KmsCreate bootstraps the dedicated `dreams` KMS used by
@@ -1703,11 +1704,16 @@ async fn run_worker(
         // GUI / --serve get the same engine as the worker's agent
         // (provider + model) plus the live Task tool so scripts'
         // `thclaws.subagent(...)` calls dispatch correctly.
-        tools.register(std::sync::Arc::new(crate::tools::WorkflowRunTool::new(
-            factory.provider.clone(),
-            config.model.clone(),
-            Some(subagent_arc),
-        )));
+        tools.register(std::sync::Arc::new(
+            crate::tools::WorkflowRunTool::new(
+                factory.provider.clone(),
+                config.model.clone(),
+                Some(subagent_arc),
+            )
+            // stream thclaws.log / subagent progress to the chat mid-run so a
+            // multi-minute workflow (research) isn't silent between call+result
+            .with_events_tx(events_tx.clone()),
+        ));
         factory
     };
     // Apply `disallowed_tools` to the main agent's registry. Until

@@ -139,7 +139,48 @@ pub fn serve_shell_index(shell: &ShellRef, ws_url: &str) -> Response<Body> {
 /// shell renders via `<img src="…/file-asset/output/abc.png">`. Path
 /// is validated via `Sandbox::check_in` rooted at the current
 /// workspace.
-pub fn serve_project_asset(workspace: &std::path::Path, rel: &str) -> Response<Body> {
+/// Read a file-asset honoring an optional HTTP `Range` header. Returns the
+/// body plus `Some((start, end, total))` when a range applied (→ 206). Only
+/// the requested slice is read from disk, and open-ended ranges (`bytes=N-`)
+/// are capped at 8 MB per response — media players see the shorter
+/// Content-Range and keep requesting, which is how progressive buffering
+/// works. Without this, a shell's <video> pulled whole chapter mp4s per
+/// request and playback stuttered.
+pub fn read_asset_maybe_range(
+    path: &std::path::Path,
+    range: Option<&str>,
+) -> std::io::Result<(Vec<u8>, Option<(u64, u64, u64)>)> {
+    use std::io::{Read, Seek, SeekFrom};
+    const OPEN_ENDED_CHUNK: u64 = 8 * 1024 * 1024;
+    let total = std::fs::metadata(path)?.len();
+    let parsed = range
+        .and_then(|h| h.strip_prefix("bytes="))
+        .and_then(|spec| {
+            let (s, e) = spec.split_once('-')?;
+            let start: u64 = s.trim().parse().ok()?;
+            let end: u64 = match e.trim() {
+                "" => (start + OPEN_ENDED_CHUNK - 1).min(total.saturating_sub(1)),
+                v => v.parse::<u64>().ok()?.min(total.saturating_sub(1)),
+            };
+            (start <= end && start < total).then_some((start, end))
+        });
+    match parsed {
+        Some((start, end)) => {
+            let mut f = std::fs::File::open(path)?;
+            f.seek(SeekFrom::Start(start))?;
+            let mut buf = vec![0u8; (end - start + 1) as usize];
+            f.read_exact(&mut buf)?;
+            Ok((buf, Some((start, end, total))))
+        }
+        None => Ok((std::fs::read(path)?, None)),
+    }
+}
+
+pub fn serve_project_asset(
+    workspace: &std::path::Path,
+    rel: &str,
+    range: Option<&str>,
+) -> Response<Body> {
     let decoded = match urlencoding::decode(rel) {
         Ok(s) => s.into_owned(),
         Err(_) => rel.to_string(),
@@ -173,8 +214,8 @@ pub fn serve_project_asset(workspace: &std::path::Path, rel: &str) -> Response<B
                 .expect("build 403");
         }
     };
-    let bytes = match std::fs::read(&resolved) {
-        Ok(b) => b,
+    let (bytes, range_meta) = match read_asset_maybe_range(&resolved, range) {
+        Ok(v) => v,
         Err(_) => {
             return Response::builder()
                 .status(StatusCode::NOT_FOUND)
@@ -183,13 +224,20 @@ pub fn serve_project_asset(workspace: &std::path::Path, rel: &str) -> Response<B
         }
     };
     let mime = mime_for_path(&resolved);
-    Response::builder()
+    let mut rb = Response::builder()
         .header(header::CONTENT_TYPE, HeaderValue::from_str(mime).unwrap())
+        .header(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"))
         .header(
             header::X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
-        )
-        .body(Body::from(bytes))
+        );
+    if let Some((start, end, total)) = range_meta {
+        rb = rb.status(StatusCode::PARTIAL_CONTENT).header(
+            header::CONTENT_RANGE,
+            HeaderValue::from_str(&format!("bytes {start}-{end}/{total}")).unwrap(),
+        );
+    }
+    rb.body(Body::from(bytes))
         .expect("build project-asset response")
 }
 

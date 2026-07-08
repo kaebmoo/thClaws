@@ -1238,7 +1238,7 @@ pub fn write_frontmatter(map: &std::collections::BTreeMap<String, String>, body:
 //
 // `KmsWrite` / `KmsAppend` tools and the `/kms file-answer` slash
 // command bypass `Sandbox::check_write` to land inside the KMS root
-// (project-scope `.thclaws/kms/.../pages/...` is otherwise blocked).
+// (project-scope `.thclaws/state/kms/.../pages/...` is otherwise blocked).
 // Same pattern as TodoWrite's intentional `.thclaws/todos.md` carve-
 // out: the path is computed from a validated KMS name + a validated
 // page name (no `..`, no path separators, no symlinks, must resolve

@@ -587,6 +587,77 @@ impl Tool for KmsWriteTool {
     }
 }
 
+/// Cache a fetched web source into a KMS's `sources/` directory (layer-1: the
+/// raw input, distinct from the synthesized `pages/`). Mirrors what the built-in
+/// `/research` pipeline does via `research::kms_writer::write_source`, so an
+/// agent-driven research workflow can leave the same offline provenance trail.
+pub struct KmsWriteSourceTool;
+
+#[async_trait]
+impl Tool for KmsWriteSourceTool {
+    fn name(&self) -> &'static str {
+        "KmsWriteSource"
+    }
+
+    fn description(&self) -> &'static str {
+        "Save a fetched web source into a knowledge base's `sources/` directory \
+         as an OFFLINE reference — KMS layer-1 (the raw input the synthesis \
+         stands on), separate from the LLM-authored `pages/`. Call once per cited \
+         source so the KMS holds both the note and its sources. The filename is a \
+         deterministic slug of the URL (same URL → same file; the latest fetch \
+         wins). In the page's `## Sources` list, link each entry to \
+         `../sources/<slug>.md` alongside the upstream URL so citations resolve \
+         to the local copy. Requires an existing KMS."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "kms":     {"type": "string", "description": "KMS name (must already exist — KmsCreate first)"},
+                "url":     {"type": "string", "description": "The source's upstream URL (also the filename slug)"},
+                "title":   {"type": "string", "description": "Human-readable source title"},
+                "content": {"type": "string", "description": "The fetched source text to cache offline (the substantive extracted content the LLM saw)"},
+                "index":   {"type": "integer", "description": "Optional [N] citation index this source has in the page"},
+                "query":   {"type": "string", "description": "Optional research query this fetch was for (provenance)"}
+            },
+            "required": ["kms", "url", "title", "content"]
+        })
+    }
+
+    fn requires_approval(&self, _input: &Value) -> bool {
+        true
+    }
+
+    async fn call(&self, input: Value) -> Result<String> {
+        let kms_name = req_str(&input, "kms")?;
+        let url = req_str(&input, "url")?;
+        let title = req_str(&input, "title")?;
+        let content = req_str(&input, "content")?;
+        let index = input.get("index").and_then(Value::as_u64).unwrap_or(0) as u32;
+        let query = input.get("query").and_then(Value::as_str).unwrap_or("");
+        crate::workflow::check_kms_write_capability(kms_name)?;
+        let Some(kref) = crate::kms::resolve(kms_name) else {
+            return Err(Error::Tool(format!(
+                "no KMS named '{kms_name}' (check /kms list)"
+            )));
+        };
+        deny_if_read_only(&kref)?;
+        let today = crate::research::kms_writer::today_str();
+        let path = crate::research::kms_writer::write_source(
+            kms_name, query, &today, index, title, url, content,
+        )?;
+        // Return the KMS-relative `sources/<file>` so the caller can link the
+        // page's ## Sources entry to `../sources/<file>` deterministically.
+        let rel = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|f| format!("sources/{f}"))
+            .unwrap_or_else(|| path.display().to_string());
+        Ok(format!("cached source → {rel} ({} bytes)", content.len()))
+    }
+}
+
 /// Inspect content's frontmatter for the `sources:` key. Returns a
 /// one-line warning when missing/empty so the KmsWrite caller can
 /// notice immediately. Frontmatter-free pages are exempt (legacy /
@@ -794,11 +865,29 @@ impl Tool for KmsCreateTool {
             }
         };
         let kref = crate::kms::create(name, scope)?;
+        // Auto-attach a freshly-created PROJECT KMS to the active set
+        // (idempotent, best-effort) so the new base is grounded into future
+        // turns without a manual `/kms use` — e.g. after a research run persists
+        // its page, that knowledge base is live in the next session. Best-effort:
+        // a settings-write failure must not fail the create. User-scope KMSes are
+        // cross-project, so the user opts those in per-project instead.
+        let mut activated = false;
+        if matches!(scope, crate::kms::KmsScope::Project) {
+            let mut active = crate::config::ProjectConfig::load()
+                .and_then(|c| c.kms)
+                .map(|k| k.active)
+                .unwrap_or_default();
+            if !active.iter().any(|k| k == name) {
+                active.push(name.to_string());
+                activated = crate::config::ProjectConfig::set_active_kms(active).is_ok();
+            }
+        }
         Ok(format!(
-            "ensured KMS '{}' ({}) at {}",
+            "ensured KMS '{}' ({}) at {}{}",
             kref.name,
             scope.as_str(),
-            kref.root.display()
+            kref.root.display(),
+            if activated { " · attached to active set" } else { "" }
         ))
     }
 }

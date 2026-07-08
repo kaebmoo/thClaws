@@ -1940,15 +1940,6 @@ impl AppConfig {
         // and under tests (env-dependent, would make the default
         // nondeterministic). A non-default `model` value from any layer
         // also counts as an explicit choice.
-        if config.model != Self::default().model {
-            model_explicit = true;
-        }
-        if !model_explicit && !cfg!(test) && !crate::workdir::is_multiuser() {
-            if let Some(m) = crate::providers::preferred_default_model(&config) {
-                config.model = m;
-            }
-        }
-
         // In any hosted gateway pod, every gateway-routable provider must
         // route through the gateway (the user has no BYOK keys; BYOK would
         // bypass billing + governance — dev-plan/42). Derive the routed set
@@ -1963,6 +1954,14 @@ impl AppConfig {
         // `THCLAWS_USES_GATEWAY=1` marks a cloud gateway runner (the
         // provisioner sets it; desktop never does) and covers multiuser
         // pods too.
+        //
+        // This MUST run BEFORE the credential-aware default below:
+        // `preferred_default_model` treats a gateway-routed provider as
+        // "reachable", so if `gateway_use_for` were still empty at that
+        // point a proxy user with no BYOK keys would find no reachable
+        // provider and fall back to the compiled-in Anthropic placeholder
+        // (claude-sonnet-4-6) instead of the intended gateway default
+        // (deepseek-v4-pro).
         let in_gateway_pod = crate::workdir::is_multiuser()
             || std::env::var("THCLAWS_USES_GATEWAY").ok().as_deref() == Some("1");
         // DERIVE the routed set from a single source of truth: the `gatewayProxy`
@@ -1981,6 +1980,15 @@ impl AppConfig {
         } else {
             Vec::new()
         };
+
+        if config.model != Self::default().model {
+            model_explicit = true;
+        }
+        if !model_explicit && !cfg!(test) && !crate::workdir::is_multiuser() {
+            if let Some(m) = crate::providers::preferred_default_model(&config) {
+                config.model = m;
+            }
+        }
 
         Ok(config)
     }

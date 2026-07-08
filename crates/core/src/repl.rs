@@ -855,10 +855,11 @@ pub enum CloudSlash {
     /// the token comes from the session's settings.json/keychain so
     /// it isn't required on the shell-command line.
     Publish,
-    /// `/cloud unbind` — clear settings.json::agent.uuid in cwd so
-    /// the next `/cloud publish` registers a new catalog entry
-    /// instead of trying to update someone else's. Used when forking
-    /// an agent you `/cloud get`'d from another publisher.
+    /// `/cloud unbind` — blank settings.json::agent.uuid in cwd. Detaches
+    /// the folder: a DIFFERENT agent can then be `/cloud get`'d over it, and a
+    /// `/cloud publish` registers a NEW catalog entry (backend mints a fresh
+    /// uuid) instead of updating the original — i.e. forking. One detach op for
+    /// both "switch the agent here" and "fork it".
     Unbind,
     /// `/cloud push [<slug>] [--delete] [--dry-run] [--force-rebind]` — mirror
     /// the working dir UP to a hosted cloud workspace (dev-plan/51). A bare
@@ -4028,10 +4029,9 @@ pub fn render_help() -> &'static str {
      \x20                   UUID or no agent block → abort.\n  \
      /cloud publish       Tar the current folder + upload to the catalog\n  \
      \x20                   as a new version.\n  \
-     /cloud unbind        Clear settings.json::agent.uuid in cwd so the\n  \
-     \x20                   next /cloud publish creates a fresh entry.\n  \
-     \x20                   Use after /cloud get'ing someone else's agent\n  \
-     \x20                   if you want to fork it.\n  \
+     /cloud unbind        Detach the folder's agent uuid — lets you\n  \
+     \x20                   /cloud get a DIFFERENT agent here, or\n  \
+     \x20                   /cloud publish it as a new (forked) entry.\n  \
      \x20                   (Configure URL + token via Settings →\n  \
      \x20                   thClaws.cloud; mint tokens at /dashboard.)\n\n  \
      ! <command>       Run a shell command directly (e.g. ! git status)"
@@ -4806,6 +4806,7 @@ pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> R
     tool_registry.register(Arc::new(crate::tools::KmsSearchTool));
     // M6.25 BUG #1: write tools alongside read tools.
     tool_registry.register(Arc::new(crate::tools::KmsWriteTool));
+    tool_registry.register(Arc::new(crate::tools::KmsWriteSourceTool));
     tool_registry.register(Arc::new(crate::tools::KmsAppendTool));
     tool_registry.register(Arc::new(crate::tools::KmsDeleteTool));
     // KmsCreate for /dream's `dreams` audit-log KMS bootstrap.
@@ -5062,6 +5063,7 @@ pub async fn run_agent_workflow(
     tool_registry.register(Arc::new(crate::tools::KmsReadTool));
     tool_registry.register(Arc::new(crate::tools::KmsSearchTool));
     tool_registry.register(Arc::new(crate::tools::KmsWriteTool));
+    tool_registry.register(Arc::new(crate::tools::KmsWriteSourceTool));
     tool_registry.register(Arc::new(crate::tools::KmsAppendTool));
     tool_registry.register(Arc::new(crate::tools::KmsDeleteTool));
     tool_registry.register(Arc::new(crate::tools::KmsCreateTool));
@@ -5304,6 +5306,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     tool_registry.register(Arc::new(crate::tools::KmsSearchTool));
     // M6.25 BUG #1: write tools alongside read tools.
     tool_registry.register(Arc::new(crate::tools::KmsWriteTool));
+    tool_registry.register(Arc::new(crate::tools::KmsWriteSourceTool));
     tool_registry.register(Arc::new(crate::tools::KmsAppendTool));
     tool_registry.register(Arc::new(crate::tools::KmsDeleteTool));
     // KmsCreate for /dream's `dreams` audit-log KMS bootstrap.
@@ -10859,14 +10862,32 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             }
                         }
                         CloudSlash::Get { slug } => {
-                            for line in crate::cloud::cmd::get_into_cwd_lines(
-                                slug,
+                            let lines = crate::cloud::cmd::get_into_cwd_lines(
+                                slug.clone(),
                                 None,
                                 cloud_cfg.as_ref(),
                             )
-                            .await
-                            {
+                            .await;
+                            let installed =
+                                lines.iter().any(|l| l.starts_with("✓ Extracted"));
+                            for line in &lines {
                                 println!("{line}");
+                            }
+                            // Re-exec so the just-installed agent is live (its
+                            // AGENTS.md, defs, skills, and seeded workflows were
+                            // built at startup from the old/absent agent).
+                            // Sessions survive on disk. Gated on the success
+                            // marker so a failed get never restarts the process.
+                            if installed {
+                                println!(
+                                    "{COLOR_DIM}↻ activating '{slug}' — reloading thclaws to make it live (sessions survive)…{COLOR_RESET}"
+                                );
+                                use std::io::Write;
+                                let _ = std::io::stdout().flush();
+                                let err = crate::util::reexec_self();
+                                println!(
+                                    "{COLOR_YELLOW}[reload] re-exec failed: {err} — run /reload to activate the agent{COLOR_RESET}"
+                                );
                             }
                         }
                         CloudSlash::Publish => {

@@ -877,11 +877,12 @@ fn subagent(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<Js
     }
 
     // Stage H retry loop. Always at least 1 attempt; up to retry.max
-    // total. Sleeps between attempts according to retry.backoff.
-    let input = match &agent_name {
-        Some(name) => serde_json::json!({ "prompt": augmented_prompt, "agent": name }),
-        None => serde_json::json!({ "prompt": augmented_prompt }),
-    };
+    // total. Sleeps between attempts according to retry.backoff. On a retry
+    // after a FIXABLE (schema / non-JSON) failure, `feedback` carries the exact
+    // rejection reason into the next attempt's prompt — telling the model what
+    // was wrong beats re-rolling the same prompt blind, and helps weaker models
+    // recover a slipped output shape in one retry instead of burning attempts.
+    let mut feedback: Option<String> = None;
     let mut last_failure: Option<String> = None;
     let mut last_text_for_done: Option<String> = None;
     let mut parsed_json: Option<serde_json::Value> = None;
@@ -911,6 +912,22 @@ fn subagent(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<Js
         // Clear per-attempt state so a prior failure doesn't shadow a
         // later success.
         last_failure = None;
+        // Build THIS attempt's prompt. First try (or after a transient error)
+        // uses the plain schema-augmented prompt; a retry after a fixable
+        // failure appends the exact reason so the model corrects it rather than
+        // re-rolling blind.
+        let attempt_prompt = match &feedback {
+            Some(err) => format!(
+                "{augmented_prompt}\n\nYour previous attempt was REJECTED — {err}\n\
+                 Return a corrected JSON value that fixes exactly that. Same task, \
+                 valid output this time — no prose, no markdown fences."
+            ),
+            None => augmented_prompt.clone(),
+        };
+        let input = match &agent_name {
+            Some(name) => serde_json::json!({ "prompt": attempt_prompt, "agent": name }),
+            None => serde_json::json!({ "prompt": attempt_prompt }),
+        };
         // Stage G/M: enforce time budget per-attempt + install
         // per-worker capabilities for KMS write gating. Caps live
         // only for the duration of this tool.call so nested model-
@@ -1048,6 +1065,14 @@ fn subagent(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<Js
             .as_deref()
             .map(super::is_transient_provider_error)
             .unwrap_or(false);
+        // Carry a FIXABLE failure (schema / non-JSON) into the next attempt's
+        // prompt as feedback; a transient stream error isn't the model's fault,
+        // so leave the prompt clean and just re-roll.
+        feedback = if is_transient {
+            None
+        } else {
+            last_failure.clone()
+        };
         if attempt >= deterministic_max && !is_transient {
             break;
         }

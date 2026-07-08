@@ -84,6 +84,7 @@ impl AgentSdkProvider {
         r.register(Arc::new(crate::tools::KmsReadTool));
         r.register(Arc::new(crate::tools::KmsSearchTool));
         r.register(Arc::new(crate::tools::KmsWriteTool));
+        r.register(Arc::new(crate::tools::KmsWriteSourceTool));
         r.register(Arc::new(crate::tools::KmsAppendTool));
         r.register(Arc::new(crate::tools::KmsDeleteTool));
         r.register(Arc::new(crate::tools::KmsCreateTool));

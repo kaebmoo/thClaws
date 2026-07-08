@@ -407,6 +407,7 @@ fn build_agent(req: &ChatRequest, extra_system: Option<String>) -> crate::error:
     tools.register(Arc::new(crate::tools::KmsReadTool));
     tools.register(Arc::new(crate::tools::KmsSearchTool));
     tools.register(Arc::new(crate::tools::KmsWriteTool));
+    tools.register(Arc::new(crate::tools::KmsWriteSourceTool));
     tools.register(Arc::new(crate::tools::KmsAppendTool));
     tools.register(Arc::new(crate::tools::KmsDeleteTool));
     tools.register(Arc::new(crate::tools::KmsCreateTool));

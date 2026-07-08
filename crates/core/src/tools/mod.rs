@@ -66,7 +66,8 @@ pub use grep::GrepTool;
 pub use hal::{WebScrapeTool, YouTubeTranscriptTool};
 pub use image_gen::{ImageToImageTool, TextToImageTool};
 pub use kms::{
-    KmsAppendTool, KmsCreateTool, KmsDeleteTool, KmsReadTool, KmsSearchTool, KmsWriteTool,
+    KmsAppendTool, KmsCreateTool, KmsDeleteTool, KmsReadTool, KmsSearchTool, KmsWriteSourceTool,
+    KmsWriteTool,
 };
 pub use ls::LsTool;
 pub use memory::{MemoryAppendTool, MemoryReadTool, MemoryWriteTool};

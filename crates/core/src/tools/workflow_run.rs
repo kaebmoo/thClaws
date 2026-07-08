@@ -54,6 +54,23 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+/// Recover an `args` value a model serialized as a JSON *string* back into the
+/// object/array it was meant to be. qwen and GLM (unlike deepseek) sometimes
+/// pass the WorkflowRun `args` tool parameter as `"{\"query\":…}"` rather than a
+/// nested object, so the script sees a string and `args.query` is undefined.
+/// A genuine plain-string arg (not parseable as a JSON object/array) is left
+/// untouched.
+fn normalize_args(v: Value) -> Value {
+    if let Value::String(s) = &v {
+        if let Ok(parsed) = serde_json::from_str::<Value>(s.trim()) {
+            if parsed.is_object() || parsed.is_array() {
+                return parsed;
+            }
+        }
+    }
+    v
+}
+
 pub struct WorkflowRunTool {
     provider: Arc<dyn Provider>,
     model: String,
@@ -63,6 +80,14 @@ pub struct WorkflowRunTool {
     /// call `subagent` work fine; ones that do see the runtime's
     /// own "Task tool not available" error.
     task_tool: Option<Arc<dyn Tool>>,
+    /// Chat broadcast sender so the sandbox's `thclaws.log(...)` narrator
+    /// lines and per-worker `thclaws.subagent` progress render live in the
+    /// chat while the script runs. Without it a multi-minute workflow (e.g.
+    /// research) goes silent between the tool call and its result. Only the
+    /// GUI / --serve shared session has one; CLI/headless registrations leave
+    /// it `None` (progress still prints to stdout via `thclaws.log`).
+    #[cfg(feature = "gui")]
+    events_tx: Option<tokio::sync::broadcast::Sender<crate::shared_session::ViewEvent>>,
 }
 
 impl WorkflowRunTool {
@@ -75,7 +100,20 @@ impl WorkflowRunTool {
             provider,
             model,
             task_tool,
+            #[cfg(feature = "gui")]
+            events_tx: None,
         }
+    }
+
+    /// Wire the chat broadcast sender so workflow progress streams to the
+    /// user mid-run. Call at the GUI / --serve registration site.
+    #[cfg(feature = "gui")]
+    pub fn with_events_tx(
+        mut self,
+        tx: tokio::sync::broadcast::Sender<crate::shared_session::ViewEvent>,
+    ) -> Self {
+        self.events_tx = Some(tx);
+        self
     }
 }
 
@@ -181,7 +219,27 @@ impl Tool for WorkflowRunTool {
         let task_tool = self.task_tool.clone();
         let script_for_thread = script;
         // 47.3: structured input forwarded into the sandbox as `args`.
-        let args_for_thread = input.get("args").cloned();
+        // Robustness across models: some (qwen, GLM) serialize the `args` tool
+        // parameter as a JSON *string* ("{\"query\":…}") instead of a nested
+        // object, which would reach the script as a string where `args.query`
+        // is undefined. If args is a string that parses to a JSON object/array,
+        // use the parsed value; a genuine plain-string arg is left untouched.
+        let args_for_thread = input.get("args").cloned().map(normalize_args);
+        // Install the chat broadcast sender on the blocking worker so the
+        // script's thclaws.log / thclaws.subagent progress streams to the
+        // chat mid-run (mirrors shell_dispatch's `/workflow run` path).
+        #[cfg(feature = "gui")]
+        let events_tx_for_thread = self.events_tx.clone();
+        // Lifecycle breadcrumbs to stderr so a run that hangs or dies
+        // silently is diagnosable from the terminal log: "starting" with no
+        // matching "finished"/"FAILED" line pinpoints a hang; the per-worker
+        // and thclaws.log lines in between (now streamed to chat) show which
+        // stage stalled.
+        eprintln!(
+            "[workflow] run starting ({} bytes of script)",
+            script_for_thread.len()
+        );
+        let run_started = std::time::Instant::now();
         let outcome: std::result::Result<
             (
                 std::result::Result<String, String>,
@@ -191,6 +249,8 @@ impl Tool for WorkflowRunTool {
         > = tokio::task::spawn_blocking(move || {
             crate::workflow::set_task_tool(task_tool);
             crate::workflow::set_usage_sink(true);
+            #[cfg(feature = "gui")]
+            crate::workflow::set_events_tx(events_tx_for_thread);
             let res = (|| -> std::result::Result<String, String> {
                 let mut sandbox =
                     crate::workflow::WorkflowSandbox::new().map_err(|e| e.to_string())?;
@@ -202,21 +262,32 @@ impl Tool for WorkflowRunTool {
             let usages = crate::workflow::take_all_usages();
             crate::workflow::set_task_tool(None);
             crate::workflow::set_usage_sink(false);
+            #[cfg(feature = "gui")]
+            crate::workflow::set_events_tx(None);
             (res, usages)
         })
         .await;
 
+        let elapsed = run_started.elapsed();
         let (result, all_usages) = match outcome {
             Ok((res, u)) => (res, u),
             Err(e) => {
+                eprintln!("[workflow] run PANICKED after {elapsed:.1?}: {e}");
                 return Err(Error::Tool(format!("workflow worker thread panicked: {e}")));
             }
         };
 
         let body = match result {
             Ok(text) => text,
-            Err(e) => return Err(Error::Tool(format!("workflow script failed: {e}"))),
+            Err(e) => {
+                eprintln!("[workflow] run FAILED after {elapsed:.1?}: {e}");
+                return Err(Error::Tool(format!("workflow script failed: {e}")));
+            }
         };
+        eprintln!(
+            "[workflow] run finished ok after {elapsed:.1?} ({} subagent turn(s))",
+            all_usages.len()
+        );
 
         // One-line token rollup so the model can see what the run
         // cost — mirrors the `/workflow run` REPL output shape.
@@ -234,6 +305,35 @@ impl Tool for WorkflowRunTool {
 
 #[cfg(test)]
 mod tests {
+    use super::normalize_args;
+    use serde_json::{json, Value};
+
+    #[test]
+    fn normalize_args_recovers_json_string_object() {
+        // qwen/GLM: args passed as a JSON string → recover the object.
+        assert_eq!(
+            normalize_args(Value::String(r#"{"query":"OKF","kms":"okf"}"#.into())),
+            json!({"query": "OKF", "kms": "okf"})
+        );
+        // stringified array likewise.
+        assert_eq!(
+            normalize_args(Value::String("[1,2]".into())),
+            json!([1, 2])
+        );
+        // deepseek: already an object → unchanged.
+        assert_eq!(normalize_args(json!({"query": "x"})), json!({"query": "x"}));
+        // a genuine plain-string arg is not JSON-object/array → left as-is.
+        assert_eq!(
+            normalize_args(Value::String("hello".into())),
+            Value::String("hello".into())
+        );
+        // a bare JSON scalar string ("42") stays a string, not a number.
+        assert_eq!(
+            normalize_args(Value::String("42".into())),
+            Value::String("42".into())
+        );
+    }
+
     use super::*;
     use crate::providers::{EventStream, ProviderEvent, StreamRequest, Usage};
     use async_trait::async_trait;

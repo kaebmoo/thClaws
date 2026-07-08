@@ -786,7 +786,10 @@ fn build_shell_router(
                                     .expect("build file-asset 4xx");
                             }
                         }
-                        crate::gui_shell::serve::serve_project_asset(workspace.as_ref(), &rel)
+                        let range = headers
+                            .get(axum::http::header::RANGE)
+                            .and_then(|v| v.to_str().ok());
+                        crate::gui_shell::serve::serve_project_asset(workspace.as_ref(), &rel, range)
                     }
                 },
             ),
@@ -1039,8 +1042,16 @@ async fn serve_index() -> impl IntoResponse {
     )
 }
 
+/// Liveness + busy probe. k8s probes only check the status code, so the
+/// JSON body is free for the cloud reaper's pre-pause busy check: it GETs
+/// this in-cluster and skips pausing a pod with a turn in flight
+/// (defense-in-depth alongside the busy keepalive heartbeat).
 async fn serve_health() -> impl IntoResponse {
-    "ok"
+    axum::Json(serde_json::json!({
+        "ok": true,
+        "busy": crate::agent_activity::is_agent_busy(),
+        "busy_count": crate::agent_activity::busy_count(),
+    }))
 }
 
 /// `GET /gui-shell/<id>/` — serve a shell's index.html for Mode C
@@ -1085,9 +1096,13 @@ async fn serve_gui_shell_asset(
 /// `Sandbox::check_in`-validated against the current cwd so a
 /// crafted `../etc/passwd` can't escape. Single-tenant per --serve
 /// process; multi-tenant adds HMAC in `build_shell_router`.
-async fn serve_file_asset(axum::extract::Path(rel): axum::extract::Path<String>) -> Response {
+async fn serve_file_asset(
+    axum::extract::Path(rel): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Response {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    crate::gui_shell::serve::serve_project_asset(&cwd, &rel)
+    let range = headers.get(axum::http::header::RANGE).and_then(|v| v.to_str().ok());
+    crate::gui_shell::serve::serve_project_asset(&cwd, &rel, range)
 }
 
 /// `POST /upload` — multipart file upload from the --serve browser
