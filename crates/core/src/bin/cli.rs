@@ -3,7 +3,7 @@
 use clap::Parser;
 use thclaws_core::config::AppConfig;
 use thclaws_core::dotenv::load_dotenv;
-use thclaws_core::repl::{run_print_mode, run_repl};
+use thclaws_core::repl::run_repl;
 use thclaws_core::sandbox::Sandbox;
 use thclaws_core::{endpoints, secrets};
 
@@ -48,6 +48,10 @@ struct Cli {
     /// Resume a previous session by ID (or "last" for most recent)
     #[arg(long, alias = "continue")]
     resume: Option<String>,
+
+    /// Print mode: don't persist the session
+    #[arg(long)]
+    no_session: bool,
 
     /// Output format: text (default), stream-json
     #[arg(long, default_value = "text")]
@@ -99,6 +103,9 @@ async fn main() {
     }
 
     let cli = Cli::parse();
+    // Workspace layout migration (v1 flat → v2 `state/`) before any
+    // config load resolves project paths. No-op once migrated.
+    thclaws_core::config::ProjectConfig::migrate_workspace_if_needed();
     let mut config = match AppConfig::load() {
         Ok(c) => c,
         Err(e) => {
@@ -135,7 +142,7 @@ async fn main() {
 
     // Team agent mode.
     if let Some(ref agent_name) = cli.team_agent {
-        let team_dir = cli.team_dir.as_deref().unwrap_or(".thclaws/team");
+        let team_dir = cli.team_dir.as_deref().unwrap_or(".thclaws/state/team");
         std::env::set_var("THCLAWS_TEAM_AGENT", agent_name);
         std::env::set_var("THCLAWS_TEAM_DIR", team_dir);
     }
@@ -146,7 +153,10 @@ async fn main() {
             eprintln!("\x1b[31m--print requires a prompt argument\x1b[0m");
             std::process::exit(1);
         }
-        if let Err(e) = run_print_mode(config, &prompt, cli.verbose).await {
+        if let Err(e) =
+            thclaws_core::repl::run_print_mode_with(config, &prompt, cli.verbose, !cli.no_session)
+                .await
+        {
             eprintln!("\n\x1b[31merror: {e}\x1b[0m");
             std::process::exit(1);
         }

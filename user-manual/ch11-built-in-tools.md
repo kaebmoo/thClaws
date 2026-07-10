@@ -45,7 +45,7 @@ Defaults:
 | Tool | Approval | Summary |
 |---|---|---|
 | `WebFetch` | prompt | HTTP GET (100 KB body cap, per section). When `HAL_API_KEY` is set, runs **both** a HAL headless-browser scrape **and** a plain HTTP GET in parallel and returns a single combined response with each section labelled (see below). |
-| `WebSearch` | prompt | Web search via Tavily / Brave / DuckDuckGo |
+| `WebSearch` | prompt | Web search via Tavily / Brave / SerpAPI (Google) / DuckDuckGo |
 | `WebScrape` | prompt | Direct HAL scrape with advanced parameters (`wait_for` CSS selector, `scroll_to_bottom`, `remove_selectors`, `output_format`) — appears only when `HAL_API_KEY` is set |
 | `YouTubeTranscript` | prompt | Fetch YouTube captions via HAL (multi-language fallback, optional timestamps) — appears only when `HAL_API_KEY` is set |
 
@@ -191,6 +191,21 @@ The built-in **Media Studio** GUI shell (Chapter 26) auto-enables them
 for its own session regardless of this flag — it's the no-config,
 point-and-click on-ramp for people who aren't driving the agent from
 chat.
+
+## Video review & movie-making
+
+| Tool | Approval | What it does |
+|---|---|---|
+| `WatchVideo` | prompt | Lets the model **watch** a local video: pulls scene-aware key frames (so it can *see* what happens) + a Whisper transcript when `GROQ_API_KEY` is set. Use it to review or critique a clip. |
+| `FilmCompile` / `FilmGenerate` / `FilmJobStatus` / `FilmJobCancel` / `FilmAssetImport` | `FilmGenerate` + `FilmAssetImport` prompt | The **Movie Maker** toolkit — turn a `.film` screenplay into a finished AI video. Hidden until you install the Movie Maker agent (which opens the `filmscript` gate). `FilmGenerate` needs a `budgetUsd` — that's your spend cap + consent. See Chapter 29. |
+
+## Other tools
+
+- **`FetchImages`** — downloads every remote image in a Markdown file into a
+  sibling `images/` folder and rewrites the links (used by content-extractor
+  agents). Confined to your workspace.
+- **`EpubCreate`** — Markdown → EPUB e-book (joins the Word/Excel/PowerPoint/PDF
+  document tools above).
 
 ## User interaction
 

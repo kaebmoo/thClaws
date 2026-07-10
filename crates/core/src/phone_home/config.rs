@@ -1,4 +1,4 @@
-//! On-disk binding for the phone-home channel at `./.thclaws/phone-home.json`
+//! On-disk binding for the phone-home channel at `./.thclaws/state/phone-home.json`
 //! (dev-plan/44 Tier 1).
 //!
 //! Unlike LINE/Messenger — whose external identity is a messaging-platform
@@ -18,8 +18,8 @@ use crate::bridge::BridgeConfig;
 /// via `THCLAWS_PHONE_HOME_SERVER`.
 pub const DEFAULT_SERVER_URL: &str = "https://line.thclaws.ai";
 
-/// Relative path under the project dir.
-const CONFIG_REL: &str = ".thclaws/phone-home.json";
+/// Relative path under the project dir (runtime state, workspace v2+).
+const CONFIG_REL: &str = ".thclaws/state/phone-home.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PhoneHomeConfig {

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use thclaws_core::bridge::BridgeConfig;
 use thclaws_core::config::AppConfig;
 use thclaws_core::dotenv::load_dotenv;
-use thclaws_core::repl::{run_print_mode, run_repl};
+use thclaws_core::repl::run_repl;
 use thclaws_core::sandbox::Sandbox;
 use thclaws_core::{endpoints, schedule, secrets};
 
@@ -72,6 +72,10 @@ struct Cli {
     /// Resume a previous session by ID (or "last" for most recent)
     #[arg(long, alias = "continue")]
     resume: Option<String>,
+
+    /// Print mode: don't persist the session (pre-upgrade `-p` behavior)
+    #[arg(long)]
+    no_session: bool,
 
     /// Output format: text (default), stream-json
     #[arg(long, default_value = "text")]
@@ -550,6 +554,12 @@ enum ScheduleCmd {
         /// cwd's `.thclaws/settings.json` picks).
         #[arg(long)]
         model: Option<String>,
+        /// Heartbeat mode: chain every fire into ONE session (history
+        /// accumulates) instead of a fresh run each time. Use "last"
+        /// (recommended — resumes this cwd's most-recent session; the
+        /// first fire starts it) or an existing session id.
+        #[arg(long)]
+        resume_session: Option<String>,
         /// Per-job iteration cap.
         #[arg(long)]
         max_iterations: Option<usize>,
@@ -592,7 +602,10 @@ enum ScheduleCmd {
 /// Hide the console allocated for the Windows console-subsystem binary when
 /// the user is launching the GUI. CLI mode keeps the console attached so
 /// `thclaws --cli` can read keys normally from PowerShell/CMD.
+// Called only from the `#[cfg(feature = "gui")]` launch paths below, so a
+// CLI-only build (`cargo build` without `--features gui`) never reaches it.
 #[cfg(windows)]
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
 fn detach_console_for_gui() {
     use windows_sys::Win32::System::Console::FreeConsole;
 
@@ -604,12 +617,16 @@ fn detach_console_for_gui() {
 }
 
 #[cfg(not(windows))]
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
 fn detach_console_for_gui() {}
 
 /// Parse a TTL string like "30d" / "12h" / "60m" / "120s" / "never"
 /// into seconds. Used by `--gui-shell-token-ttl`. Returns `None` for
 /// "never" (no expiry) or any unparseable input — the caller falls
 /// back to the manifest / launcher default.
+// Only reached from the `#[cfg(feature = "gui")]` serve path, so a
+// CLI-only build wouldn't otherwise use it.
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
 fn parse_ttl_secs(s: &str) -> Option<u64> {
     let s = s.trim();
     if s.eq_ignore_ascii_case("never") || s.is_empty() {
@@ -809,6 +826,14 @@ async fn main() {
     // before the scheduler + /v1 loopback so they don't bind ports in
     // the doomed parent. See `respawn_detached_for_gui_if_needed`.
     respawn_detached_for_gui_if_needed(&cli);
+
+    // Workspace layout migration (v1 flat → v2 `state/`): relocate any
+    // legacy runtime dirs under `.thclaws/state/` and seed authored
+    // workflows. Runs BEFORE the default-settings bootstrap so a legacy
+    // workspace (runtime dirs, no settings.json) is detected as legacy
+    // rather than freshly stamped v2. No-op on already-migrated or
+    // multiuser workspaces.
+    thclaws_core::config::ProjectConfig::migrate_workspace_if_needed();
 
     // First-run bootstrap: drop a `.thclaws/settings.json` with model +
     // permissions defaults into the project so users get a working
@@ -1061,7 +1086,7 @@ async fn main() {
         config.max_iterations = n;
     }
     if let Some(ref agent_name) = cli.team_agent {
-        let team_dir = cli.team_dir.as_deref().unwrap_or(".thclaws/team");
+        let team_dir = cli.team_dir.as_deref().unwrap_or(".thclaws/state/team");
         std::env::set_var("THCLAWS_TEAM_AGENT", agent_name);
         std::env::set_var("THCLAWS_TEAM_DIR", team_dir);
     }
@@ -1097,7 +1122,10 @@ async fn main() {
             eprintln!("\x1b[31m--print requires a prompt argument\x1b[0m");
             std::process::exit(1);
         }
-        if let Err(e) = run_print_mode(config, &prompt, cli.verbose).await {
+        if let Err(e) =
+            thclaws_core::repl::run_print_mode_with(config, &prompt, cli.verbose, !cli.no_session)
+                .await
+        {
             eprintln!("\n\x1b[31merror: {e}\x1b[0m");
             std::process::exit(1);
         }
@@ -1232,7 +1260,7 @@ async fn run_agent_subcommand(cmd: AgentCmd) -> i32 {
             let wf = match workflow {
                 Some(w) => w,
                 None => {
-                    let wfdir = path.join(".thclaws/workflows");
+                    let wfdir = path.join(".thclaws/state/workflows");
                     let js: Vec<std::path::PathBuf> = std::fs::read_dir(&wfdir)
                         .into_iter()
                         .flatten()
@@ -1241,11 +1269,11 @@ async fn run_agent_subcommand(cmd: AgentCmd) -> i32 {
                         .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("js"))
                         .collect();
                     match js.len() {
-                        1 => std::path::Path::new(".thclaws/workflows")
+                        1 => std::path::Path::new(".thclaws/state/workflows")
                             .join(js[0].file_name().unwrap()),
                         0 => {
                             eprintln!(
-                                "✗ no .thclaws/workflows/*.js in {} — pass --workflow",
+                                "✗ no .thclaws/state/workflows/*.js in {} — pass --workflow",
                                 path.display()
                             );
                             return 1;
@@ -1444,6 +1472,7 @@ fn run_schedule_subcommand(cmd: ScheduleCmd) -> i32 {
             prompt,
             cwd,
             model,
+            resume_session,
             max_iterations,
             timeout,
             disabled,
@@ -1508,6 +1537,7 @@ fn run_schedule_subcommand(cmd: ScheduleCmd) -> i32 {
                 cwd: cwd_path,
                 prompt,
                 model,
+                resume_session,
                 max_iterations,
                 timeout_secs: if timeout == 0 { None } else { Some(timeout) },
                 enabled: !disabled,

@@ -2,7 +2,7 @@
 
 This appendix is the **thClaws.cloud gateway** catalogue — the models you can call when
 you point an agent at `https://thclaws.cloud/gateway` (or run [thClaws.cloud](ch27-thclaws-cloud.md)
-self-hosted). Desktop / CLI builds have their own catalogue covering 22 providers; see
+self-hosted). Desktop / CLI builds have their own catalogue covering 25 providers; see
 [Chapter 6 — Providers, models & API keys](ch06-providers-models-api-keys.md) for that
 list.
 

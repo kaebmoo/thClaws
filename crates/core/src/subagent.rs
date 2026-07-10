@@ -161,6 +161,14 @@ fn build_write_globset(patterns: &[String]) -> Option<globset::GlobSet> {
 pub struct FactorySnapshot {
     pub system: String,
     pub tools: ToolRegistry,
+    /// Live session model + provider. In the snapshot (not factory
+    /// fields) so a mid-session model switch (GUI ReloadConfig, CLI
+    /// `/model`) reaches subagents: an unpinned `agent_def` must
+    /// inherit the model the user is CURRENTLY on, not the one active
+    /// at worker init. Pre-fix a deepseek→grok switch kept spawning
+    /// deepseek workers for the rest of the session.
+    pub model: String,
+    pub provider: Arc<dyn Provider>,
 }
 
 /// How to construct a child agent. Implementations produce a brand-new
@@ -179,8 +187,8 @@ pub trait AgentFactory: Send + Sync {
     /// The factory's base model id — used to attribute a subagent's
     /// token usage when its `agent_def` doesn't pin its own model.
     /// Default `"unknown"` keeps test stubs simple.
-    fn base_model(&self) -> &str {
-        "unknown"
+    fn base_model(&self) -> String {
+        "unknown".into()
     }
 }
 
@@ -191,7 +199,8 @@ pub trait AgentFactory: Send + Sync {
 ///
 /// Fields capture the parent's runtime state for propagation to child
 /// agents:
-/// - `provider` / `model` — wire layer for the child's LLM calls
+/// - `snapshot.provider` / `snapshot.model` — wire layer for the
+///   child's LLM calls (live, follows mid-session model switches)
 /// - `base_tools` — tool registry the child inherits (filtered by
 ///   agent_def.tools allow-list + agent_def.disallowed_tools deny-list
 ///   inside `build`)
@@ -208,11 +217,10 @@ pub trait AgentFactory: Send + Sync {
 ///   ctrl-C reaches a runaway subagent. CLI passes `None` (no cancel
 ///   plumbing yet); GUI passes the worker's CancelToken.
 pub struct ProductionAgentFactory {
-    pub provider: Arc<dyn Provider>,
-    /// Live view of the parent agent's system prompt + tool registry.
-    /// Shared by Arc with the worker — see [`FactorySnapshot`] docs.
+    /// Live view of the parent agent's system prompt + tool registry
+    /// + model/provider. Shared by Arc with the worker — see
+    /// [`FactorySnapshot`] docs.
     pub snapshot: Arc<RwLock<FactorySnapshot>>,
-    pub model: String,
     pub max_iterations: usize,
     pub max_depth: usize,
     /// Per-request output token budget propagated from `AppConfig::max_tokens`.
@@ -258,8 +266,12 @@ fn subagent_model<'a>(pinned: Option<&'a str>, session_model: &'a str) -> &'a st
 
 #[async_trait]
 impl AgentFactory for ProductionAgentFactory {
-    fn base_model(&self) -> &str {
-        &self.model
+    fn base_model(&self) -> String {
+        self.snapshot
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .model
+            .clone()
     }
 
     async fn build(
@@ -268,18 +280,23 @@ impl AgentFactory for ProductionAgentFactory {
         agent_def: Option<&AgentDef>,
         child_depth: usize,
     ) -> Result<Agent> {
-        let model = subagent_model(agent_def.and_then(|d| d.model.as_deref()), &self.model);
-
-        // Snapshot the live parent state ONCE — system + tools are
-        // both needed and we want them to come from the same instant
-        // (so a refresh between the two reads can't tear).
-        let (parent_system, base_tools) = {
+        // Snapshot the live parent state ONCE — system + tools +
+        // model/provider are all needed and we want them to come from
+        // the same instant (so a refresh between reads can't tear,
+        // e.g. a model id from provider A paired with provider B).
+        let (parent_system, base_tools, session_model, provider) = {
             // L2: recover from a poisoned lock instead of panicking — the
             // only writers do trivial field assignments, so the inner
             // data is always consistent even if a writer panicked.
             let snap = self.snapshot.read().unwrap_or_else(|e| e.into_inner());
-            (snap.system.clone(), snap.tools.clone())
+            (
+                snap.system.clone(),
+                snap.tools.clone(),
+                snap.model.clone(),
+                snap.provider.clone(),
+            )
         };
+        let model = subagent_model(agent_def.and_then(|d| d.model.as_deref()), &session_model);
 
         // System prompt: parent's full prompt + (optional) agent
         // instructions + (when nested) the subagent-mode addendum.
@@ -329,6 +346,17 @@ impl AgentFactory for ProductionAgentFactory {
             for name in &def.disallowed_tools {
                 tools.remove(name);
             }
+        }
+
+        // A subagent that explicitly allow-lists a gated tool (e.g.
+        // `FetchImages` behind the `content-extractor` gate) opens that gate
+        // for itself — the declarative parallel to a skill's `tool-gate:`, so
+        // a subagent is as capable as a skill at surfacing a gated tool group.
+        // Only tools NAMED in the allow-list count; an inherit-all def (empty
+        // `tools`) does not auto-open every gate. Process-global + session-
+        // sticky (same model as skills).
+        if let Some(def) = agent_def {
+            open_gates_for_allowlist(def, &base_tools);
         }
 
         // Per-subagent MCP scoping (`AgentDef::mcp`). MCP tools are named
@@ -459,12 +487,10 @@ impl AgentFactory for ProductionAgentFactory {
         // not recurse).
         if task_allowed && child_depth < self.max_depth {
             let child_factory = Arc::new(ProductionAgentFactory {
-                provider: self.provider.clone(),
                 // Share the SAME snapshot Arc so nested subagents
                 // also see live state updates. Cloning the Arc is
                 // O(1) — just a refcount bump.
                 snapshot: self.snapshot.clone(),
-                model: self.model.clone(),
                 max_iterations: self.max_iterations,
                 max_depth: self.max_depth,
                 max_tokens: self.max_tokens,
@@ -486,7 +512,7 @@ impl AgentFactory for ProductionAgentFactory {
 
         // M6.33 SUB4: thread parent's cancel token into the child agent
         // so retry-backoff sleeps + collect_agent_turn observe ctrl-C.
-        let mut agent = Agent::new(self.provider.clone(), tools, model, &system)
+        let mut agent = Agent::new(provider, tools, model, &system)
             .with_max_iterations(max_iter)
             .with_max_tokens(self.max_tokens)
             .with_approver(self.approver.clone())
@@ -673,10 +699,8 @@ impl Tool for SubAgentTool {
             // (its `agent_def` may pin a cheaper one than the parent) —
             // same selection as the build path, so a cross-provider pin that
             // fell back to the session model is billed to what actually ran.
-            let eff_model = subagent_model(
-                agent_def.and_then(|d| d.model.as_deref()),
-                self.factory.base_model(),
-            );
+            let base_model = self.factory.base_model();
+            let eff_model = subagent_model(agent_def.and_then(|d| d.model.as_deref()), &base_model);
             let provider = crate::providers::ProviderKind::detect(eff_model)
                 .map(|k| k.name())
                 .unwrap_or("unknown");
@@ -711,6 +735,19 @@ impl Tool for SubAgentTool {
     }
 }
 
+/// Open the tool gate for every gated tool this def explicitly allow-lists.
+/// Looks each name up in `base_tools` (gate membership is a property of the
+/// registered tool, independent of whether the gate is open), and activates
+/// its gate. Empty `def.tools` (inherit-all) is intentionally skipped by the
+/// caller so an unrestricted subagent doesn't fling every gate open.
+fn open_gates_for_allowlist(def: &crate::agent_defs::AgentDef, base_tools: &ToolRegistry) {
+    for name in &def.tools {
+        if let Some(gate) = base_tools.get(name).and_then(|t| t.requires_gate()) {
+            crate::tools::activate_gate(gate);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -722,6 +759,27 @@ mod tests {
     use futures::stream;
     use std::collections::VecDeque;
     use std::sync::Mutex;
+
+    #[test]
+    fn allowlisting_a_gated_tool_opens_its_gate() {
+        crate::tools::reset_gates();
+        let mut base = ToolRegistry::new();
+        base.register(std::sync::Arc::new(crate::tools::FetchImagesTool::new())); // gated "content-extractor"
+
+        // Def that does NOT list it → gate stays closed.
+        let mut def = crate::agent_defs::AgentDef {
+            tools: vec!["Read".into()],
+            ..Default::default()
+        };
+        open_gates_for_allowlist(&def, &base);
+        assert!(!crate::tools::gate_is_active("content-extractor"));
+
+        // Def that explicitly allow-lists FetchImages → gate opens.
+        def.tools = vec!["Read".into(), "FetchImages".into()];
+        open_gates_for_allowlist(&def, &base);
+        assert!(crate::tools::gate_is_active("content-extractor"));
+        crate::tools::reset_gates();
+    }
 
     #[test]
     fn subagent_model_falls_back_when_pin_is_a_different_provider() {
@@ -886,12 +944,12 @@ mod tests {
         base.register(Arc::new(EchoTool { name: "Read" }));
 
         let factory = ProductionAgentFactory {
-            provider: Arc::new(StubProvider),
             snapshot: Arc::new(RwLock::new(FactorySnapshot {
                 system: String::new(),
                 tools: base,
+                model: "test".into(),
+                provider: Arc::new(StubProvider),
             })),
-            model: "test".into(),
             max_iterations: 1,
             max_depth: 3,
             max_tokens: 8192,
@@ -922,12 +980,12 @@ mod tests {
     async fn production_factory_propagates_cancel_token() {
         let cancel = CancelToken::new();
         let factory = ProductionAgentFactory {
-            provider: Arc::new(StubProvider),
             snapshot: Arc::new(RwLock::new(FactorySnapshot {
                 system: String::new(),
                 tools: ToolRegistry::new(),
+                model: "test".into(),
+                provider: Arc::new(StubProvider),
             })),
-            model: "test".into(),
             max_iterations: 1,
             max_depth: 3,
             max_tokens: 8192,
@@ -966,11 +1024,11 @@ mod tests {
         let snapshot = Arc::new(RwLock::new(FactorySnapshot {
             system: "INITIAL_SYSTEM".into(),
             tools: initial_tools,
+            model: "test".into(),
+            provider: Arc::new(StubProvider),
         }));
         let factory = ProductionAgentFactory {
-            provider: Arc::new(StubProvider),
             snapshot: snapshot.clone(),
-            model: "test".into(),
             max_iterations: 1,
             max_depth: 3,
             max_tokens: 8192,
@@ -998,12 +1056,17 @@ mod tests {
         // Worker-side mutation: a `/mcp add` would do this — update
         // tool registry, refresh system prompt, then push both into
         // the shared snapshot.
+        assert_eq!(child1.model(), "test");
+
         let mut updated_tools = ToolRegistry::new();
         updated_tools.register(Arc::new(EchoTool { name: "NewTool" }));
         {
             let mut snap = snapshot.write().unwrap();
             snap.system = "REFRESHED_SYSTEM".into();
             snap.tools = updated_tools;
+            // Mid-session model switch (GUI ReloadConfig / CLI `/model`)
+            // writes the new pair the same way.
+            snap.model = "switched-model".into();
         }
 
         // Build AGAIN with the same factory — the new child must see
@@ -1028,6 +1091,14 @@ mod tests {
             "child built after refresh must NOT see stale system; got: {:?}",
             child2.system_text()
         );
+        // The grok-main/deepseek-workers bug: an unpinned subagent must
+        // inherit the model the session is CURRENTLY on.
+        assert_eq!(
+            child2.model(),
+            "switched-model",
+            "child built after a model switch must run the new model"
+        );
+        assert_eq!(factory.base_model(), "switched-model");
     }
 
     #[tokio::test]
@@ -1073,12 +1144,12 @@ mod tests {
     /// by the H1/M1 recursion-scoping tests below.
     fn factory_with(base: ToolRegistry) -> ProductionAgentFactory {
         ProductionAgentFactory {
-            provider: Arc::new(StubProvider),
             snapshot: Arc::new(RwLock::new(FactorySnapshot {
                 system: String::new(),
                 tools: base,
+                model: "test".into(),
+                provider: Arc::new(StubProvider),
             })),
-            model: "test".into(),
             max_iterations: 1,
             max_depth: 3,
             max_tokens: 8192,
@@ -1382,15 +1453,15 @@ mod tests {
                 Ok("wrote".into())
             }
         }
-        let set = build_write_globset(&[".thclaws/kms/**".to_string()]).unwrap();
+        let set = build_write_globset(&[".thclaws/state/kms/**".to_string()]).unwrap();
         let scoped = PathScopedWriteTool {
             inner: Arc::new(OkWrite),
             globs: Arc::new(set),
-            patterns: vec![".thclaws/kms/**".into()],
+            patterns: vec![".thclaws/state/kms/**".into()],
         };
         // Inside the allow-list → delegates to the inner tool.
         let ok = scoped
-            .call(json!({"path": ".thclaws/kms/ai/page.md", "content": "x"}))
+            .call(json!({"path": ".thclaws/state/kms/ai/page.md", "content": "x"}))
             .await
             .unwrap();
         assert_eq!(ok, "wrote");

@@ -2078,6 +2078,9 @@ pub async fn dispatch(
                     .register(std::sync::Arc::new(crate::tools::KmsWriteTool));
                 state
                     .tool_registry
+                    .register(std::sync::Arc::new(crate::tools::KmsWriteSourceTool));
+                state
+                    .tool_registry
                     .register(std::sync::Arc::new(crate::tools::KmsAppendTool));
                 state
                     .tool_registry
@@ -2175,9 +2178,18 @@ pub async fn dispatch(
                     } else {
                         String::new()
                     };
+                    let images = if r.images_copied > 0 {
+                        format!(" (+{} local image(s))", r.images_copied)
+                    } else {
+                        String::new()
+                    };
                     emit(
                         events_tx,
-                        format!("{verb} → {} — {}{cascade}", r.target.display(), r.summary),
+                        format!(
+                            "{verb} → {} — {}{images}{cascade}",
+                            r.target.display(),
+                            r.summary
+                        ),
                     );
                 }
                 Err(e) => emit(events_tx, format!("ingest failed: {e}")),
@@ -3650,36 +3662,65 @@ pub async fn dispatch(
                 };
                 match sub {
                     CloudSlash::Status => {
-                        for line in crate::cloud::cmd::status_lines(None, cloud_cfg.as_ref()) {
-                            emit(line);
-                        }
+                        // One SlashOutput = one system bubble in chat. Emit the
+                        // whole report as a single block (like /providers) so it
+                        // reads as one list, not a bubble ("pill") per row.
+                        let lines = crate::cloud::cmd::status_lines(None, cloud_cfg.as_ref());
+                        emit(lines.join("\n"));
                     }
                     CloudSlash::List { mine } => {
-                        for line in
-                            crate::cloud::cmd::list_lines(mine, None, cloud_cfg.as_ref()).await
-                        {
-                            emit(line);
-                        }
+                        // Single block, same reasoning as Status above.
+                        let lines =
+                            crate::cloud::cmd::list_lines(mine, None, cloud_cfg.as_ref()).await;
+                        emit(lines.join("\n"));
                     }
                     CloudSlash::Get { slug } => {
-                        for line in
-                            crate::cloud::cmd::get_into_cwd_lines(slug, None, cloud_cfg.as_ref())
-                                .await
-                        {
-                            emit(line);
+                        // Returns the whole progress log at once (not a live
+                        // stream), so emit it as one block — a bubble per line
+                        // reads as a stack of "pills". Same reasoning as Status.
+                        let lines = crate::cloud::cmd::get_into_cwd_lines(
+                            slug.clone(),
+                            None,
+                            cloud_cfg.as_ref(),
+                        )
+                        .await;
+                        let installed = lines.iter().any(|l| l.starts_with("✓ Extracted"));
+                        emit(lines.join("\n"));
+                        // A just-installed agent is inert until the engine
+                        // re-reads it: the system prompt (AGENTS.md), agent
+                        // defs, skills, and seeded workflows were all built at
+                        // startup from the OLD/absent agent. Re-exec so
+                        // `/cloud get` just works — sessions survive on disk.
+                        // Gated on the success marker so a 404 / auth error /
+                        // uuid-mismatch refusal never restarts the process.
+                        if installed {
+                            emit(format!(
+                                "↻ activating '{slug}' — reloading thclaws to make it live (sessions survive)…"
+                            ));
+                            // `events_tx_clone` is the owned sender already moved
+                            // into this async task; clone it again for the
+                            // re-exec thread (can't borrow the outer `events_tx`
+                            // reference into a 'static task).
+                            let reexec_tx = events_tx_clone.clone();
+                            std::thread::spawn(move || {
+                                std::thread::sleep(std::time::Duration::from_millis(400));
+                                let err = crate::util::reexec_self();
+                                let _ = reexec_tx.send(ViewEvent::SlashOutput(format!(
+                                    "[reload] re-exec failed: {err} — run /reload to activate the agent"
+                                )));
+                            });
+                            return;
                         }
                     }
                     CloudSlash::Publish => {
-                        for line in
-                            crate::cloud::cmd::publish_cwd_lines(None, cloud_cfg.as_ref()).await
-                        {
-                            emit(line);
-                        }
+                        // Single block, same reasoning as Get above.
+                        let lines =
+                            crate::cloud::cmd::publish_cwd_lines(None, cloud_cfg.as_ref()).await;
+                        emit(lines.join("\n"));
                     }
                     CloudSlash::Unbind => {
-                        for line in crate::cloud::cmd::unbind_lines() {
-                            emit(line);
-                        }
+                        // Single block, same reasoning as Status above.
+                        emit(crate::cloud::cmd::unbind_lines().join("\n"));
                     }
                     CloudSlash::Push {
                         delete,

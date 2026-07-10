@@ -7,6 +7,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.89.0] — 2026-07-10
+
+Tutorial Studio gets a NOTE-first /outline skill and deterministic slide rendering, the Business Agent ships as a new first-party offering, KMS ingest grows quality-of-life improvements, and search gains a real Google backend via SerpAPI alongside fine-grained tool-approval controls and a tool-loop breaker.
+
+### Added
+- **Tutorial Studio: /outline skill, structured outline import, and deterministic slide rendering.** A new `/outline` skill supports NOTE-first authoring directly in the workspace, `outline-import` ingests structured outline markdown files incrementally by slide ID, and the slide-layout renderer is now deterministic with consistent spacing in video builds.
+- **Business Agent — a new first-party agent with per-task GUI.** Ships vendored Anthropic knowledge-work packs alongside a GUI shell that exposes a dedicated interface per task type.
+- **Force-approval on specific tools under `permissions:auto`.** The `askTools` setting lets you mark individual tools as always-require-approval even when the session-wide policy is auto-approve, so dangerous tools stay gated without switching the whole session to manual.
+- **KMS ingest now auto-authors a curated page, copies local images, and handles alias collisions.** Ingesting a source auto-generates a curated landing page (replacing the stub), copies local images referenced in markdown, and offers a Replace action when an alias collides. An "Add to KMS" context action on `.md` files in the file tree lets you ingest without leaving the workspace.
+- **Degenerate-tool-loop breaker.** After three consecutive rounds where every tool call fails, the engine now breaks the loop instead of burning tokens indefinitely.
+- **Descriptive tool-call progress in the side channel.** Slash commands like `/extract` now stream human-readable tool-call labels instead of raw function names.
+- **SerpAPI search backend with Settings key entry.** Enter a SerpAPI key in the Settings modal to get real Google search results through the search tool — full engine, gateway, and docs integration.
+
+### Fixed
+- **Tutorial Studio: Thai text shaping.** Slide rendering now uses HarfBuzz (libraqm) for correct Thai glyph placement when available.
+- **Unpinned subagent workers now track mid-session model switches.** Subagents launched without a pinned model follow your active model selection when you switch models mid-session instead of sticking with the original.
+- **Agent publishing: dry-run lies, republish pair loss, and missing settings.json files.** `publish --dry-run` no longer claims a private agent doesn't exist when it does, republishing a private agent restores the public/private pair correctly, and settings.json files for training-video-generator, webapp-coder-workflow, and tutorial-studio that were silently dropped from the catalog are restored and tracked.
+- **Research agent: deterministic source links and args resilience.** `../sources/` links are now derived deterministically from the URL slug instead of varying across runs, and a missing `args.query` throws a real error (instead of silently passing `undefined`) with an `args_json` hint for models that stringify args.
+- **Thinking bubble no longer crashes the webview.** Unbounded reasoning streams are capped so the GUI doesn't crash on extremely long thinking blocks.
+- **Grok-4.5 WorkflowRun args preserved.** Schema property ordering is now preserved so Grok-4.5, which drops unordered args, correctly passes structured input to WorkflowRun.
+- **KMS viewer renders source images.** Source images embedded in KMS pages were 404 in the viewer — they now resolve and display correctly.
+- **Content Extractor prefers WebFetch and stops saving placeholder sources.** The extractor now uses WebFetch (with HAL) as its primary fetch path and no longer writes a placeholder source file before extraction completes.
+- **Gateway-active workspaces force `halEnabled` on.** HAL-dependent features like browser-rendered WebFetch no longer silently break in gateway-provisioned workspaces.
+
+## [0.88.0] — 2026-07-09
+
+Tutorial Studio ships as a first-party agent for building AI-native courses end-to-end, the engine gets a working hooks system alongside job artifacts and a full headless surface, and the research / book-author agents level up with cross-linked KMS pages, source caching, and optional chapter targets.
+
+### Added
+- **Tutorial Studio — a new first-party agent for building courses.** Tutorial Studio brings the full movie-maker pipeline into a GUI shell: title-addressed slide editing, AI-powered prose-to-slide drafting, provider-level TTS (Gemini / OpenAI / MiniMax / ElevenLabs) with per-slide voice selection, image generation with user-editable style rules and multi-reference images, batch image+voice gen across a deck, AI-generated slide video from Grok / Seedance / LTX / Veo, and a configurable `output.json` for media defaults. Async submit/poll keeps long video jobs out of Bash timeouts, and a generic background job runner handles the rest.
+- **Job Artifacts — Bearer-authenticated, session-scoped file transfer.** `JobArtifactUpload` and its read counterpart let agents pass tamper-proof files between workflow steps without leaving them in the workspace. Each artifact gets a signed token; the reader verifies the signature before accepting the payload.
+- **`-p` is now a full headless surface.** The `thclaws -p "prompt"` one-shot learned session heartbeats and `--resume-session`, so scheduled / cron-driven prompts share a single session and message history instead of starting cold every time.
+- **Research agent: cross-linked KMS pages with source caching.** Research splits findings into multiple cross-linked KMS pages instead of one monolithic output, caches fetched sources offline into `sources/` for later inspection (via the new `KmsWriteSource` tool), and surfaces a **Depth** control in the quick-actions row so you dial 2–6 research rounds for simple topics.
+- **Book Author: KMS ingest, export folder, and markdown rendering.** The book-author can now read a research agent's KMS as sources (`import-kms`, auto-run from `/sources-ingest`), export books as a self-contained folder (`--format folder`) for direct consumption by Tutorial Studio, render chapter markdown with full GFM support (tables, code blocks, lists), and skip `--target-words` / `--target-chapters` — the outline sizes small books itself.
+- **Book Author: per-chapter regen with live progress.** Each chapter gets a **Regen** button that re-drafts just that chapter using the currently selected model. Parallel drafting shows per-chapter live progress, and figures now appear inline at their reference point instead of being dumped at the chapter end.
+- **`KmsCreate` auto-attaches the new KMS to the active set.** Creating a KMS project now attaches it automatically so you can start writing immediately without the extra attach step.
+- **WorkflowRun: retry with error feedback and live progress streaming.** Subagent retries now feed the rejection reason back into the next attempt so the model can self-correct. WorkflowRun progress streams to the chat mid-run instead of appearing only when complete, and stderr lifecycle breadcrumbs make failures debuggable.
+- **`thc-split` — draggable pane splitters in shell UIs.** The engine ships a shared UI runtime component so any GUI shell can add resizable pane separators with a single custom element.
+- **HTTP Range support on file assets.** The built-in file server now supports range requests so video files stream with proper seeking instead of stuttering through buffered downloads.
+- **Agent Builder v0.2.0.** Wraps the native scaffolder, audits agents against the §0.5 / §4.6 meta-rules, and adds an optional GUI shell build phase.
+
+### Changed
+- **Book Author subagents are model-unpinned.** The outliner, fact-checker, and researcher subagents no longer force a specific model — they follow your active model selection, so you can draft with any provider.
+- **Research, Book Author, and Tutorial Studio share one KMS root.** All three agents now use `.thclaws/state/kms` as the canonical KMS path, so findings pass between agents without path mismatches.
+
+### Fixed
+- **Hooks in `settings.json` never fired.** The config deserializer was silently dropping the `hooks` block — no hook (before/after turns, file watchers, shell triggers) has ever run. They now deserialize and execute.
+- **`KmsWriteSource` was missing from 8 of 12 tool-registry sites.** The tool that lets research cache fetched sources now appears in every context where agents might call it.
+- **Book Author: bold-wrapped citation refs and extension mismatches.** Export now strips the padded bold from `**{cf:...}**` patterns so citations render clean, and chapter figure links no longer 404 when the file is `.png` but the link says `.jpg`.
+- **Research agent: planner resilience and multi-page fix.** The planner now retries on empty angle lists instead of ending the run, accepts bare JSON arrays from models that skip the `{subtopics}` wrapper (Qwen / GLM), and no longer collapses multi-page fetches or skips source caching. One excerpt-less source in a batch no longer fails the entire fetch.
+- **Research agent: budget and citation hygiene.** Output budgets scale properly for book-sized topics, uncited sources are trimmed from the final list, and KMS pages are actually persisted — a missing `KmsWrite` call meant prior runs wrote nothing.
+- **WorkflowRun: JSON-string args and gateway env for Bash children.** Args passed as a JSON string (as Qwen / GLM do) are now tolerated, and the engine re-injects resolved gateway environment into single-user Bash children so provider credentials reach tools launched from workflows.
+- **Content Extractor regression.** Articles save as `articles/<slug>/<slug>.md` (not `article.md`), restoring the per-article directory layout.
+
+## [0.87.0] — 2026-07-05
+
+Movie Maker polish and a cleaner model list, on top of a full pass to make the manuals match the code.
+
+### Added
+- **Movie Maker: a running budget ceiling.** `FilmGenerate` already refused to start a film that costs more than the `budgetUsd` you confirmed; now it also stops *mid-render* before the next shot once actual spend passes that budget — so per-shot overruns can't quietly blow past your cap. Already-rendered shots are kept; raise the budget and resume to continue.
+
+### Changed
+- **`codex/` models are hidden from the model picker.** The `codex/` (OpenAI Responses) models don't work through the hosted gateway and overlap the plain `gpt-5-codex` rows, so they no longer clutter the picker. Routing still works if you type `/model codex/<id>` explicitly.
+- **Documentation refresh.** The user manual (EN + TH) and the technical manual were audited against the current code and updated end-to-end — the provider list (now 25 providers; Agentic Press removed), the GUI-shell bridge, gateway metering, cloud visibility (public/unlisted/private), and the built-in tools. New chapters cover **Movie Maker / FilmScript**.
+
+### Fixed
+- **Movie Maker TTS is billed, not bypassed.** Gemini / OpenAI / MiniMax text-to-speech in the film pipeline now route through the metered gateway (or fail closed) instead of calling the provider directly, so hosted narration is attributed and billed correctly.
+- **`WatchVideo` and `FilmAssetImport` now ask before running.** Watching a clip runs a paid transcription, and asset import writes up to 30 MB — both now prompt for approval like other spend/side-effecting tools.
+- **Generated media is per-user in shared workspaces.** Images/videos land under your own workspace folder instead of a shared `output/`.
+
+## [0.86.0] — 2026-07-05
+
+Custom GUI shells graduate to first-class apps: they can approve tool calls in their own UI, stream a turn event-by-event, upload files, and store data — and the catalog now shows exactly what a shell can do before you install it. Plus a fix for `agent/*` models failing when thClaws is opened from the Dock.
+
+### Added
+- **GUI Shell inline tool approvals.** A shell with its own approve/deny UI no longer gets the full-screen system prompt on a mutating tool call — it renders its own widget (`thclaws.approvals.subscribe`/`respond`) and the engine waits for that verdict instead.
+- **GUI Shell `streamTurn` — event-by-event turns.** `thclaws.streamTurn(prompt)` returns an async-iterable that yields text, tool calls, and tool results in arrival order, for turn-by-turn shell UIs.
+- **GUI Shell `uploadFile`.** Shells can upload a file into the workspace and get back a servable URL to use as an `<img>`/link — per-user isolated in shared workspaces.
+- **GUI Shell storage: delete + quota.** `thclaws.storage.delete(key)` removes a key (distinct from setting it null); per-shell storage is now capped at 10 MB.
+- **Catalog shows shell capabilities before install.** An agent's detail page now lists what its shell can do ("Run the Bash tool", "Read your knowledge base", …) so you can see what you're consenting to.
+
+### Fixed
+- **`agent/*` models now work when thClaws is launched from the Dock/Finder or a scheduled job.** These models run the Claude Code `claude` CLI as a subprocess; a GUI/scheduled launch inherits a minimal `PATH` and couldn't find it (`spawn claude: No such file or directory`). thClaws now locates `claude` in the usual install spots even when `PATH` is bare, and gives an actionable error if it's genuinely missing.
+- **GUI Shell bridge calls no longer hang.** Several bridge methods (`storage.delete`, `permissions.list`/`has`, `awaitApproval`, `uploadFile`) had no engine handler and left their promise pending forever; they're now wired (or fail fast with a clear error), and every bridge call self-times-out rather than hanging.
+- **Custom shells can only invoke the tools they declare.** A shell's tool calls are now gated by its manifest `tools.invoke:*` permissions instead of being unrestricted.
+
 ## [0.85.0] — 2026-07-03
 
 FilmScript: turn a screenplay into a finished AI short. A new `.film` DSL and the Movie Maker agent compile a script into a multi-backend video with Thai dialogue, and the agent can now watch its own output back. Plus scheduled-run error visibility.

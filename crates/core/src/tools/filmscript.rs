@@ -291,6 +291,12 @@ impl Tool for FilmAssetImportTool {
         Some(GATE)
     }
 
+    fn requires_approval(&self, _input: &Value) -> bool {
+        // Writes up to 30 MB to the workspace — gate it (desktop shows the
+        // prompt; multiuser auto-approves within the per-user sandbox).
+        true
+    }
+
     async fn call(&self, input: Value) -> Result<String> {
         let rel = super::req_str(&input, "relpath")?;
         let b64 = super::req_str(&input, "contentBase64")?;

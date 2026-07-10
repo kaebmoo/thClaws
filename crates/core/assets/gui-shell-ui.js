@@ -709,3 +709,89 @@
 
   customElements.define("thc-chat", ThcChat);
 })();
+
+// ── thc-split — draggable pane separators ───────────────────────────────
+//
+// Declarative resizable splitters for multi-pane studio layouts (every
+// studio hand-rolled fixed grid columns before this). The shell drives its
+// grid off CSS custom properties and drops a handle between panes:
+//
+//   .body{display:grid;grid-template-columns:
+//         var(--w-rail,216px) 6px var(--w-film,296px) 6px minmax(0,1fr)}
+//   <div class="thc-split" data-var="--w-rail"
+//        data-min="140" data-max="420" data-default="216"></div>
+//
+// `thcUI.initSplitters(gridEl, storageKey)` wires every `.thc-split` child:
+// drag resizes the named var (clamped), double-click resets to
+// data-default, and widths persist per storageKey in localStorage
+// (best-effort — sandboxed pages without storage just don't persist).
+// `data-invert` flips the drag direction for a pane on the RIGHT of its
+// handle (e.g. a chat column: dragging left grows it).
+(function () {
+  "use strict";
+  window.thcUI = window.thcUI || {};
+  if (window.thcUI.initSplitters) return;
+
+  var css =
+    ".thc-split{cursor:col-resize;position:relative;z-index:5;}" +
+    ".thc-split::after{content:'';position:absolute;inset:0 1px;border-radius:2px;" +
+    "transition:background .12s;}" +
+    ".thc-split:hover::after,.thc-split.dragging::after{background:var(--accent,#0D9488);opacity:.55;}";
+  var style = document.createElement("style");
+  style.textContent = css;
+  (document.head || document.documentElement).appendChild(style);
+
+  function store(key, obj) {
+    try { localStorage.setItem("thc-split:" + key, JSON.stringify(obj)); } catch (e) {}
+  }
+  function load(key) {
+    try { return JSON.parse(localStorage.getItem("thc-split:" + key)) || {}; } catch (e) { return {}; }
+  }
+
+  window.thcUI.initSplitters = function (gridEl, storageKey) {
+    if (!gridEl) return;
+    var key = storageKey || (location.pathname || "shell");
+    var saved = load(key);
+    var handles = gridEl.querySelectorAll(".thc-split[data-var]");
+    handles.forEach(function (h) {
+      var name = h.getAttribute("data-var");
+      var min = parseFloat(h.getAttribute("data-min") || "120");
+      var max = parseFloat(h.getAttribute("data-max") || "560");
+      var def = parseFloat(h.getAttribute("data-default") || "260");
+      var invert = h.hasAttribute("data-invert") ? -1 : 1;
+      if (saved[name]) gridEl.style.setProperty(name, saved[name] + "px");
+
+      function current() {
+        var v = parseFloat(getComputedStyle(gridEl).getPropertyValue(name));
+        return isNaN(v) ? def : v;
+      }
+      h.addEventListener("mousedown", function (e) {
+        e.preventDefault();
+        var startX = e.clientX, startW = current();
+        h.classList.add("dragging");
+        document.body.style.cursor = "col-resize";
+        document.body.style.userSelect = "none";
+        function move(ev) {
+          var w = Math.min(max, Math.max(min, startW + (ev.clientX - startX) * invert));
+          gridEl.style.setProperty(name, w + "px");
+        }
+        function up() {
+          document.removeEventListener("mousemove", move);
+          document.removeEventListener("mouseup", up);
+          h.classList.remove("dragging");
+          document.body.style.cursor = "";
+          document.body.style.userSelect = "";
+          saved[name] = current();
+          store(key, saved);
+        }
+        document.addEventListener("mousemove", move);
+        document.addEventListener("mouseup", up);
+      });
+      h.addEventListener("dblclick", function () {
+        gridEl.style.setProperty(name, def + "px");
+        saved[name] = def;
+        store(key, saved);
+      });
+    });
+  };
+})();

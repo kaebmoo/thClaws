@@ -259,7 +259,8 @@ Multi-backend web search with auto-detection. Backend priority:
 
 1. **Tavily** — `TAVILY_API_KEY`; clean JSON, includes a synthesized `answer` field
 2. **Brave Search** — `BRAVE_SEARCH_API_KEY`; clean JSON
-3. **DuckDuckGo HTML scrape** — no key required; fallback
+3. **SerpAPI** — `SERPAPI_API_KEY`; real Google results as JSON (key rides as the `api_key` query param; gateway route `/serpapi`)
+4. **DuckDuckGo HTML scrape** — no key required; fallback
 
 Constructed via `WebSearchTool::new("auto" | "tavily" | "brave" | "duckduckgo")`. With `"auto"` (default), tries each in priority order. Explicit engine name forces that backend; `"duckduckgo"` skips the keyed backends entirely.
 
@@ -436,6 +437,16 @@ Primary motivation: `/dream`'s Pass 5 calls `KmsCreate({name: "dreams", scope: "
 
 All KMS tools rely on `kms::resolve(name)` (project KMS list first, then user). They're now always-registered regardless of `kms_active` contents.
 
+### KmsDelete
+
+| | |
+|---|---|
+| Name | `KmsDelete` |
+| Approval | **yes** (destructive — removes a page) |
+| Schema | `{kms: string, page: string}` |
+
+Delete a page from a KMS via `kms::delete_page` (path-safety through the shared `writable_page_path`, prunes the index bullet, writes a deleted-log entry). Added alongside `/dream` (see [`dream.md`](dream.md)). This is the sixth KMS tool referenced by the section intro.
+
 ### MemoryRead / MemoryWrite / MemoryAppend (M6.26)
 
 Three tools register **always** (not conditional on entry presence — the agent needs them to create the first entry). See [`memory.md`](memory.md) for the full subsystem (resolution, frontmatter, system-prompt injection, slash commands, sandbox carve-out).
@@ -568,7 +579,7 @@ Five tools — `TextToImage`, `ImageToImage`, `TextToVideo`, `ImageToVideo`, `Me
 - **`registry.rs`** — `all()` (image: `gemini`, `openai`, `qwen`), `video_all()` (video: `veo`, `dashscope_video`), `resolve()` / `resolve_video()` map a `(provider, model)` pair to an impl. Each provider's `resolve_model()` accepts ids + aliases.
 - **`providers/{gemini,openai,qwen,veo,dashscope_video}.rs`** — one file per backend.
 - **`job.rs`** — append-only JSONL job store at `.thclaws/media-jobs.jsonl` (latest line per id wins). Video is intrinsically async: the `*Video` tools `submit()` and return a `job_id`; `MediaJobStatus` reloads the ref and `poll()`s the provider, downloading the clip on `Done`.
-- **`mod.rs`** — `save_image` → `output/img-<ts>-<sha8>.<ext>`, `save_video` → `output/vid-<ts>-<sha8>.mp4`, plus `sniff_ext` / `sniff_video_ext` content sniffers.
+- **`mod.rs`** — `save_image` → `output/img-<ts>-<sha8>.<ext>`, `save_video` → `output/vid-<ts>-<sha8>.mp4`, plus `sniff_ext` / `sniff_video_ext` content sniffers. `save_under_output` anchors that `output/` at the **active sandbox root**, so in a multiuser `--serve` pod each user's media lands under their own `workspace-<id>/output/` (per-user isolation, dev-plan/42), not a shared process-cwd dir; the returned path stays workspace-relative.
 
 | Tool | Approval | Backends (model → key) |
 |---|---|---|
@@ -581,6 +592,57 @@ Five tools — `TextToImage`, `ImageToImage`, `TextToVideo`, `ImageToVideo`, `Me
 **Pricing** rides two catalogue fields beyond per-mtok: `price_per_image_usd` and `price_per_video_second_usd` (see [`model-catalogue.md`](model-catalogue.md)).
 
 **Gating** — all five are registered only when `AppConfig::image_tools_enabled` is true (`settings.json` `mediaToolsEnabled`, legacy alias `imageToolsEnabled`). The exception is the built-in **Media Studio** gui-shell: `ipc.rs::gui_shell_tool_invoke` force-enables the media tools when `shell_id == "media-studio"` regardless of the flag (`let media_enabled = shell_id == "media-studio" || AppConfig::load()…image_tools_enabled`), so the shell is a zero-config on-ramp while the agent surface stays opt-in. Registration happens at the agent/shared-session/shell sites listed in `shared_session.rs` (6 sites, each guarded by the flag).
+
+---
+
+## 9e. Video review — WatchVideo
+
+| | |
+|---|---|
+| Name | `WatchVideo` (`src/tools/watch_video.rs`) |
+| Approval | **yes** (the Whisper transcript is a paid, gateway-metered call) |
+| Schema | `{path, scene?, fps_floor?, max_frames?, dedup?, lang?}` |
+
+Lets a vision model actually *watch* a local video: extracts scene-aware,
+deduplicated key frames (capped/downscaled) and returns them as inline
+images via `call_multimodal`, plus an optional Whisper transcript when
+`GROQ_API_KEY` is set. Registered unconditionally (not media-gated).
+Frame extraction is local + free; only the transcript costs. Used by the
+Movie Maker agent to review/critique a generated clip and drive re-rolls.
+
+## 9f. Content localizer — FetchImages
+
+| | |
+|---|---|
+| Name | `FetchImages` (`src/tools/fetch_images.rs`) |
+| Approval | **yes** · gated behind the `content-extractor` subagent |
+| Schema | `{markdown_path, base_url?, timeout_secs?, max_mb?}` |
+
+Downloads every remote image referenced by a markdown file into a sibling
+`images/` dir and rewrites the links in place. The `markdown_path` is
+`Sandbox::check_write`-confined (rejects absolute / `..` / cross-tenant
+paths) — important because in multiuser mode approval is auto-granted.
+
+## 9g. FilmScript / Movie Maker tools
+
+Five tools — `FilmCompile`, `FilmGenerate`, `FilmJobStatus`, `FilmJobCancel`,
+`FilmAssetImport` (`src/tools/filmscript.rs`) — turn a `.film` screenplay
+into a finished AI video. All are **gated behind the `filmscript` tool-gate**
+(dormant + invisible until the Movie Maker agent's skill or the Film Studio
+gui-shell opens the gate). `FilmGenerate` (`requires_approval`) is gated by a
+**required `budgetUsd`** — the real spend consent — and `FilmAssetImport`
+(`requires_approval`) writes up to 30 MB into `.thclaws/film/assets/`;
+`FilmCompile`/`FilmJobStatus`/`FilmJobCancel` are read-only/pure. Full
+subsystem — the DSL, two-phase compiler, cost model, backends, harness — is
+in [`filmscript.md`](filmscript.md).
+
+## 9h. Document publishing — EpubCreate, QuizRender
+
+`EpubCreate` (`src/tools/epub_create.rs`, `requires_approval`) compiles
+Markdown → EPUB, joining the Docx/Xlsx/Pptx/Pdf document family (see
+[`document-tools.md`](document-tools.md)). `QuizRender`
+(`src/tools/quiz_render.rs`, no approval) renders an interactive quiz
+artifact.
 
 ---
 
@@ -604,7 +666,7 @@ crates/core/src/tools/
 │                                                          completion auto-restore (covered in
 │                                                          permissions.md §7-8)
 ├── read.rs (411 LOC)                                   ── Read (text + image multimodal)
-├── search.rs (238 LOC)                                 ── WebSearch (Tavily/Brave/DDG)
+├── search.rs (238 LOC)                                 ── WebSearch (Tavily/Brave/SerpAPI/DDG)
 ├── tasks.rs (299 LOC)                                  ── TaskCreate/Update/Get/List + SharedTaskStore
 ├── todo.rs (382 LOC)                                   ── TodoWrite (markdown checklist)
 ├── web.rs (91 LOC)                                     ── WebFetch

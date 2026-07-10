@@ -190,24 +190,26 @@ Without `/cloud unbind`, the next publish would try to update the
 original author's catalog row (and fail with a permission error — the
 catalog gates publishes by author).
 
-## Visibility — public vs private
+## Visibility — public / unlisted / private
 
-Every published agent has a **visibility** setting:
+Every published agent has a **visibility** setting (three values):
 
 | Visibility | Who can see / install it |
 |---|---|
-| `public` (default) | Everyone — shows in `/browse`, the `/a/<slug>` page, and is installable with `/cloud get` |
-| `private` | Only the **author** and an admin (root) |
+| `public` | Everyone — shows in `/browse`, the `/a/<slug>` page, installable with `/cloud get`. **Superadmin review only** (a normal author can't self-promote to public). |
+| `unlisted` (default) | Anyone with the **link** — hidden from `/browse`, but the `/a/<slug>` page works and `/cloud get <slug>` installs. The share-link default for self-published agents. |
+| `private` | Only the **author** and root |
 
-New agents publish as **public by default**. A `private` agent is
-hidden from every path other users could reach it through — the catalog
-list, the detail page, `/cloud get` (download), and fork all return
-**404** (not 403 — deliberately, so private slugs aren't enumerable).
-A non-owner can't even tell the agent exists.
+New agents from a verified (non-superadmin) user publish as **`unlisted`
+by default** — reachable by sharing the page link, not listed in the
+public catalog. A `private` agent is hidden from every path (list, detail,
+`/cloud get`, fork all **404** — not 403, so private slugs aren't
+enumerable).
 
 **Changing visibility** — open your agent's page on the web
-(`https://thclaws.cloud/a/<slug>`); a public/private toggle appears
-there, but only when you're the owner (or root). There is *no* desktop
+(`https://thclaws.cloud/a/<slug>`); a toggle appears when you're the
+owner (or root). An author may flip between `private` and `unlisted`
+freely; **promoting to `public` is superadmin-only** (else 403). There is *no* desktop
 `/cloud` verb for this — it's web-only (it calls
 `PATCH /api/agents/<slug>/visibility` under the hood). Use `private`
 for agents still in beta/testing, or ones you want to share with just
@@ -223,9 +225,10 @@ you'd run locally.
 From the catalog web UI:
 
 1. Browse to an agent's detail page.
-2. Click *Install on hosted*.
-3. The catalog spins up a workspace, copies the agent's files in, and
-   redirects you to the chat UI at `/u/<your-handle>/<slug>/` (the handle
+2. Click *Install on hosted* and pick (or create) a **ready** workspace.
+3. The catalog installs the agent into that existing workspace —
+   **overwriting** its current agent definition — and redirects you to the
+   chat UI at `/u/<your-handle>/<slug>/` (the handle
    is a stable per-user id, so two users can each have a workspace named
    `<slug>` without their URLs colliding).
 
@@ -265,15 +268,15 @@ For **hosted** workspaces, the gateway is auto-wired when you pick
 *Gateway* at workspace-create time — the runner gets the env vars
 injected, no copy-paste needed.
 
-### Tier gating
+### Credit is the only gate
 
-Models are split into three tiers — `starter`, `pro`, `enterprise`.
-Your account's `model_tier` (set in the catalog dashboard) controls
-which models the gateway accepts. Starter accounts get Haiku /
-gpt-4o-mini / Gemini Flash; calling Sonnet on starter returns a `403`
-from the gateway with an upgrade link. Tiers are independent of
-balance — having $100 in credit doesn't unlock enterprise models on
-a starter account.
+There is **no model-tier ladder** — the old `starter`/`pro`/`enterprise`
+gating was dropped. **Positive credit balance ⇒ any active model is
+callable**; a `402 Payment Required` only fires when your balance hits
+`0`. The price differential does the rest: a heavy Opus turn simply costs
+more per call than Haiku, so expensive models naturally burn credit
+faster. (`model_pricing.tier` still exists but is display-only — it sorts
+the pricing page, it doesn't block anything.)
 
 ## Shared agents (one company agent, many people)
 
@@ -301,8 +304,9 @@ How it's structured:
   agent.
 - **Gateway-only, owner pays.** Shared agents have no BYOK and no
   `.env` — all inference goes through the thClaws.cloud gateway and is
-  billed to the **owner**. The owner sets a **per-member monthly
-  budget cap** ($/mo); a member who hits their cap is blocked until it
+  billed to the **owner**. The owner sets a **per-member daily
+  spend cap** (cents, resets each UTC day) on top of a workspace-wide
+  daily cap; a member who hits their cap is blocked until it
   resets, so one person can't run up the whole bill.
 - **Read-only means fork to customize.** A member can't edit the
   shared brain or write to the company KMS — those return a clear

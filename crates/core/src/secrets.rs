@@ -109,6 +109,7 @@ const MANAGED: &[ProviderKind] = &[
     ProviderKind::Moonshot,
     ProviderKind::XAi,
     ProviderKind::Minimax,
+    ProviderKind::Groq,
 ];
 
 /// Non-LLM service keys we surface in the same Settings modal as the
@@ -120,6 +121,7 @@ const MANAGED: &[ProviderKind] = &[
 pub const SERVICE_KEYS: &[(&str, &str)] = &[
     ("tavily", "TAVILY_API_KEY"),
     ("brave-search", "BRAVE_SEARCH_API_KEY"),
+    ("serpapi", "SERPAPI_API_KEY"),
     ("hal", "HAL_API_KEY"),
 ];
 

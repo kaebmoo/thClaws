@@ -221,6 +221,7 @@ pub async fn run(config: AppConfig) -> Result<()> {
     tools.register(Arc::new(crate::tools::KmsReadTool));
     tools.register(Arc::new(crate::tools::KmsSearchTool));
     tools.register(Arc::new(crate::tools::KmsWriteTool));
+    tools.register(Arc::new(crate::tools::KmsWriteSourceTool));
     tools.register(Arc::new(crate::tools::KmsAppendTool));
     tools.register(Arc::new(crate::tools::KmsDeleteTool));
     tools.register(Arc::new(crate::tools::KmsCreateTool));
@@ -283,11 +284,11 @@ pub async fn run(config: AppConfig) -> Result<()> {
     let factory_snapshot = Arc::new(std::sync::RwLock::new(crate::subagent::FactorySnapshot {
         system: system.clone(),
         tools: tools.clone(),
+        model: config.model.clone(),
+        provider: provider.clone(),
     }));
     let factory = Arc::new(ProductionAgentFactory {
-        provider: provider.clone(),
         snapshot: factory_snapshot,
-        model: config.model.clone(),
         max_iterations: config.max_iterations,
         max_depth: crate::subagent::DEFAULT_MAX_DEPTH,
         max_tokens: config.max_tokens,

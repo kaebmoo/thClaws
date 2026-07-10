@@ -334,6 +334,13 @@ pub fn unbind() -> Result<(), String> {
 
 /// `/cloud unbind` from inside a session. Same logic as [`unbind`]
 /// but returns lines for the SlashOutput stream instead of eprintln.
+/// `/cloud unbind` — blank the folder's bound agent UUID. This is the single
+/// "detach" operation and it serves both intents: afterwards a DIFFERENT agent
+/// can be `/cloud get`'d over this folder (the get guard treats an unbound
+/// folder as free — see the uuid check in `get_lines`), AND a `/cloud publish`
+/// with no bound uuid registers a NEW catalog entry (the backend mints a fresh
+/// uuid and writes it back) instead of trying to update the original — i.e. a
+/// fork. No separate `/cloud fork` needed; unbind + publish is the fork flow.
 pub fn unbind_lines() -> Vec<String> {
     let mut project = crate::config::ProjectConfig::load().unwrap_or_default();
     let prior = project
@@ -342,14 +349,17 @@ pub fn unbind_lines() -> Vec<String> {
         .and_then(|a| a.uuid.clone())
         .unwrap_or_default();
     if prior.is_empty() {
-        return vec!["Already unbound (no settings.json::agent.uuid).".to_string()];
+        return vec![
+            "Already unbound — `/cloud get <slug>` can replace this folder, or edit + `/cloud publish` for a new entry.".to_string(),
+        ];
     }
     project.clear_agent_uuid();
     if let Err(e) = project.save() {
         return vec![format!("/cloud unbind: write settings.json: {e}")];
     }
     vec![format!(
-        "✓ Cleared agent UUID ({}…). Next /cloud publish will create a new catalog entry.",
+        "✓ Detached agent {}… — folder is now unbound. `/cloud get <slug>` can replace it \
+         with a different agent, or edit + `/cloud publish` to fork it into a new catalog entry.",
         prior.chars().take(8).collect::<String>()
     )]
 }
@@ -473,13 +483,16 @@ async fn get_lines(
                 return lines;
             }
             None => {
+                // No bound UUID = no published agent to protect. The folder was
+                // either explicitly detached (`/cloud unbind`, which blanks the
+                // uuid) or hand-assembled; either way an explicit `/cloud get`
+                // is a clear intent to install here, so replace it. (The guard
+                // exists to stop clobbering a DIFFERENT bound agent — case 2 —
+                // not an unbound folder.)
                 lines.push(
-                    "/cloud get: refusing to overwrite. This folder has agent content \
-                     (AGENTS.md / manifest.json) but no bound UUID in .thclaws/settings.json. \
-                     Cd to an empty directory and run /cloud get again."
+                    "  Folder is unbound (no agent UUID) — replacing it with the downloaded agent."
                         .into(),
                 );
-                return lines;
             }
         }
     }
@@ -538,7 +551,14 @@ async fn get_lines(
 /// silently wipes the user's gateway routing (`gatewayProxy`) and cloud URL,
 /// which surfaces as a misleading "no API key found for provider 'anthropic'"
 /// on the next agent rebuild.
-const INSTALLER_OWNED_SETTINGS_KEYS: &[&str] = &["gatewayProxy", "gateway_use_for", "cloudUrl"];
+///
+/// `model` is here too: `/model` persists the user's pick to the project
+/// settings, and losing it on install meant the post-get `/reload` silently
+/// fell back to the global default. A bundle that explicitly ships `model`
+/// (a publisher pin) still wins — restore only fills keys the bundle left
+/// unset.
+const INSTALLER_OWNED_SETTINGS_KEYS: &[&str] =
+    &["gatewayProxy", "gateway_use_for", "cloudUrl", "model"];
 
 /// Restore installer-owned keys from `prior_raw` onto the freshly-extracted
 /// `.thclaws/settings.json`. Only fills keys the agent's bundle did NOT set,
@@ -764,9 +784,28 @@ mod tests {
         // Agent-owned keys survive untouched.
         assert_eq!(s["imageToolsEnabled"], serde_json::json!(true));
         assert_eq!(s["agent"]["id"], serde_json::json!("image-generator"));
-        // `model` is publisher-shippable, so it is NOT in the installer-owned
-        // set — the agent's omission stands rather than being force-restored.
-        assert!(s.get("model").is_none(), "model is not force-carried");
+        // The user's model pick survives the overwrite — pre-fix the
+        // post-get `/reload` reverted to the global default model.
+        assert_eq!(
+            s["model"],
+            serde_json::json!("claude-x"),
+            "user's model preserved"
+        );
+    }
+
+    #[test]
+    fn restore_keeps_a_publisher_pinned_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let prior = br#"{"model": "user-choice"}"#;
+        // Bundle explicitly pins a model → the pin wins over the prior.
+        write_settings(dir.path(), r#"{"model": "publisher-pin"}"#);
+
+        restore_installer_settings(dir.path(), prior).unwrap();
+
+        assert_eq!(
+            read_settings(dir.path())["model"],
+            serde_json::json!("publisher-pin")
+        );
     }
 
     #[test]

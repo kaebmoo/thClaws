@@ -592,7 +592,7 @@ fn profile_dir_for(container: bool) -> PathBuf {
     if container {
         return std::env::current_dir()
             .unwrap_or_default()
-            .join(".thclaws/browser-profile");
+            .join(".thclaws/state/browser-profile");
     }
     let cwd = std::env::current_dir().unwrap_or_default();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -996,9 +996,9 @@ mod tests {
         // restarts — and the pack strip rule must cover that path.
         let cloud = profile_dir_for(true);
         assert!(cloud.starts_with(&cwd));
-        assert!(cloud.ends_with(".thclaws/browser-profile"));
+        assert!(cloud.ends_with(".thclaws/state/browser-profile"));
         assert!(crate::cloud::pack::is_strippable(std::path::Path::new(
-            ".thclaws/browser-profile/Default/Cookies"
+            ".thclaws/state/browser-profile/Default/Cookies"
         )));
     }
 

@@ -1174,15 +1174,16 @@ impl SessionStore {
         Self { root }
     }
 
-    /// Always project-scoped: `./.thclaws/sessions/`. Starting in a blank
-    /// directory gives you an empty session list — legacy user-level sessions
-    /// at `~/.local/share/thclaws/sessions/` and `~/.claude/sessions/` are
-    /// left alone (you can move them into a project's `.thclaws/sessions/` to
-    /// import). The dir is created on first save; we don't materialise it
-    /// just to list.
+    /// Always project-scoped: `./.thclaws/state/sessions/` (workspace v2 —
+    /// runtime state lives under `state/`). Starting in a blank directory
+    /// gives you an empty session list — legacy user-level sessions at
+    /// `~/.local/share/thclaws/sessions/` and `~/.claude/sessions/` are
+    /// left alone (you can move them into a project's
+    /// `.thclaws/state/sessions/` to import). The dir is created on first
+    /// save; we don't materialise it just to list.
     pub fn default_path() -> Option<PathBuf> {
         let cwd = std::env::current_dir().ok()?;
-        Some(cwd.join(".thclaws").join("sessions"))
+        Some(cwd.join(".thclaws").join("state").join("sessions"))
     }
 
     pub fn path_for(&self, id: &str) -> PathBuf {

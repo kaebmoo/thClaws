@@ -129,6 +129,34 @@ or shell pipelines:
 git diff | thclaws -p "summarise this diff for a commit message"
 ```
 
+Since **v0.88.0**, `-p` is a *full* headless surface — the same
+capabilities as the interactive CLI, one turn at a time:
+
+- **Sessions persist.** Each run saves to the workspace session store
+  (`.thclaws/state/sessions/`), and `--resume <id|last>` continues a
+  previous conversation with full history:
+
+  ```bash
+  thclaws -p "remember: the release codename is Falcon"
+  thclaws -p --resume last "what's the release codename?"   # → Falcon
+  ```
+
+  Pass `--no-session` to restore the old leave-no-trace behaviour for
+  quick scripted one-shots.
+- **Subagents work.** The Task tool is registered, so prompts that fan
+  out (research pipelines, `WorkflowRun` scripts, multi-role work)
+  behave exactly like they do in the GUI/CLI instead of the model
+  role-playing every part in one context.
+- **Hooks fire** — the same `settings.json` hooks as every other mode
+  (see [Chapter 13](ch13-hooks.md)).
+
+Status lines (`[session] saved …`, tool traces) go to **stderr**;
+stdout stays the clean answer, so pipes keep working.
+
+The `--resume` chain is also what powers **heartbeat schedules** —
+recurring jobs that keep one growing conversation instead of starting
+amnesiac every fire. See [Chapter 19](ch19-scheduling.md#heartbeats).
+
 ![thClaws Non-Interactive Mode](../user-manual-img/ch-03/thclaws-non-interactive.png)
 
 ### `--serve` (HTTP/WebSocket server)
@@ -176,7 +204,7 @@ LINE / browser bridge built on top of `--serve`.
     --port N                 port for --serve mode (default 8443)
     --bind ADDR              bind address for --serve (default 127.0.0.1; 0.0.0.0 needs auth)
     --gui                    open desktop window (compose with --serve to attach to same engine)
--m, --model MODEL            override the model (e.g. claude-sonnet-4-6, ap/gemma4-26b)
+-m, --model MODEL            override the model (e.g. claude-sonnet-4-6, moonshot/kimi-k2.6)
     --accept-all             auto-approve every tool call (dangerous — see ch5)
     --permission-mode MODE   auto | ask
     --max-iterations N       max agent loop iterations per turn (0 = unlimited, default 200)
@@ -251,7 +279,7 @@ template file that lists every field at its default value. Open
 | `maxTokens` | number | `32000` | (max output tokens per turn) |
 | `maxIterations` | number | `50` | (per-turn tool-call loop cap) |
 | `thinkingBudget` | number | `10000` | [Chapter 6](ch06-providers-models-api-keys.md) (Anthropic extended-thinking) |
-| `searchEngine` | string | `"auto"` | (`auto` / `tavily` / `brave` / `duckduckgo`) |
+| `searchEngine` | string | `"auto"` | (`auto` / `tavily` / `brave` / `serpapi` / `duckduckgo`) |
 
 #### Permissions & tools
 

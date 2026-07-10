@@ -182,27 +182,27 @@ session ของ folder agent นั้น:
 row ของเจ้าของเดิม (และจะ fail ด้วย permission error — catalog gate
 การ publish ตาม author)
 
-## Visibility — public กับ private
+## Visibility — public / unlisted / private
 
-ทุก agent ที่ publish มีสถานะ **visibility** สองแบบ:
+ทุก agent ที่ publish มีสถานะ **visibility** สามแบบ:
 
 | Visibility | ใครเห็น / ติดตั้งได้ |
 |---|---|
-| `public` (ค่า default) | ทุกคน — โผล่ใน `/browse`, หน้า `/a/<slug>`, และ `/cloud get` ได้ |
-| `private` | เฉพาะ **เจ้าของ** (author) และ admin (root) เท่านั้น |
+| `public` | ทุกคน — โผล่ใน `/browse`, หน้า `/a/<slug>`, ติดตั้งด้วย `/cloud get` ได้ **ต้องผ่านการรีวิวโดย superadmin เท่านั้น** (author ทั่วไปเลื่อนเป็น public เองไม่ได้) |
+| `unlisted` (ค่า default) | ใครก็ตามที่มี **ลิงก์** — ไม่โผล่ใน `/browse` แต่หน้า `/a/<slug>` เปิดได้และ `/cloud get <slug>` ติดตั้งได้ เป็นค่า default แบบ share-link ของ agent ที่ผู้ใช้ publish เอง |
+| `private` | เฉพาะ **เจ้าของ** (author) และ root เท่านั้น |
 
-agent ที่ publish ใหม่จะเป็น **public โดย default** ส่วน agent ที่เป็น
-`private` จะถูกซ่อนจากทุกจุดที่ผู้ใช้คนอื่นเข้าถึงได้ — catalog list,
-หน้า detail, `/cloud get` (download), และ fork ทั้งหมดตอบ **404** (ไม่ใช่
-403 — ตั้งใจให้ slug ของ private agent เดาไม่ได้) สรุปคือคนที่ไม่ใช่
-เจ้าของจะไม่รู้ด้วยซ้ำว่า agent ตัวนั้นมีอยู่
+agent ที่ผู้ใช้ (verified, ไม่ใช่ superadmin) publish ใหม่จะเป็น
+**`unlisted` โดย default** — เข้าถึงได้ด้วยการแชร์ลิงก์หน้า ไม่โผล่ใน
+catalog สาธารณะ ส่วน agent ที่เป็น `private` จะถูกซ่อนจากทุกจุด (list,
+detail, `/cloud get`, fork ตอบ **404** — ไม่ใช่ 403 เพื่อให้ slug เดาไม่ได้)
 
 **เปลี่ยน visibility ยังไง** — ไปที่หน้า agent ของคุณบนเว็บ
-(`https://thclaws.cloud/a/<slug>`) จะมีปุ่ม toggle public/private ที่
-โผล่เฉพาะตอนคุณเป็นเจ้าของ (หรือ root) เท่านั้น *ยังไม่มี* คำสั่ง
-`/cloud` ฝั่ง desktop สำหรับเรื่องนี้ — เป็น web-only (เบื้องหลังเรียก
-`PATCH /api/agents/<slug>/visibility`) ใช้ private สำหรับ agent ที่ยัง
-อยู่ในช่วง beta/ทดสอบ หรือที่อยากแชร์เฉพาะทีมตัวเองก่อนเปิดสาธารณะ
+(`https://thclaws.cloud/a/<slug>`) จะมีปุ่ม toggle ตอนคุณเป็นเจ้าของ
+(หรือ root) author สลับระหว่าง `private` กับ `unlisted` ได้อิสระ แต่
+**การเลื่อนเป็น `public` ทำได้เฉพาะ superadmin** (ไม่งั้นตอบ 403) *ยังไม่มี*
+คำสั่ง `/cloud` ฝั่ง desktop สำหรับเรื่องนี้ — เป็น web-only (เบื้องหลังเรียก
+`PATCH /api/agents/<slug>/visibility`)
 
 ## Hosted workspace (เช่าแทนที่จะติดตั้ง)
 
@@ -214,9 +214,9 @@ engine ตัวเดียวกับที่คุณรันใน local
 จาก web UI ของ catalog:
 
 1. browse ไปหน้า detail ของ agent
-2. กด *Install on hosted*
-3. catalog จะ spin up workspace คัดลอกไฟล์ของ agent เข้าไป แล้ว
-   redirect ไป chat UI ที่ `/u/<handle>/<slug>/`
+2. กด *Install on hosted* แล้วเลือก (หรือสร้าง) workspace ที่ **ready**
+3. catalog จะติดตั้ง agent ลง workspace ที่มีอยู่นั้น — **เขียนทับ** agent
+   definition เดิมของมัน — แล้ว redirect ไป chat UI ที่ `/u/<handle>/<slug>/`
 
 Hosted workspace รองรับทั้ง BYOK (วาง provider key เองที่ *Settings
 → Hosted keys*) และ **thClaws.cloud gateway** (proxy แบบ pay-per-use
@@ -254,14 +254,14 @@ toggle ให้เลือก
 *Gateway* ตอนสร้าง workspace — runner จะได้ env var ที่ inject ให้
 แล้วโดยไม่ต้อง copy-paste
 
-### Tier gating ของ model
+### credit balance คือ gate เดียว
 
-Model ถูกแบ่งเป็น 3 tier — `starter`, `pro`, `enterprise` ค่า
-`model_tier` ของ account (ตั้งใน catalog dashboard) ควบคุมว่า gateway
-จะยอมรับ model ใดบ้าง Account starter จะได้ Haiku / gpt-4o-mini /
-Gemini Flash ส่วนการเรียก Sonnet ด้วย starter account จะคืน `403`
-จาก gateway พร้อมลิงก์ upgrade Tier กับ balance แยกกัน — มี credit
-$100 ก็ไม่ได้ปลด enterprise model ให้ starter account
+**ไม่มี tier ladder แล้ว** — ระบบ gating แบบ `starter`/`pro`/`enterprise`
+เดิมถูกยกเลิกไป **มี credit เป็นบวก = เรียก model ที่ active ตัวไหนก็ได้**
+จะขึ้น `402 Payment Required` ก็ต่อเมื่อ balance เหลือ `0` เท่านั้น
+ส่วนต่างของราคาเป็นตัวจัดการเอง: การเรียก Opus หนัก ๆ ก็แค่ราคาต่อครั้ง
+แพงกว่า Haiku จึงเผา credit เร็วกว่าตามธรรมชาติ (`model_pricing.tier`
+ยังอยู่ในสคีมาแต่ใช้แค่จัดเรียงหน้า pricing — ไม่ได้บล็อกอะไร)
 
 ## Shared agent (agent บริษัทตัวเดียว หลายคนใช้ร่วมกัน)
 
@@ -286,9 +286,9 @@ $100 ก็ไม่ได้ปลด enterprise model ให้ starter accoun
   agent ตัวเดียวกันจริง ๆ
 - **gateway อย่างเดียว เจ้าของจ่าย** shared agent ไม่มี BYOK และไม่มี
   `.env` — inference ทั้งหมดวิ่งผ่าน gateway ของ thClaws.cloud และคิด
-  เงินไปที่ **เจ้าของ** เจ้าของตั้ง **budget cap ต่อสมาชิกต่อเดือน**
-  ($/mo) ได้ สมาชิกที่ถึง cap จะถูกบล็อกจนกว่าจะรีเซ็ต กันไม่ให้คนเดียว
-  ใช้จนบิลบานปลาย
+  เงินไปที่ **เจ้าของ** เจ้าของตั้ง **เพดานใช้จ่ายต่อสมาชิกต่อวัน**
+  (หน่วยเซ็นต์ รีเซ็ตทุกวันตาม UTC) บนเพดานรวมต่อ workspace ต่อวันอีกชั้น
+  สมาชิกที่ถึง cap จะถูกบล็อกจนกว่าจะรีเซ็ต กันไม่ให้คนเดียวใช้จนบิลบานปลาย
 - **อ่านอย่างเดียว = ต้อง fork ถ้าจะปรับ** สมาชิกแก้สมองที่แชร์หรือเขียน
   ลง KMS บริษัทไม่ได้ — จะขึ้นข้อความ "shared KMS is read-only — fork to
   edit" ถ้าอยากปรับแต่งให้ **fork** shared agent ออกเป็น agent ส่วนตัว

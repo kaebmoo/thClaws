@@ -37,6 +37,8 @@ deploy โปรเจกต์จริง ไม่ว่าจะเป็น
 | 26 | [GUI Shells](ch26-gui-shells.md) |
 | 27 | [thClaws.cloud (catalog + hosted + gateway)](ch27-thclaws-cloud.md) |
 | 28 | [Browser automation](ch28-browser-automation.md) |
+| 29 | [Movie Maker (สร้างหนัง AI จากบท)](ch29-movie-maker.md) |
+| 30 | [Job Artifacts (รับ-ส่งไฟล์สำหรับ orchestrator)](ch30-job-artifacts.md) |
 
 > **ส่วนที่ 2 — กรณีศึกษา (บทที่ 29–31)** — walkthrough สำหรับสร้าง
 > โปรเจกต์จริงด้วย thClaws (เว็บ static, Node.js app, AI agent, การ

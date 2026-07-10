@@ -392,7 +392,8 @@ thclaws.on("error",       (err)     => …);
 
 // Or consume a turn as an async stream (sugar over run() + on()).
 for await (const ev of thclaws.streamTurn("Summarise this.")) {
-  if (ev.value?.type === "text") render(ev.value.delta);
+  if (ev.type === "text") render(ev.delta);
+  else if (ev.type === "tool_call") showSpinner(ev.label);
 }
 
 // Direct tool invocation — bypass the agent loop for deterministic actions.
@@ -431,17 +432,15 @@ thclaws.ui.onFullscreen((active) => {            // fires immediately + on chang
 myExitButton.onclick = () => thclaws.ui.exitFullscreen();
 ```
 
-> **On the bridge object but not yet wired.** A few methods are part of
-> the published contract so shells can code against them, but the engine
-> handler hasn't landed yet — don't ship a shell that depends on them:
-> `thclaws.storage.delete(key)` (use `storage.set(key, null)` instead),
-> `thclaws.permissions.list()` / `.has(action)` (read the granted set),
-> `thclaws.awaitApproval(request)` (inline approval widget — falls back
-> to the system approval modal), and `thclaws.uploadFile(blob, name)`
-> (push a blob into the asset store — use `thclaws.fileUrl()` on an
-> agent-written file instead). Today only `run`, `cancel`, `on`,
-> `callTool` / `tools.invoke`, `storage.get` / `storage.set`, `fileUrl`,
-> `streamTurn`, and the `ui.*` surface are backed end-to-end.
+> **The full surface is wired.** As of the Tier-3 update every bridge
+> method is backed end-to-end: `run` / `cancel` / `on` / `streamTurn`
+> (yields `text` / `tool_call` / `tool_result`) / `callTool` +
+> `tools.invoke` / `storage.get` + `set` + `delete` (10 MB per-shell cap) /
+> `approvals.subscribe` + `respond` (render your own approve/deny widget
+> instead of the system modal) / `awaitApproval` / `uploadFile` (push a
+> blob → returns a servable URL) / `permissions.list` + `has` /
+> `model.*` + `kms.*` + `research.*` / `fileUrl` / `ui.*`. Any call that
+> the host can't answer self-rejects after 15 minutes, so nothing hangs.
 
 The bridge is **the only API**. Shells cannot reach the workspace
 filesystem, the network (unless `network.outbound:<host>` is
@@ -459,6 +458,12 @@ Declare what your shell does in `manifest.json::permissions`:
 | `session.read` / `session.list` | read sidecar session data |
 | `fs.shell-scoped` | read/write inside the shell's resolved root |
 | `network.outbound:<host>` | `fetch()` to that host (CSP injected at serve time) |
+| `approval.inline` | the shell renders its own approve/deny widget (`thclaws.approvals.*`) instead of the system modal |
+| `model.read` / `model.write` | `thclaws.model.*` — see / switch the model |
+| `kms.read` / `research.read` | `thclaws.kms.*` / `thclaws.research.*` — read the knowledge base / research jobs directly |
+
+Declaring any `tools.invoke:<name>` **restricts** the shell to just those
+tools (`tools.invoke:*` = all); declaring none leaves it unrestricted.
 
 Users see this list before installing. Anything not declared throws
 at call time.

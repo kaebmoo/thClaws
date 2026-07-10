@@ -19,7 +19,7 @@
 use super::super::{
     compile_phase1, compile_phase2, AssetRequest, PartialShot, Phase1Result, ResolvedAsset,
 };
-use super::kie::{resolve_kie_key, KieClient};
+use super::kie::KieClient;
 use super::upload::KieUploader;
 use super::{atomic_write_json, cache_dir, ffprobe_duration_ms, job_dir, sha256_hex};
 use crate::error::{Error, Result};
@@ -33,6 +33,11 @@ pub const STATE_RUNNING: &str = "running";
 pub const STATE_DONE: &str = "done";
 pub const STATE_FAILED: &str = "failed";
 pub const STATE_CANCELLED: &str = "cancelled";
+
+/// Kie credit → USD (kie.ai: 1 credit = $0.005). Same basis the phase-1
+/// estimate uses (300 credits = $1.50), so the running budget ceiling
+/// and the up-front estimate speak the same currency.
+const USD_PER_KIE_CREDIT: f64 = 0.005;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShotState {
@@ -150,7 +155,9 @@ pub fn start(script: &str, budget_usd: f64, resume: bool) -> Result<String> {
         )));
     }
     super::check_av_tools()?;
-    let kie_key = resolve_kie_key()?;
+    // Pre-flight the Kie endpoint (BYOK key or gateway access) before
+    // any state is created — run_job re-resolves inside the worker.
+    let _ = KieClient::resolve()?;
 
     let job_id = job_id_for_script(script);
     {
@@ -202,12 +209,26 @@ pub fn start(script: &str, budget_usd: f64, resume: bool) -> Result<String> {
 
         let script = script.to_string();
         let jid = job_id.clone();
+        // dev-plan/45 A2: the MEMBER_ID task-local does NOT cross this
+        // thread + fresh-runtime boundary. Capture it in the turn context
+        // (where scope_member set it) and re-scope inside the job so every
+        // gateway call in run_job attaches X-Thclaws-Member — otherwise
+        // the most expensive media path (FilmGenerate) spends entirely
+        // unattributed and escapes the per-member daily cap.
+        let member = crate::multi_tenant::current_member_id();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("tokio runtime");
-            let outcome = rt.block_on(run_job(&jid, &script, &kie_key, &flag));
+            let outcome = rt.block_on(async {
+                match member {
+                    Some(m) => {
+                        crate::multi_tenant::scope_member(m, run_job(&jid, &script, &flag)).await
+                    }
+                    None => run_job(&jid, &script, &flag).await,
+                }
+            });
             let mut st = JobState::load(&jid).unwrap_or(state);
             match outcome {
                 Ok(()) => st.state = STATE_DONE.into(),
@@ -256,10 +277,10 @@ fn chain_warnings(p1: &Phase1Result) -> Vec<String> {
     warnings
 }
 
-async fn run_job(job_id: &str, script: &str, kie_key: &str, cancel: &AtomicBool) -> Result<()> {
+async fn run_job(job_id: &str, script: &str, cancel: &AtomicBool) -> Result<()> {
     let p1 = compile_phase1(script);
-    let uploader = KieUploader::new(kie_key.to_string());
-    let kie = KieClient::new(kie_key.to_string());
+    let uploader = KieUploader::resolve()?;
+    let kie = KieClient::resolve()?;
     let mut assets: Vec<ResolvedAsset> = Vec::new();
     let mut state = JobState::load(job_id)?;
 
@@ -320,6 +341,24 @@ async fn run_job(job_id: &str, script: &str, kie_key: &str, cancel: &AtomicBool)
         let shot = p1.shots.iter().find(|s| s.id() == shot_id).expect("shot");
         if state.shot_mut(&shot_id).state == "done" {
             continue;
+        }
+
+        // Running budget ceiling. The estimate is confirmed once at start
+        // (`total_usd <= budget_usd`), but per-shot ACTUALS can drift above
+        // it — stop before spending the next paid shot once accumulated
+        // spend passes the confirmed budget. Kie bills $0.005/credit, the
+        // same basis as the phase-1 estimate (300 credits = $1.50), so both
+        // speak the same currency. Rendered shots are already saved, so the
+        // user can raise budgetUsd and resume.
+        if state.budget_usd > 0.0 {
+            let spent_usd = state.spent_credits * USD_PER_KIE_CREDIT;
+            if spent_usd > state.budget_usd {
+                return Err(Error::Tool(format!(
+                    "budget ceiling reached: spent ~${spent_usd:.2} of the ${:.2} confirmed budget \
+                     — raise budgetUsd and resume to continue (already-rendered shots are kept)",
+                    state.budget_usd
+                )));
+            }
         }
 
         state.shot_mut(&shot_id).state = "assets".into();

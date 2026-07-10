@@ -903,9 +903,18 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                 let abs_first = format!("/{decoded}");
                 let resolved = crate::sandbox::Sandbox::check(&abs_first)
                     .or_else(|_| crate::sandbox::Sandbox::check(&decoded));
+                // HTTP Range support — <video>/<audio> in shells stream large
+                // media (a chapter mp4 is tens of MB); without 206 responses
+                // the WebView pulls the whole file per request and playback
+                // stutters + seeking restarts the download.
+                let range_hdr = request
+                    .headers()
+                    .get("range")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
                 match resolved {
-                    Ok(resolved) => match std::fs::read(&resolved) {
-                        Ok(bytes) => {
+                    Ok(resolved) => match crate::gui_shell::serve::read_asset_maybe_range(&resolved, range_hdr.as_deref()) {
+                        Ok((bytes, range_meta)) => {
                             let ext = resolved.extension()
                                 .and_then(|e| e.to_str())
                                 .unwrap_or("")
@@ -947,8 +956,16 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                                 "ogv" => "video/ogg",
                                 _ => "application/octet-stream",
                             };
-                            return Response::builder()
+                            let mut rb = Response::builder()
                                 .header("Content-Type", mime)
+                                .header("Accept-Ranges", "bytes");
+                            if let Some((start, end, total)) = range_meta {
+                                rb = rb.status(206).header(
+                                    "Content-Range",
+                                    format!("bytes {start}-{end}/{total}"),
+                                );
+                            }
+                            return rb
                                 .body(Cow::Owned(bytes))
                                 .expect("build file-asset response");
                         }

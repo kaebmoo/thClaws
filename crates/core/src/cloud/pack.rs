@@ -12,19 +12,12 @@ use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use sha2::{Digest, Sha256};
 
 pub const STRIP_PREFIXES: &[&str] = &[
-    ".thclaws/sessions/",
-    ".thclaws/kms/data/",
-    ".thclaws/cache/",
-    // Cloud pods keep the managed browser's chromium profile on the
-    // workspace PVC so logins survive pod restarts (docs/browser).
-    // Cookies/tokens must NEVER ride along into a published agent.
-    ".thclaws/browser-profile/",
-    // Runtime/telemetry state from a live workspace — never part of the agent
-    // itself. Parity with thclaws-agents/publish.py so publishing from a
-    // working dir doesn't leak the publisher's usage stats or team-coordination
-    // files into the distributed tarball.
-    ".thclaws/usage/",
-    ".thclaws/team/",
+    // Workspace v2: ALL runtime state lives under `.thclaws/state/` and is
+    // never part of a published agent — sessions, kms, usage/telemetry,
+    // team coordination, workflow run-state, and the managed browser's
+    // chromium profile (cookies/tokens must NEVER ride along). Authored
+    // workflow scripts live in `.thclaws/agent_workflow/` and are kept.
+    ".thclaws/state/",
     ".git/",
     "node_modules/",
     "target/",
@@ -333,21 +326,22 @@ mod strip_tests {
         // Regression: publishing from a live workspace must not ship the
         // publisher's runtime telemetry / coordination state.
         for p in [
-            ".thclaws/usage/deepseek/deepseek-v4-pro.json",
-            ".thclaws/usage.jsonl",
-            ".thclaws/team/agents/lead/status.json",
+            ".thclaws/state/usage/deepseek/deepseek-v4-pro.json",
+            ".thclaws/state/usage.jsonl",
+            ".thclaws/state/team/agents/lead/status.json",
             ".thclaws/audit-findings.json",
-            ".thclaws/sessions/x.jsonl",
+            ".thclaws/state/sessions/x.jsonl",
+            ".thclaws/state/workflows/wf-1/state.jsonl",
             "secrets_secret.txt",
             "a/.env",
         ] {
             assert!(is_strippable(Path::new(p)), "should strip {p}");
         }
-        // Agent content stays.
+        // Agent content stays — including authored workflow scripts.
         for p in [
             "AGENTS.md",
             "manifest.json",
-            ".thclaws/workflows/image-batch.js",
+            ".thclaws/agent_workflow/image-batch.js",
             ".thclaws/agents/image-smith.md",
             "images/batch/red-panda.png",
         ] {

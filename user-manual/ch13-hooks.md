@@ -131,6 +131,14 @@ thclaws --cli --verbose
 
 Verbose mode prints each hook invocation before running it.
 
+> **Upgrade note:** on releases **before v0.88.0**, hooks configured in
+> `settings.json` never ran at all — the `hooks` key was silently dropped
+> when the file was loaded (issue #180), at both the project and user
+> config levels, in every mode. If you set up hooks on an older build and
+> saw nothing fire, your configuration was fine; upgrade to ≥ 0.88.0 and
+> the same snippets work as written. Hooks fire in GUI, CLI, `--serve`,
+> and (since the same release) `-p` print mode.
+
 ## What hooks aren't
 
 Hooks **can't mutate** the tool call — they're observers. To block a

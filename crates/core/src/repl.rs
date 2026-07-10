@@ -855,10 +855,11 @@ pub enum CloudSlash {
     /// the token comes from the session's settings.json/keychain so
     /// it isn't required on the shell-command line.
     Publish,
-    /// `/cloud unbind` — clear settings.json::agent.uuid in cwd so
-    /// the next `/cloud publish` registers a new catalog entry
-    /// instead of trying to update someone else's. Used when forking
-    /// an agent you `/cloud get`'d from another publisher.
+    /// `/cloud unbind` — blank settings.json::agent.uuid in cwd. Detaches
+    /// the folder: a DIFFERENT agent can then be `/cloud get`'d over it, and a
+    /// `/cloud publish` registers a NEW catalog entry (backend mints a fresh
+    /// uuid) instead of updating the original — i.e. forking. One detach op for
+    /// both "switch the agent here" and "fork it".
     Unbind,
     /// `/cloud push [<slug>] [--delete] [--dry-run] [--force-rebind]` — mirror
     /// the working dir UP to a hosted cloud workspace (dev-plan/51). A bare
@@ -1837,12 +1838,46 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
             let prompt = args.trim();
             if prompt.is_empty() {
                 SlashCommand::Unknown(
-                    "usage: /translate <text or file path>   (alias for /agent translator …)"
+                    "usage: /translate [--language=<code>] <text or file path>   (alias for /agent translator …)"
                         .into(),
                 )
             } else {
                 SlashCommand::Agent {
                     name: "translator".into(),
+                    prompt: prompt.to_string(),
+                }
+            }
+        }
+        // Parse-time alias: `/summarize xxx` → `/agent summarizer xxx`.
+        // Same dispatch path as /agent, so behavior, permissions, and any
+        // settings.json model override already apply.
+        "summarize" | "summarise" => {
+            let prompt = args.trim();
+            if prompt.is_empty() {
+                SlashCommand::Unknown(
+                    "usage: /summarize [--language=<code>] <text or file path>   (alias for /agent summarizer …)"
+                        .into(),
+                )
+            } else {
+                SlashCommand::Agent {
+                    name: "summarizer".into(),
+                    prompt: prompt.to_string(),
+                }
+            }
+        }
+        // Parse-time alias: `/extract xxx` → `/agent content-extractor xxx`.
+        // The subagent allow-lists FetchImages, which opens the gated
+        // `content-extractor` tool group for its isolated run.
+        "extract" | "clip" => {
+            let prompt = args.trim();
+            if prompt.is_empty() {
+                SlashCommand::Unknown(
+                    "usage: /extract <url | file path | pasted text>   (alias for /agent content-extractor …)"
+                        .into(),
+                )
+            } else {
+                SlashCommand::Agent {
+                    name: "content-extractor".into(),
                     prompt: prompt.to_string(),
                 }
             }
@@ -2593,6 +2628,41 @@ pub fn build_kms_challenge_prompt(kms_name: &str, idea: &str) -> String {
          - **Don't write to the vault.** This command is read-only. End with the analysis, no `KmsWrite` / `KmsAppend` calls.\n\
          \n\
          Stop after one pass. The analysis is your final message."
+    )
+}
+
+/// Compose the agent-facing prompt fired after a file is ingested into a
+/// KMS (Files-tab "Add to KMS" or `/kms ingest`). The deterministic
+/// ingest only leaves a bare stub page; this turn upgrades it into a real
+/// wiki page — summary + key takeaways + cross-links — using the raw
+/// source the ingest archived. `source_path` is the on-disk source so the
+/// agent can `Read` the full content (KmsRead only surfaces pages).
+pub fn build_kms_summarize_prompt(kms_name: &str, alias: &str, source_path: &str) -> String {
+    format!(
+        "A file was just ingested into the '{kms_name}' knowledge base as the page \
+         '{alias}', which is currently a bare stub. Turn it into a useful curated wiki \
+         page.\n\
+         \n\
+         ## Procedure\n\
+         \n\
+         1. `Read` the raw source at `{source_path}` — that's the full ingested content.\n\
+         2. `KmsSearch(kms: \"{kms_name}\", pattern: ...)` for a few of the source's key \
+         topics to find related existing pages worth cross-linking.\n\
+         3. `KmsWrite(kms: \"{kms_name}\", page: \"{alias}\", content: ...)` to replace the \
+         stub. The content should be:\n\
+         - YAML frontmatter keeping `sources: {alias}` and a `title:` drawn from the source.\n\
+         - A 2–3 sentence **overview** of what the source covers.\n\
+         - **Key takeaways** — a bullet list of the substantive points.\n\
+         - **Related** — `[[wikilinks]]` to the pages you found via KmsSearch (omit if none).\n\
+         \n\
+         ## Hard rules\n\
+         \n\
+         - **Faithful, not a rewrite.** This is a curated index over the raw source — never \
+         invent facts, headings, or takeaways that aren't in the source.\n\
+         - **Summarise, don't dump.** Don't paste the whole article back into the page.\n\
+         - If the source is thin or unreadable, write a short honest note rather than padding.\n\
+         \n\
+         End with one line confirming the page was written."
     )
 }
 
@@ -3970,10 +4040,21 @@ pub fn render_help() -> &'static str {
      /dream [FOCUS]       Consolidate KMS by mining recent sessions (GUI-only)\n  \
      \x20                   Built-in side-channel agent. Optional FOCUS biases\n  \
      \x20                   the consolidation toward a topic (e.g. /dream auth).\n  \
-     /translate PROMPT    Alias for /agent translator PROMPT (GUI-only).\n  \
+     /translate [--language=<code>] PROMPT\n  \
+     \x20                   Alias for /agent translator PROMPT (GUI-only).\n  \
      \x20                   Runs the built-in translator subagent in the\n  \
-     \x20                   background. Override its model via settings.json\n  \
-     \x20                   `translator_subagent_model`.\n  \
+     \x20                   background. --language=<code> (ISO 639-1, e.g. th)\n  \
+     \x20                   pins the target language. Override its model via\n  \
+     \x20                   settings.json `translator_subagent_model`.\n  \
+     /summarize [--language=<code>] PROMPT\n  \
+     \x20                   Alias for /agent summarizer PROMPT (GUI-only).\n  \
+     \x20                   Runs the built-in summarizer subagent in the\n  \
+     \x20                   background. --language=<code> (ISO 639-1) sets the\n  \
+     \x20                   summary's output language.\n  \
+     /extract PROMPT      Alias for /agent content-extractor PROMPT (GUI-only).\n  \
+     \x20                   Clips a URL / file / pasted page into clean markdown\n  \
+     \x20                   with images downloaded local. Runs isolated (keeps the\n  \
+     \x20                   raw page out of your context); fan out for batch.\n  \
      /cloud status        Show the configured catalog URL + whether a\n  \
      \x20                   CLI token is stored.\n  \
      /cloud list [--mine] Browse thClaws.cloud catalog (dev-plan/34).\n  \
@@ -3983,10 +4064,9 @@ pub fn render_help() -> &'static str {
      \x20                   UUID or no agent block → abort.\n  \
      /cloud publish       Tar the current folder + upload to the catalog\n  \
      \x20                   as a new version.\n  \
-     /cloud unbind        Clear settings.json::agent.uuid in cwd so the\n  \
-     \x20                   next /cloud publish creates a fresh entry.\n  \
-     \x20                   Use after /cloud get'ing someone else's agent\n  \
-     \x20                   if you want to fork it.\n  \
+     /cloud unbind        Detach the folder's agent uuid — lets you\n  \
+     \x20                   /cloud get a DIFFERENT agent here, or\n  \
+     \x20                   /cloud publish it as a new (forked) entry.\n  \
      \x20                   (Configure URL + token via Settings →\n  \
      \x20                   thClaws.cloud; mint tokens at /dashboard.)\n\n  \
      ! <command>       Run a shell command directly (e.g. ! git status)"
@@ -4347,6 +4427,24 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
                 OpenAIProvider::new(key)
                     .with_base_url(url)
                     .with_strip_model_prefix("xai/"),
+            ))
+        }
+        ProviderKind::Groq => {
+            // Groq (LPU cloud). OpenAI-compatible /chat/completions at
+            // api.groq.com/openai/v1. Models use `groq/<id>` form
+            // (e.g. groq/llama-3.3-70b-versatile); strip the prefix
+            // before forwarding. Override the base via GROQ_BASE_URL.
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "GROQ_BASE_URL",
+                "https://api.groq.com/openai/v1",
+                api_key,
+            );
+            Ok(Arc::new(
+                OpenAIProvider::new(key)
+                    .with_base_url(url)
+                    .with_strip_model_prefix("groq/"),
             ))
         }
         ProviderKind::AzureAIFoundry => {
@@ -4715,6 +4813,25 @@ fn persist_permission_mode_cli(mode: &str) -> &'static str {
 }
 
 pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> Result<()> {
+    run_print_mode_with(config, prompt, verbose, true).await
+}
+
+/// dev-plan/heartbeat: `-p` upgraded to a full headless surface — Task
+/// (subagents), session persist + `--resume`, and lifecycle hooks, matching
+/// REPL/GUI capability. Pre-upgrade `-p` had none of these: prompts that
+/// needed a subagent role-played it in one context (the "-p measures wrong"
+/// gotcha), every run was amnesiac, and hooks silently didn't fire. Sessions
+/// land in the same per-workspace store as the REPL so
+/// `thclaws -p --resume <id|last>` chains history across fires — the primitive
+/// `thclaws schedule --resume-session` heartbeats build on.
+/// `save_session=false` (`--no-session`) restores the old leave-no-trace
+/// behavior for one-shot scripting.
+pub async fn run_print_mode_with(
+    config: AppConfig,
+    prompt: &str,
+    verbose: bool,
+    save_session: bool,
+) -> Result<()> {
     let cwd = std::env::current_dir()?;
 
     let mut tool_registry = ToolRegistry::with_builtins();
@@ -4743,6 +4860,7 @@ pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> R
     tool_registry.register(Arc::new(crate::tools::KmsSearchTool));
     // M6.25 BUG #1: write tools alongside read tools.
     tool_registry.register(Arc::new(crate::tools::KmsWriteTool));
+    tool_registry.register(Arc::new(crate::tools::KmsWriteSourceTool));
     tool_registry.register(Arc::new(crate::tools::KmsAppendTool));
     tool_registry.register(Arc::new(crate::tools::KmsDeleteTool));
     // KmsCreate for /dream's `dreams` audit-log KMS bootstrap.
@@ -4861,15 +4979,73 @@ pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> R
         PermissionMode::Ask
     };
 
-    // WorkflowRun: model-callable wrapper around `/workflow run`. Print
-    // mode doesn't register Subagent, so scripts that call
-    // `thclaws.subagent(...)` will error — fine, the model authors
-    // around it. Registered for surface-parity with REPL / GUI; rarely
-    // exercised in one-shot `-p` mode but it works when asked.
+    // Tool filtering MUST run before the Task factory snapshots the
+    // registry (same M6.33 SUB3 ordering as the REPL) — otherwise a
+    // parent forbidden from Bash could spawn a subagent that has it.
+    if let Some(ref allowed) = config.allowed_tools {
+        let allowed_set: std::collections::HashSet<&str> =
+            allowed.iter().map(|s| s.as_str()).collect();
+        let all_names: Vec<String> = tool_registry
+            .names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for name in all_names {
+            if !allowed_set.contains(name.as_str()) {
+                tool_registry.remove(&name);
+            }
+        }
+    }
+    if let Some(ref disallowed) = config.disallowed_tools {
+        for name in disallowed {
+            tool_registry.remove(name);
+        }
+    }
+
+    // dev-plan/heartbeat: `-p` now registers the subagent Task tool —
+    // same headless pattern as run_agent_workflow (AutoApprover sink;
+    // the permission MODE still gates what needs gating). Prompts that
+    // fan out (WorkflowRun pipelines, `Task(agent: …)`) behave like
+    // they do on every other surface instead of role-playing.
+    let hooks_arc = std::sync::Arc::new(config.hooks.clone());
+    let headless_approver: Arc<dyn crate::permissions::ApprovalSink> =
+        Arc::new(crate::permissions::AutoApprover);
+    let mut agent_defs =
+        crate::agent_defs::AgentDefsConfig::load_with_extra(&crate::plugins::plugin_agent_dirs());
+    agent_defs.apply_builtin_subagent_overrides(&config);
+    let factory_snapshot =
+        std::sync::Arc::new(std::sync::RwLock::new(crate::subagent::FactorySnapshot {
+            system: system.clone(),
+            tools: tool_registry.clone(),
+            model: config.model.clone(),
+            provider: provider.clone(),
+        }));
+    let factory = Arc::new(ProductionAgentFactory {
+        snapshot: factory_snapshot,
+        max_iterations: config.max_iterations,
+        max_depth: crate::subagent::DEFAULT_MAX_DEPTH,
+        max_tokens: config.max_tokens,
+        agent_defs: agent_defs.clone(),
+        approver: headless_approver,
+        permission_mode: perm_mode,
+        cancel: None,
+        hooks: Some(hooks_arc.clone()),
+    });
+    let subagent_arc: Arc<dyn crate::tools::Tool> = Arc::new(
+        SubAgentTool::new(factory)
+            .with_depth(0)
+            .with_agent_defs(agent_defs),
+    );
+    tool_registry.register(subagent_arc.clone());
+
+    // WorkflowRun: model-callable wrapper around `/workflow run`.
+    // `subagent_arc` is threaded in so scripts' `thclaws.subagent(...)`
+    // calls dispatch to the Task tool above (pre-upgrade `-p` passed
+    // None here and workflow subagent calls errored).
     tool_registry.register(Arc::new(crate::tools::WorkflowRunTool::new(
         provider.clone(),
         config.model.clone(),
-        None,
+        Some(subagent_arc),
     )));
 
     // Diagnostic run header → STDERR (the scheduler captures stderr into
@@ -4892,7 +5068,50 @@ pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> R
     let agent = Agent::new(provider, tool_registry, config.model.clone(), system)
         .with_max_iterations(config.max_iterations)
         .with_max_tokens(config.max_tokens)
-        .with_permission_mode(perm_mode);
+        .with_permission_mode(perm_mode)
+        .with_ask_tools(config.ask_tools.clone().unwrap_or_default())
+        .with_hooks(hooks_arc.clone());
+
+    // dev-plan/heartbeat: sessions in print mode. Same per-workspace store
+    // as the REPL; `--resume <id|last>` loads prior history so scheduled
+    // fires chain into one growing conversation. Notices go to STDERR —
+    // stdout stays the clean answer.
+    let session_store = if save_session {
+        SessionStore::default_path().map(SessionStore::new)
+    } else {
+        None
+    };
+    let mut session = Session::new(&config.model, cwd.to_string_lossy());
+    if let Some(ref resume_id) = config.resume_session {
+        if let Some(ref store) = session_store {
+            let loaded = if resume_id == "last" {
+                store.latest().ok().flatten()
+            } else {
+                store.load(resume_id).ok()
+            };
+            if let Some(s) = loaded {
+                agent.set_history(s.messages.clone());
+                // Rehydrate the provider-side session id (SDK provider
+                // resumes its server-side conversation) — same as the
+                // REPL's --resume path.
+                agent
+                    .provider()
+                    .set_provider_session_id(s.provider_session_id.clone());
+                session = s;
+                eprintln!(
+                    "[session] resumed {} ({} messages)",
+                    session.id,
+                    session.messages.len()
+                );
+            } else {
+                eprintln!("[session] not found: {resume_id} — starting fresh");
+            }
+        } else if save_session {
+            eprintln!("[session] no session store — --resume ignored");
+        } else {
+            eprintln!("[session] --no-session set — --resume ignored");
+        }
+    }
 
     let turn_start = std::time::Instant::now();
     // Live reasoning is shown only on a TTY. When piped (`-p | jq`) or
@@ -4976,6 +5195,20 @@ pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> R
             }
         }
     }
+
+    // dev-plan/heartbeat: persist the turn so the next `-p --resume` (or a
+    // schedule with --resume-session) continues this conversation.
+    if let Some(ref store) = session_store {
+        session.sync(agent.history_snapshot());
+        let provider_sid = agent.provider().provider_session_id();
+        if provider_sid.is_some() {
+            session.provider_session_id = provider_sid;
+        }
+        match store.save(&mut session) {
+            Ok(_) => eprintln!("[session] saved {}", session.id),
+            Err(e) => eprintln!("[session] save failed: {e}"),
+        }
+    }
     Ok(())
 }
 
@@ -4999,6 +5232,7 @@ pub async fn run_agent_workflow(
     tool_registry.register(Arc::new(crate::tools::KmsReadTool));
     tool_registry.register(Arc::new(crate::tools::KmsSearchTool));
     tool_registry.register(Arc::new(crate::tools::KmsWriteTool));
+    tool_registry.register(Arc::new(crate::tools::KmsWriteSourceTool));
     tool_registry.register(Arc::new(crate::tools::KmsAppendTool));
     tool_registry.register(Arc::new(crate::tools::KmsDeleteTool));
     tool_registry.register(Arc::new(crate::tools::KmsCreateTool));
@@ -5082,11 +5316,11 @@ pub async fn run_agent_workflow(
     let snapshot = std::sync::Arc::new(std::sync::RwLock::new(crate::subagent::FactorySnapshot {
         system: system.clone(),
         tools: tool_registry.clone(),
+        model: config.model.clone(),
+        provider: provider.clone(),
     }));
     let factory = Arc::new(ProductionAgentFactory {
-        provider: provider.clone(),
         snapshot,
-        model: config.model.clone(),
         max_iterations: config.max_iterations,
         max_depth: crate::subagent::DEFAULT_MAX_DEPTH,
         max_tokens: config.max_tokens,
@@ -5241,6 +5475,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     tool_registry.register(Arc::new(crate::tools::KmsSearchTool));
     // M6.25 BUG #1: write tools alongside read tools.
     tool_registry.register(Arc::new(crate::tools::KmsWriteTool));
+    tool_registry.register(Arc::new(crate::tools::KmsWriteSourceTool));
     tool_registry.register(Arc::new(crate::tools::KmsAppendTool));
     tool_registry.register(Arc::new(crate::tools::KmsDeleteTool));
     // KmsCreate for /dream's `dreams` audit-log KMS bootstrap.
@@ -5502,6 +5737,8 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         std::sync::Arc::new(std::sync::RwLock::new(crate::subagent::FactorySnapshot {
             system: system.clone(),
             tools: tool_registry.clone(),
+            model: config.model.clone(),
+            provider: provider.clone(),
         }));
     {
         let plugin_agent_dirs = crate::plugins::plugin_agent_dirs();
@@ -5509,9 +5746,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
             crate::agent_defs::AgentDefsConfig::load_with_extra(&plugin_agent_dirs);
         agent_defs.apply_builtin_subagent_overrides(&config);
         let factory = Arc::new(ProductionAgentFactory {
-            provider: provider.clone(),
             snapshot: factory_snapshot.clone(),
-            model: config.model.clone(),
             max_iterations: config.max_iterations,
             max_depth: crate::subagent::DEFAULT_MAX_DEPTH,
             max_tokens: config.max_tokens,
@@ -5584,6 +5819,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     .with_max_iterations(config.max_iterations)
     .with_max_tokens(config.max_tokens)
     .with_permission_mode(perm_mode)
+    .with_ask_tools(config.ask_tools.clone().unwrap_or_default())
     .with_approver(approver.clone())
     .with_hooks(hooks_arc.clone());
 
@@ -6969,6 +7205,16 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     .with_approver(approver.clone())
                     .with_hooks(std::sync::Arc::new(config.hooks.clone()));
                     agent.set_history(history);
+                    // Push the new model + provider into the factory
+                    // snapshot so unpinned subagents spawned after the
+                    // switch inherit the CURRENT model, not the boot one.
+                    {
+                        let mut snap = factory_snapshot
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner());
+                        snap.model = config.model.clone();
+                        snap.provider = agent.provider().clone();
+                    }
                     // Keep the same session id + JSONL file; just update the
                     // model label so the header reflects the active provider.
                     session.model = config.model.clone();
@@ -7054,6 +7300,14 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     .with_approver(approver.clone())
                     .with_hooks(std::sync::Arc::new(config.hooks.clone()));
                     agent.clear_history();
+                    // Same as `/model`: subagents must follow the swap.
+                    {
+                        let mut snap = factory_snapshot
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner());
+                        snap.model = config.model.clone();
+                        snap.provider = agent.provider().clone();
+                    }
                     session = Session::new(&config.model, session.cwd.clone());
                     // M6.20 BUG M2 + M3: provider swap mints a fresh
                     // session; reset yolo flag and permission mode.
@@ -9465,8 +9719,13 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             } else {
                                 String::new()
                             };
+                            let images = if r.images_copied > 0 {
+                                format!(" (+{} local image(s))", r.images_copied)
+                            } else {
+                                String::new()
+                            };
                             println!(
-                                "{COLOR_DIM}{verb} → {} — {}{cascade}{COLOR_RESET}",
+                                "{COLOR_DIM}{verb} → {} — {}{images}{cascade}{COLOR_RESET}",
                                 r.target.display(),
                                 r.summary,
                             );
@@ -10796,14 +11055,32 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             }
                         }
                         CloudSlash::Get { slug } => {
-                            for line in crate::cloud::cmd::get_into_cwd_lines(
-                                slug,
+                            let lines = crate::cloud::cmd::get_into_cwd_lines(
+                                slug.clone(),
                                 None,
                                 cloud_cfg.as_ref(),
                             )
-                            .await
-                            {
+                            .await;
+                            let installed =
+                                lines.iter().any(|l| l.starts_with("✓ Extracted"));
+                            for line in &lines {
                                 println!("{line}");
+                            }
+                            // Re-exec so the just-installed agent is live (its
+                            // AGENTS.md, defs, skills, and seeded workflows were
+                            // built at startup from the old/absent agent).
+                            // Sessions survive on disk. Gated on the success
+                            // marker so a failed get never restarts the process.
+                            if installed {
+                                println!(
+                                    "{COLOR_DIM}↻ activating '{slug}' — reloading thclaws to make it live (sessions survive)…{COLOR_RESET}"
+                                );
+                                use std::io::Write;
+                                let _ = std::io::stdout().flush();
+                                let err = crate::util::reexec_self();
+                                println!(
+                                    "{COLOR_YELLOW}[reload] re-exec failed: {err} — run /reload to activate the agent{COLOR_RESET}"
+                                );
                             }
                         }
                         CloudSlash::Publish => {
@@ -13791,6 +14068,45 @@ mod tests {
         );
     }
 
+    /// `/summarize xxx` (and the `/summarise` spelling) is a parse-time
+    /// alias for `/agent summarizer xxx` — same dispatch path as /translate.
+    #[test]
+    fn parse_slash_summarize_aliases_to_agent_summarizer() {
+        assert_eq!(
+            parse_slash("/summarize --language=th report.md"),
+            Some(SlashCommand::Agent {
+                name: "summarizer".into(),
+                prompt: "--language=th report.md".into(),
+            }),
+        );
+        assert_eq!(
+            parse_slash("/summarise this paragraph"),
+            Some(SlashCommand::Agent {
+                name: "summarizer".into(),
+                prompt: "this paragraph".into(),
+            }),
+        );
+    }
+
+    /// `/extract` (and `/clip`) alias to `/agent content-extractor`.
+    #[test]
+    fn parse_slash_extract_aliases_to_agent_content_extractor() {
+        assert_eq!(
+            parse_slash("/extract https://example.com/post"),
+            Some(SlashCommand::Agent {
+                name: "content-extractor".into(),
+                prompt: "https://example.com/post".into(),
+            }),
+        );
+        assert_eq!(
+            parse_slash("/clip docs/page.html"),
+            Some(SlashCommand::Agent {
+                name: "content-extractor".into(),
+                prompt: "docs/page.html".into(),
+            }),
+        );
+    }
+
     #[test]
     fn parse_slash_translate_bare_errors() {
         match parse_slash("/translate") {
@@ -14198,12 +14514,12 @@ mod tests {
 
         let approver: Arc<dyn ApprovalSink> = Arc::new(DenyApprover);
         let factory = crate::subagent::ProductionAgentFactory {
-            provider: Arc::new(StubProvider),
             snapshot: Arc::new(std::sync::RwLock::new(crate::subagent::FactorySnapshot {
                 system: String::new(),
                 tools: ToolRegistry::new(),
+                model: "test".into(),
+                provider: Arc::new(StubProvider),
             })),
-            model: "test".into(),
             max_iterations: 1,
             max_depth: 3,
             max_tokens: 8192,
@@ -14278,6 +14594,8 @@ mod tests {
         let factory_snapshot = Arc::new(std::sync::RwLock::new(crate::subagent::FactorySnapshot {
             system: system.clone(),
             tools: tool_registry.clone(),
+            model: cfg.model.clone(),
+            provider: Arc::new(StubProvider),
         }));
         let addendum = "\n\n# Agent Role: TEST\nTEST_RULES\n";
 

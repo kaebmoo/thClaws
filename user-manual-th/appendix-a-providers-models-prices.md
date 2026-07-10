@@ -3,7 +3,7 @@
 ภาคผนวกนี้คือ catalog ของ **thClaws.cloud gateway** — รายการโมเดลที่
 เรียกได้เมื่อชี้ agent ไปที่ `https://thclaws.cloud/gateway` หรือ
 รัน [thClaws.cloud](ch27-thclaws-cloud.md) แบบ self-host เอง สำหรับ
-desktop / CLI build จะมี catalog แยกของตัวเองที่ครอบคลุม 22 provider —
+desktop / CLI build จะมี catalog แยกของตัวเองที่ครอบคลุม 25 provider —
 ดูที่ [บทที่ 6 — Provider, โมเดล และ API key](ch06-providers-models-api-keys.md)
 
 > Catalog refresh ครั้งล่าสุด: **2026-06-02** ถ้าอยากดึงรายการโมเดล

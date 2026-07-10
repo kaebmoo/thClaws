@@ -48,12 +48,27 @@ pub fn save_image(bytes: &[u8], ext: &str) -> Result<PathBuf> {
     let sha_hex = format!("{:02x}{:02x}{:02x}{:02x}", sha[0], sha[1], sha[2], sha[3]);
     let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
     let name = format!("img-{ts}-{sha_hex}.{ext}");
-    let dir = std::path::Path::new("output");
-    std::fs::create_dir_all(dir).map_err(|e| Error::Tool(format!("mkdir output: {e}")))?;
-    let path = dir.join(&name);
-    std::fs::write(&path, bytes)
-        .map_err(|e| Error::Tool(format!("write {}: {e}", path.display())))?;
-    Ok(path)
+    save_under_output(&name, bytes)
+}
+
+/// Write `<output>/<name>` anchored at the active sandbox root and return
+/// the workspace-RELATIVE path (`output/<name>`). In multiuser `--serve`
+/// the root is the per-user `workspace-<id>/` (dev-plan/42), so each
+/// user's generated media lands in their OWN tree instead of a shared
+/// process-cwd `output/` (cross-tenant visibility + the user's sandboxed
+/// Read couldn't see its own file). Single-tenant/desktop has no scoped
+/// root → falls back to cwd-relative `output/`, unchanged.
+fn save_under_output(name: &str, bytes: &[u8]) -> Result<PathBuf> {
+    let rel = std::path::Path::new("output").join(name);
+    let dir = match crate::sandbox::Sandbox::root() {
+        Some(root) => root.join("output"),
+        None => std::path::PathBuf::from("output"),
+    };
+    std::fs::create_dir_all(&dir).map_err(|e| Error::Tool(format!("mkdir output: {e}")))?;
+    let full = dir.join(name);
+    std::fs::write(&full, bytes)
+        .map_err(|e| Error::Tool(format!("write {}: {e}", full.display())))?;
+    Ok(rel)
 }
 
 /// Detect video container from magic bytes. Veo returns MP4 (ISO-BMFF:
@@ -75,10 +90,5 @@ pub fn save_video(bytes: &[u8], ext: &str) -> Result<PathBuf> {
     let sha_hex = format!("{:02x}{:02x}{:02x}{:02x}", sha[0], sha[1], sha[2], sha[3]);
     let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
     let name = format!("vid-{ts}-{sha_hex}.{ext}");
-    let dir = std::path::Path::new("output");
-    std::fs::create_dir_all(dir).map_err(|e| Error::Tool(format!("mkdir output: {e}")))?;
-    let path = dir.join(&name);
-    std::fs::write(&path, bytes)
-        .map_err(|e| Error::Tool(format!("write {}: {e}", path.display())))?;
-    Ok(path)
+    save_under_output(&name, bytes)
 }

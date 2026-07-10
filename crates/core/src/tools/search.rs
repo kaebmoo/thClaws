@@ -3,7 +3,8 @@
 //! Auto-selects the best available backend from env vars:
 //!   1. Tavily (`TAVILY_API_KEY`) — clean JSON, best quality
 //!   2. Brave Search (`BRAVE_SEARCH_API_KEY`) — clean JSON, good quality
-//!   3. DuckDuckGo HTML scrape — no key needed, good enough fallback
+//!   3. SerpAPI (`SERPAPI_API_KEY`) — real Google results as JSON
+//!   4. DuckDuckGo HTML scrape — no key needed, good enough fallback
 //!
 //! Two layers of fallback:
 //! - **Config-time** — a missing API key skips that backend at chain-build
@@ -38,6 +39,7 @@ const SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
 enum Backend {
     Tavily(String),
     Brave(String),
+    SerpApi(String),
     Ddg,
 }
 
@@ -48,6 +50,7 @@ impl Backend {
         match self {
             Backend::Tavily(_) => "tavily",
             Backend::Brave(_) => "brave",
+            Backend::SerpApi(_) => "serpapi",
             Backend::Ddg => "duckduckgo",
         }
     }
@@ -59,6 +62,7 @@ impl Backend {
         match self {
             Backend::Tavily(_) => "Tavily",
             Backend::Brave(_) => "Brave Search",
+            Backend::SerpApi(_) => "SerpAPI (Google)",
             Backend::Ddg => "DuckDuckGo",
         }
     }
@@ -76,7 +80,7 @@ pub struct WebSearchTool {
 }
 
 impl WebSearchTool {
-    /// `engine`: `"auto"` (detect from env), `"tavily"`, `"brave"`, `"duckduckgo"`/`"ddg"`.
+    /// `engine`: `"auto"` (detect from env), `"tavily"`, `"brave"`, `"serpapi"`, `"duckduckgo"`/`"ddg"`.
     pub fn new(engine: &str) -> Self {
         // M6.23 BUG WT1: explicit timeout on the shared client; all
         // three backends (Tavily/Brave/DDG) inherit it.
@@ -97,9 +101,10 @@ impl WebSearchTool {
     /// is the universal floor for any non-`"duckduckgo"`-pinned config.
     ///
     /// Pin behavior:
-    /// - `"auto"` / unset → Tavily (if key) → Brave (if key) → DDG
+    /// - `"auto"` / unset → Tavily (if key) → Brave (if key) → SerpAPI (if key) → DDG
     /// - `"tavily"` → Tavily (if key) → DDG
     /// - `"brave"` → Brave (if key) → DDG
+    /// - `"serpapi"` → SerpAPI (if key) → DDG
     /// - `"duckduckgo"` / `"ddg"` → DDG only (no fallback; user explicitly
     ///   chose the bottom of the chain)
     fn resolve_candidates(&self) -> Vec<Backend> {
@@ -108,6 +113,7 @@ impl WebSearchTool {
 
         let try_tavily = matches!(engine, "auto" | "" | "tavily");
         let try_brave = matches!(engine, "auto" | "" | "brave");
+        let try_serpapi = matches!(engine, "auto" | "" | "serpapi");
         // DDG is the universal fallback for everything except a DDG pin
         // (where it's already the only candidate, no need to fall back to
         // itself) and... well, only that.
@@ -132,6 +138,15 @@ impl WebSearchTool {
             } else if let Ok(key) = std::env::var("BRAVE_SEARCH_API_KEY") {
                 if !key.is_empty() {
                     out.push(Backend::Brave(key));
+                }
+            }
+        }
+        if try_serpapi {
+            if let Some(gw) = &self.gateway {
+                out.push(Backend::SerpApi(gw.token.clone()));
+            } else if let Ok(key) = std::env::var("SERPAPI_API_KEY") {
+                if !key.is_empty() {
+                    out.push(Backend::SerpApi(key));
                 }
             }
         }
@@ -267,6 +282,78 @@ impl WebSearchTool {
         }
     }
 
+    async fn search_serpapi(&self, query: &str, max: usize, key: &str) -> Result<String> {
+        // SerpAPI = real Google results as JSON. Direct mode: the key rides
+        // as the `api_key` QUERY PARAM (SerpAPI's scheme — not body, not
+        // header). Gateway mode: keyless query + the gateway bearer in the
+        // Authorization header; the gateway appends the real api_key.
+        let num = max.to_string();
+        let base_params = [("engine", "google"), ("q", query), ("num", num.as_str())];
+        let resp = if let Some(gw) = &self.gateway {
+            self.client
+                .get(format!("{}/serpapi/search", gw.base))
+                .query(&base_params)
+                .header("authorization", format!("Bearer {key}"))
+                .send()
+                .await
+                .map_err(|e| Error::Tool(format!("serpapi: {e}")))?
+        } else {
+            self.client
+                .get("https://serpapi.com/search")
+                .query(&base_params)
+                .query(&[("api_key", key)])
+                .send()
+                .await
+                .map_err(|e| Error::Tool(format!("serpapi: {e}")))?
+        };
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(Error::Tool(format!("serpapi HTTP {status}: {text}")));
+        }
+
+        let v: Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::Tool(format!("serpapi json: {e}")))?;
+
+        // SerpAPI signals quota/param errors as 200 + {"error": "..."} —
+        // surface it as a backend failure so the chain falls through to DDG.
+        if let Some(err) = v.get("error").and_then(Value::as_str) {
+            return Err(Error::Tool(format!("serpapi: {err}")));
+        }
+
+        let mut parts: Vec<String> = Vec::new();
+
+        // answer_box (featured snippet) first, when Google returned one.
+        if let Some(ab) = v.get("answer_box") {
+            let answer = ab
+                .get("answer")
+                .or_else(|| ab.get("snippet"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if !answer.is_empty() {
+                parts.push(format!("Answer: {answer}"));
+            }
+        }
+
+        if let Some(results) = v.get("organic_results").and_then(Value::as_array) {
+            for (i, r) in results.iter().take(max).enumerate() {
+                let title = r.get("title").and_then(Value::as_str).unwrap_or("");
+                let url = r.get("link").and_then(Value::as_str).unwrap_or("");
+                let snippet = r.get("snippet").and_then(Value::as_str).unwrap_or("");
+                parts.push(format!("{}. {} ({})\n   {}", i + 1, title, url, snippet));
+            }
+        }
+
+        if parts.is_empty() {
+            Ok("No results found.".into())
+        } else {
+            Ok(parts.join("\n\n"))
+        }
+    }
+
     async fn search_ddg(&self, query: &str, max: usize) -> Result<String> {
         let resp = self
             .client
@@ -330,7 +417,7 @@ impl Tool for WebSearchTool {
     fn description(&self) -> &'static str {
         "Search the web for information. Auto-selects the best available \
          backend: Tavily (TAVILY_API_KEY), Brave (BRAVE_SEARCH_API_KEY), \
-         or DuckDuckGo (no key needed). Returns titles, URLs, and snippets. \
+         SerpAPI/Google (SERPAPI_API_KEY), or DuckDuckGo (no key needed). Returns titles, URLs, and snippets. \
          The result begins with a `Source: <engine>` line — when summarizing \
          results to the user, mention which engine answered (e.g. \"via Tavily\" \
          or \"ผ่าน Tavily\"); cite the source so they understand the result quality."
@@ -378,6 +465,7 @@ impl Tool for WebSearchTool {
             let result = match backend {
                 Backend::Tavily(key) => self.search_tavily(query, max, key).await,
                 Backend::Brave(key) => self.search_brave(query, max, key).await,
+                Backend::SerpApi(key) => self.search_serpapi(query, max, key).await,
                 Backend::Ddg => self.search_ddg(query, max).await,
             };
             match result {

@@ -877,6 +877,7 @@ impl WorkerState {
         }
         let prev_perm = self.agent.permission_mode;
         let prev_thinking = self.agent.thinking_budget;
+        let prev_ask_tools = self.agent.ask_tools.clone();
         let new_agent = Agent::new(
             provider,
             self.tool_registry.clone(),
@@ -893,6 +894,7 @@ impl WorkerState {
         self.agent = new_agent;
         self.agent.permission_mode = prev_perm;
         self.agent.thinking_budget = prev_thinking;
+        self.agent.ask_tools = prev_ask_tools;
         // Re-wire the externally-held injection queue (#106) so
         // anything queued during the rebuild doesn't get orphaned on
         // the old agent's Vec.
@@ -944,7 +946,7 @@ impl WorkerState {
     ///
     /// Cheap: ToolRegistry clone is just cloning a HashMap of Arc'd
     /// tools (refcount bumps, no tool work). The RwLock is held for
-    /// two field writes and nothing else.
+    /// a few field writes and nothing else.
     pub fn sync_factory_snapshot(&self) {
         // L2: recover from a poisoned lock rather than panicking.
         let mut snap = self
@@ -953,6 +955,13 @@ impl WorkerState {
             .unwrap_or_else(|e| e.into_inner());
         snap.system = self.system_prompt.clone();
         snap.tools = self.tool_registry.clone();
+        // Model + provider too: `rebuild_agent` runs on ReloadConfig
+        // (settings watcher / `/model`), so after a mid-session model
+        // switch unpinned subagents must inherit the NEW model. Pre-fix
+        // the factory kept the worker-init pair for the whole session —
+        // grok main agent kept spawning deepseek workers.
+        snap.model = self.config.model.clone();
+        snap.provider = self.agent.provider().clone();
     }
 }
 
@@ -1392,6 +1401,7 @@ async fn run_worker(
     // M6.25 BUG #1: KmsWrite + KmsAppend make the LLM an active
     // wiki maintainer (not just a passive reader).
     tools.register(std::sync::Arc::new(crate::tools::KmsWriteTool));
+    tools.register(std::sync::Arc::new(crate::tools::KmsWriteSourceTool));
     tools.register(std::sync::Arc::new(crate::tools::KmsAppendTool));
     tools.register(std::sync::Arc::new(crate::tools::KmsDeleteTool));
     // KmsCreate bootstraps the dedicated `dreams` KMS used by
@@ -1676,12 +1686,12 @@ async fn run_worker(
         Arc::new(std::sync::RwLock::new(crate::subagent::FactorySnapshot {
             system: system.clone(),
             tools: tools.clone(),
+            model: config.model.clone(),
+            provider: provider.clone(),
         }));
     let factory_state: Arc<dyn crate::subagent::AgentFactory> = {
         let factory = Arc::new(crate::subagent::ProductionAgentFactory {
-            provider: provider.clone(),
             snapshot: factory_snapshot_state.clone(),
-            model: config.model.clone(),
             max_iterations: config.max_iterations,
             max_depth: crate::subagent::DEFAULT_MAX_DEPTH,
             max_tokens: config.max_tokens,
@@ -1703,11 +1713,16 @@ async fn run_worker(
         // GUI / --serve get the same engine as the worker's agent
         // (provider + model) plus the live Task tool so scripts'
         // `thclaws.subagent(...)` calls dispatch correctly.
-        tools.register(std::sync::Arc::new(crate::tools::WorkflowRunTool::new(
-            factory.provider.clone(),
-            config.model.clone(),
-            Some(subagent_arc),
-        )));
+        tools.register(std::sync::Arc::new(
+            crate::tools::WorkflowRunTool::new(
+                provider.clone(),
+                config.model.clone(),
+                Some(subagent_arc),
+            )
+            // stream thclaws.log / subagent progress to the chat mid-run so a
+            // multi-minute workflow (research) isn't silent between call+result
+            .with_events_tx(events_tx.clone()),
+        ));
         factory
     };
     // Apply `disallowed_tools` to the main agent's registry. Until
@@ -1744,6 +1759,11 @@ async fn run_worker(
     // GUI's Ask mode flag had no effect because the Agent was built
     // with the default Auto.
     agent.permission_mode = perm_mode;
+    // `askTools`: tools that always prompt even under Auto (interactive
+    // GUI worker has a real approver, so this bites here).
+    if let Some(ask) = &config.ask_tools {
+        agent.ask_tools = ask.clone();
+    }
     // Mirror the configured mode into the process-wide global so
     // `permissions::current_mode()` (read by the agent's tool-dispatch
     // gate, M2+) starts on the right value before any EnterPlanMode /
@@ -3287,6 +3307,13 @@ async fn run_worker(
 
                 state.cwd = new_cwd.clone();
 
+                // Opening a project in the GUI: migrate its `.thclaws/`
+                // layout (v1 flat → v2 `state/`) before the config reload
+                // resolves any project paths. Process cwd was already
+                // switched by the dispatcher, so this acts on the NEW
+                // workspace. No-op once migrated / in multiuser.
+                crate::config::ProjectConfig::migrate_workspace_if_needed();
+
                 // Reload config — `AppConfig::load` reads project settings
                 // via `ProjectConfig::project_dir()`, which honors
                 // $THCLAWS_PROJECT_ROOT first and otherwise current_dir
@@ -4059,6 +4086,73 @@ async fn handle_line(
         return;
     }
 
+    // `/kms ingest <name> <file>` intercept — do the deterministic ingest
+    // (copy source, localize images, stub page), then fire an agent turn
+    // that upgrades the stub into a curated page (summary + takeaways +
+    // wikilinks) — the same auto-summary the Files-tab "Add to KMS" gets.
+    if let Some(crate::repl::SlashCommand::KmsIngest {
+        name,
+        file,
+        alias,
+        force,
+    }) = crate::repl::parse_slash(trimmed)
+    {
+        let Some(k) = crate::kms::resolve(&name) else {
+            let _ = events_tx.send(ViewEvent::SlashOutput(format!(
+                "no KMS named '{name}' (try /kms list or /kms new {name})"
+            )));
+            let _ = events_tx.send(ViewEvent::TurnDone);
+            return;
+        };
+        let source = {
+            let p = std::path::PathBuf::from(&file);
+            if p.is_absolute() {
+                p
+            } else {
+                state.cwd.join(&p)
+            }
+        };
+        match crate::kms::ingest(&k, &source, alias.as_deref(), force) {
+            Ok(r) => {
+                let images = if r.images_copied > 0 {
+                    format!(" (+{} local image(s))", r.images_copied)
+                } else {
+                    String::new()
+                };
+                let verb = if r.overwrote { "replaced" } else { "ingested" };
+                let _ = events_tx.send(ViewEvent::SlashOutput(format!(
+                    "{verb} → {} — {}{images} · summarizing…",
+                    r.target.display(),
+                    r.summary
+                )));
+                let src = k.root.join("sources").join(format!("{}.md", r.alias));
+                let rewritten = crate::repl::build_kms_summarize_prompt(
+                    &name,
+                    &r.alias,
+                    &src.to_string_lossy(),
+                );
+                let stream = Box::pin(state.agent.run_turn(rewritten));
+                let lead_mb = crate::team::Mailbox::new(crate::team::Mailbox::default_dir());
+                let _ = lead_mb.write_status("lead", "working", None);
+                drive_turn_stream(
+                    stream,
+                    state,
+                    events_tx,
+                    cancel,
+                    &lead_mb,
+                    input_tx,
+                    Some(state.session.id.clone()),
+                )
+                .await;
+            }
+            Err(e) => {
+                let _ = events_tx.send(ViewEvent::SlashOutput(format!("ingest failed: {e}")));
+                let _ = events_tx.send(ViewEvent::TurnDone);
+            }
+        }
+        return;
+    }
+
     // `/kms html <name> [<output-dir>]` intercept — same agent-loop
     // rewrite path. Agent reads the KMS via tools and writes the
     // result via the regular `Write` tool to a workspace directory
@@ -4392,8 +4486,14 @@ async fn drive_turn_stream(
     // session's task-local working dir (`workspace-<id>/`) so every tool
     // — bash, write, kms, pdf/epub, workflow — resolves paths against the
     // user's own folder, never the process cwd / shared SANDBOX_ROOT.
-    // Single-tenant leaves the scope unset (process cwd, unchanged).
+    // dev-plan/45 A2: also under the member scope, so outbound gateway
+    // calls carry `X-Thclaws-Member` for billing attribution.
+    // Single-tenant leaves both scopes unset (process cwd, unchanged).
     let root = state.cwd.clone();
+    let member = state
+        .session_roots
+        .as_ref()
+        .and_then(|r| r.member_id.clone());
     let inner = drive_turn_stream_inner(
         stream,
         state,
@@ -4404,9 +4504,21 @@ async fn drive_turn_stream(
         surface_session,
     );
     let turn_result = if crate::workdir::is_multiuser() {
-        AssertUnwindSafe(crate::workdir::scope_workdir(root, inner))
-            .catch_unwind()
-            .await
+        match member {
+            Some(id) => {
+                AssertUnwindSafe(crate::workdir::scope_workdir(
+                    root,
+                    crate::multi_tenant::scope_member(id, inner),
+                ))
+                .catch_unwind()
+                .await
+            }
+            None => {
+                AssertUnwindSafe(crate::workdir::scope_workdir(root, inner))
+                    .catch_unwind()
+                    .await
+            }
+        }
     } else {
         AssertUnwindSafe(inner).catch_unwind().await
     };

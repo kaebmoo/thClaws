@@ -1197,12 +1197,14 @@ fn looks_like_tty_required(stdout: &str, stderr: &str) -> bool {
 /// PTY in the Bash sandbox.
 /// Keep platform credentials out of the shell's environment so a
 /// `printenv` / `cat /proc/self/environ` can't exfiltrate them. Platform
-/// internals (the gateway access key, the multiuser HMAC secret, the cloud
-/// token) are *always* removed — they're never useful to a user's command
-/// and absent on desktop anyway (no-op). Provider API keys are removed only
-/// in a multiuser/shared session, where the shell belongs to a guest who
-/// must not read the owner's billable credentials; on a single-user desktop
-/// the user's own keys stay available to their commands.
+/// internals (the raw gateway env, the multiuser HMAC secret, the cloud
+/// token) are removed up front; provider API keys are removed only in a
+/// multiuser/shared session, where the shell belongs to a guest who must
+/// not read the owner's billable credentials. On a single-user session the
+/// user's own keys stay available — and the *resolved* gateway credential
+/// (env → keychain → cloud-token, same chain the providers use) is
+/// re-injected as `THCLAWS_GATEWAY_{API_KEY,BASE_URL}` so agent scripts can
+/// reach Gemini image/TTS through the metered gateway with zero .env setup.
 fn scrub_sensitive_env(cmd: &mut tokio::process::Command) {
     const ALWAYS: &[&str] = &[
         "THCLAWS_CLOUD_HMAC_SECRET",
@@ -1235,6 +1237,24 @@ fn scrub_sensitive_env(cmd: &mut tokio::process::Command) {
         for k in SCOPED {
             cmd.env_remove(k);
         }
+        return;
+    }
+    // Single-user: re-inject the RESOLVED gateway credential after the scrub.
+    // The blanket removal above protects multiuser guests, but on a
+    // single-user session the gateway key bills the user themself — and
+    // agent scripts (speech-generator, training-video-generator,
+    // tutorial-studio) that call Gemini image/TTS have no other keyless
+    // path: the sandbox blocks ~/.config + the keychain, so "I use the
+    // gateway" users hit `no credential` from every subprocess. Resolving
+    // via the same env→keychain→cloud-token chain the providers use means
+    // a gateway-configured desktop just works.
+    if let Some(key) = crate::providers::thclaws_gateway::resolve_access_key() {
+        let base = std::env::var("THCLAWS_GATEWAY_BASE_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| crate::providers::thclaws_gateway::GATEWAY_BASE_URL.to_string());
+        cmd.env("THCLAWS_GATEWAY_API_KEY", key);
+        cmd.env("THCLAWS_GATEWAY_BASE_URL", base);
     }
 }
 

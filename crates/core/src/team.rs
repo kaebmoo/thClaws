@@ -6,13 +6,13 @@
 //! - **Protocol messages**: typed structured messages (idle_notification, shutdown, etc.)
 //! - **Polling**: 1-second interval for message delivery
 //!
-//! Layout:
-//!   .thclaws/team/config.json          — team config (members, lead, etc.)
-//!   .thclaws/team/inboxes/{name}.json  — per-agent inbox (JSON array)
-//!   .thclaws/team/tasks/{id}.json      — per-task file
-//!   .thclaws/team/tasks/_hwm           — high water mark for task IDs
-//!   .thclaws/team/agents/{name}/status.json — heartbeat
-//!   .thclaws/team/agents/{name}/output.log  — output capture for GUI
+//! Layout (workspace v2 — team state is runtime, under `state/`):
+//!   .thclaws/state/team/config.json          — team config (members, lead, etc.)
+//!   .thclaws/state/team/inboxes/{name}.json  — per-agent inbox (JSON array)
+//!   .thclaws/state/team/tasks/{id}.json      — per-task file
+//!   .thclaws/state/team/tasks/_hwm           — high water mark for task IDs
+//!   .thclaws/state/team/agents/{name}/status.json — heartbeat
+//!   .thclaws/state/team/agents/{name}/output.log  — output capture for GUI
 
 use crate::error::{Error, Result};
 use fs2::FileExt;
@@ -789,7 +789,7 @@ impl Mailbox {
     }
 
     pub fn default_dir() -> PathBuf {
-        PathBuf::from(".thclaws/team")
+        PathBuf::from(".thclaws/state/team")
     }
 
     fn inboxes_dir(&self) -> PathBuf {
@@ -1309,7 +1309,7 @@ impl Tool for TeamCreateTool {
     }
     fn description(&self) -> &'static str {
         "Create an agent team for parallel work (thClaws native — writes \
-         `.thclaws/team/config.json` in the current project root; NOT the SDK's \
+         `.thclaws/state/team/config.json` in the current project root; NOT the SDK's \
          server-side teams feature). Define agent names, roles, and optionally \
          `isolation: \"worktree\"` per member — if set, SpawnTeammate auto-\
          creates a git worktree at `.worktrees/{name}` on branch \

@@ -310,19 +310,29 @@ const OPENAI_TTS_MODEL: &str = "gpt-4o-mini-tts";
 /// is an ElevenLabs voice id; `model` overrides `eleven_v3` (the ONLY
 /// Thai-capable model — `eleven_multilingual_v2` mis-speaks Thai). mp3 out.
 async fn elevenlabs_tts(text: &str, voice: &str, model: Option<&str>) -> Result<Vec<u8>> {
-    let key = env_key("ELEVENLABS_API_KEY")
-        .ok_or_else(|| Error::Tool("ELEVENLABS_API_KEY not set for elevenlabs TTS voice".into()))?;
+    // BYOK-or-gateway (dev-plan/53 Stage D). Auth scheme differs by
+    // route: ElevenLabs itself wants `xi-api-key`; the gateway auths on
+    // `Authorization: Bearer` and injects the real xi-api-key upstream.
+    let ep = crate::media::provider::resolve_endpoint(
+        &["ELEVENLABS_API_KEY"],
+        "https://api.elevenlabs.io",
+        "elevenlabs",
+    )?;
     let body = json!({
         "text": text,
         "model_id": model.unwrap_or(ELEVENLABS_TTS_MODEL),
         "voice_settings": { "stability": 0.45, "similarity_boost": 0.8 },
     });
-    let resp = http()
-        .post(format!(
-            "https://api.elevenlabs.io/v1/text-to-speech/{voice}"
-        ))
-        .header("xi-api-key", &key)
-        .header("Accept", "audio/mpeg")
+    let mut req = crate::multi_tenant::attach_member(
+        http().post(format!("{}/v1/text-to-speech/{voice}", ep.base_url)),
+    )
+    .header("Accept", "audio/mpeg");
+    req = if ep.via_gateway {
+        req.bearer_auth(&ep.api_key)
+    } else {
+        req.header("xi-api-key", &ep.api_key)
+    };
+    let resp = req
         .json(&body)
         .send()
         .await
@@ -350,8 +360,16 @@ async fn openai_tts(
     model: Option<&str>,
     tone: Option<&str>,
 ) -> Result<Vec<u8>> {
-    let key = env_key("OPENAI_API_KEY")
-        .ok_or_else(|| Error::Tool("OPENAI_API_KEY not set for openai TTS voice".into()))?;
+    // BYOK-or-gateway: a real OPENAI_API_KEY → direct; else route via the
+    // gateway `/openai` segment + attach the member. Note: the gateway
+    // token meter 400s an audio-speech model that has no model_pricing
+    // row (fail-closed, no silent unbilled call) until an openai-audio
+    // media route + price is added.
+    let ep = crate::media::provider::resolve_endpoint(
+        &["OPENAI_API_KEY"],
+        "https://api.openai.com",
+        "openai",
+    )?;
     let mut body = json!({
         "model": model.unwrap_or(OPENAI_TTS_MODEL),
         "voice": voice,
@@ -363,13 +381,13 @@ async fn openai_tts(
             .unwrap()
             .insert("instructions".into(), json!(t));
     }
-    let resp = http()
-        .post("https://api.openai.com/v1/audio/speech")
-        .bearer_auth(&key)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| Error::Tool(format!("openai tts: {e}")))?;
+    let resp =
+        crate::multi_tenant::attach_member(http().post(format!("{}/v1/audio/speech", ep.base_url)))
+            .bearer_auth(&ep.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| Error::Tool(format!("openai tts: {e}")))?;
     if !resp.status().is_success() {
         let status = resp.status();
         let t = resp.text().await.unwrap_or_default();
@@ -390,20 +408,35 @@ async fn openai_tts(
 /// overrides [`GEMINI_TTS_MODEL`].
 async fn gemini_tts(prompt: &str, voice: &str, model: Option<&str>) -> Result<Vec<u8>> {
     let model = model.unwrap_or(GEMINI_TTS_MODEL);
-    if let Some(key) = env_key("GEMINI_API_KEY").filter(|k| k != "gateway-placeholder") {
-        return gemini_direct(prompt, voice, model, &key).await;
+    // BYOK-or-gateway (dp53 Stage D + metering audit). A real
+    // GEMINI_API_KEY → direct AI Studio; otherwise route the
+    // `generateContent` call through the gateway `/google` segment,
+    // which METERS it by tokens (the TTS model has a model_pricing row +
+    // returns usageMetadata) and attributes it per member. This closes
+    // the old hole where hosted TTS bypassed the gateway entirely.
+    match crate::media::provider::resolve_endpoint(
+        &["GEMINI_API_KEY"],
+        "https://generativelanguage.googleapis.com",
+        "google",
+    ) {
+        Ok(ep) => gemini_generate(prompt, voice, model, &ep).await,
+        // No gemini key AND no gateway (desktop w/o gemini) → OpenRouter BYOK.
+        Err(e) => {
+            if let Some(key) = env_key("OPENROUTER_API_KEY").filter(|k| k != "gateway-placeholder")
+            {
+                return gemini_openrouter(prompt, voice, model, &key).await;
+            }
+            Err(e)
+        }
     }
-    if let Some(key) = env_key("OPENROUTER_API_KEY") {
-        return gemini_openrouter(prompt, voice, model, &key).await;
-    }
-    Err(Error::Tool(
-        "Gemini TTS needs GEMINI_API_KEY (direct) or OPENROUTER_API_KEY (routed) — \
-         or map the voice to provider \"minimax\" in voices.json"
-            .into(),
-    ))
 }
 
-async fn gemini_direct(prompt: &str, voice: &str, model: &str, key: &str) -> Result<Vec<u8>> {
+async fn gemini_generate(
+    prompt: &str,
+    voice: &str,
+    model: &str,
+    ep: &crate::media::provider::ResolvedEndpoint,
+) -> Result<Vec<u8>> {
     let body = json!({
         "contents": [{ "parts": [{ "text": prompt }] }],
         "generationConfig": {
@@ -411,11 +444,16 @@ async fn gemini_direct(prompt: &str, voice: &str, model: &str, key: &str) -> Res
             "speechConfig": { "voiceConfig": { "prebuiltVoiceConfig": { "voiceName": voice } } }
         }
     });
-    let resp: serde_json::Value = http()
-        .post(format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        ))
-        .header("x-goog-api-key", key)
+    let url = format!("{}/v1beta/models/{model}:generateContent", ep.base_url);
+    let mut rb = crate::multi_tenant::attach_member(http().post(url));
+    // Gateway auths on `Authorization: Bearer <gw-key>` (it injects the
+    // real Google key upstream); direct AI Studio wants `x-goog-api-key`.
+    rb = if ep.via_gateway {
+        rb.bearer_auth(&ep.api_key)
+    } else {
+        rb.header("x-goog-api-key", &ep.api_key)
+    };
+    let resp: serde_json::Value = rb
         .json(&body)
         .send()
         .await
@@ -478,8 +516,14 @@ async fn gemini_openrouter(prompt: &str, voice: &str, model: &str, key: &str) ->
 }
 
 async fn minimax_tts(text: &str, voice: &str, lang: &str, model: Option<&str>) -> Result<Vec<u8>> {
-    let key = env_key("MINIMAX_API_KEY")
-        .ok_or_else(|| Error::Tool("MINIMAX_API_KEY not set for minimax TTS voice".into()))?;
+    // BYOK-or-gateway (see openai_tts): real key → direct; else gateway
+    // `/minimax` + member attribution (gateway 400s the un-priced t2a
+    // model → fail-closed rather than unbilled).
+    let ep = crate::media::provider::resolve_endpoint(
+        &["MINIMAX_API_KEY"],
+        "https://api.minimax.io",
+        "minimax",
+    )?;
     let boost = match lang {
         "th" => "Thai",
         "en" => "English",
@@ -492,16 +536,16 @@ async fn minimax_tts(text: &str, voice: &str, lang: &str, model: Option<&str>) -
         "voice_setting": { "voice_id": voice, "speed": 1.0, "vol": 1.0, "pitch": 0 },
         "audio_setting": { "sample_rate": 32000, "bitrate": 128000, "format": "mp3", "channel": 1 }
     });
-    let resp: serde_json::Value = http()
-        .post("https://api.minimax.io/v1/t2a_v2")
-        .bearer_auth(&key)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| Error::Tool(format!("minimax tts: {e}")))?
-        .json()
-        .await
-        .map_err(|e| Error::Tool(format!("minimax tts response: {e}")))?;
+    let resp: serde_json::Value =
+        crate::multi_tenant::attach_member(http().post(format!("{}/v1/t2a_v2", ep.base_url)))
+            .bearer_auth(&ep.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| Error::Tool(format!("minimax tts: {e}")))?
+            .json()
+            .await
+            .map_err(|e| Error::Tool(format!("minimax tts response: {e}")))?;
     let hex = resp["data"]["audio"].as_str().ok_or_else(|| {
         Error::Tool(format!(
             "minimax tts gave no audio: {}",

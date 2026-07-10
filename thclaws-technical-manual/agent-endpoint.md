@@ -305,3 +305,12 @@ skill body told the agent to run, then `event: result` + `[DONE]`.
 - [`model-catalogue.md`](model-catalogue.md) — `/v1/models` pricing block (unchanged; shared between both endpoints).
 - [`../dev-plan/25-thclaws-as-agent.md`](../dev-plan/25-thclaws-as-agent.md) — the architectural pivot this endpoint implements.
 - thcompany side: [`thcompany-technical-manual/adapter-thclaws-local.md`](../thcompany-technical-manual/adapter-thclaws-local.md).
+
+## Job Artifacts — `collect_files`
+
+Since v0.88.0 the request accepts `"collect_files": ["reports/*.pdf", …]` —
+glob patterns naming the run's output files. At completion (sync, SSE, and
+async paths alike) matches are snapshotted + sha256-hashed into
+`.thclaws/state/artifacts/<session_id>/` and served by
+`GET /v1/sessions/{sid}/artifacts[/{aid}]`; `POST /v1/inputs` places files
+ahead of a dispatch. Full reference: [job-artifacts.md](job-artifacts.md).

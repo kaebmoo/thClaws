@@ -85,6 +85,13 @@ pub struct Schedule {
     /// process resolves it through the same alias path the CLI uses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// dev-plan/heartbeat: chain fires into ONE session instead of a fresh
+    /// amnesiac run each time. Passed to the spawned job as
+    /// `--resume <value>`. Use `"last"` (recommended — resumes the cwd's
+    /// most-recent session; the first fire starts it) or an existing
+    /// session id. `None` keeps the classic stateless behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_session: Option<String>,
 
     /// Cap on the agent loop's tool-call iterations for this job.
     /// `None` falls through to the project's `maxIterations` setting
@@ -432,6 +439,7 @@ fn spawn_job(schedule: &Schedule, binary_path: &Path) -> Result<RunOutcome> {
     let result_dir = schedule
         .cwd
         .join(".thclaws")
+        .join("state")
         .join("schedule")
         .join(&schedule.id);
     std::fs::create_dir_all(&result_dir)?;
@@ -447,6 +455,11 @@ fn spawn_job(schedule: &Schedule, binary_path: &Path) -> Result<RunOutcome> {
         .stderr(Stdio::from(log_file));
     if let Some(ref m) = schedule.model {
         cmd.arg("--model").arg(m);
+    }
+    // Heartbeat: continue the same session across fires. Print mode now
+    // persists sessions + honors --resume, so history accumulates.
+    if let Some(ref sid) = schedule.resume_session {
+        cmd.arg("--resume").arg(sid);
     }
     if let Some(n) = schedule.max_iterations {
         cmd.arg("--max-iterations").arg(n.to_string());
@@ -1712,6 +1725,7 @@ mod tests {
                 cwd: std::env::temp_dir(),
                 prompt: "hello".into(),
                 model: Some("gpt-4o".into()),
+                resume_session: None,
                 max_iterations: Some(20),
                 timeout_secs: Some(60),
                 enabled: true,
@@ -1737,6 +1751,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             prompt: "x".into(),
             model: None,
+            resume_session: None,
             max_iterations: None,
             timeout_secs: None,
             enabled: true,
@@ -1758,6 +1773,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             prompt: "x".into(),
             model: None,
+            resume_session: None,
             max_iterations: None,
             timeout_secs: None,
             enabled: true,
@@ -1780,6 +1796,7 @@ mod tests {
                 cwd: std::env::temp_dir(),
                 prompt: "p".into(),
                 model: None,
+                resume_session: None,
                 max_iterations: None,
                 timeout_secs: None,
                 enabled: true,
@@ -1821,6 +1838,7 @@ mod tests {
             cwd: work.path().to_path_buf(),
             prompt: "hello there".into(),
             model: None,
+            resume_session: None,
             max_iterations: None,
             timeout_secs: Some(5),
             enabled: true,
@@ -1838,7 +1856,7 @@ mod tests {
         assert!(
             outcome
                 .result_path
-                .starts_with(work.path().join(".thclaws").join("schedule")),
+                .starts_with(work.path().join(".thclaws").join("state").join("schedule")),
             "result must be saved in the workspace; got: {}",
             outcome.result_path.display()
         );
@@ -2022,7 +2040,7 @@ mod tests {
         // Pre-create the .thclaws directory so the file write below
         // is observed as a child of an existing dir (some platforms
         // emit different events for create-dir vs create-in-dir).
-        let thclaws_dir = work.path().join(".thclaws").join("sessions");
+        let thclaws_dir = work.path().join(".thclaws").join("state").join("sessions");
         std::fs::create_dir_all(&thclaws_dir).unwrap();
 
         let store_dir = tempfile::tempdir().unwrap();
@@ -2202,6 +2220,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             prompt: "p".into(),
             model: None,
+            resume_session: None,
             max_iterations: None,
             timeout_secs: None,
             enabled: true,
@@ -2221,6 +2240,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             prompt: "p".into(),
             model: None,
+            resume_session: None,
             max_iterations: None,
             timeout_secs: None,
             enabled: true,
@@ -2282,6 +2302,7 @@ mod tests {
                 cwd: work.path().to_path_buf(),
                 prompt: "p".into(),
                 model: None,
+                resume_session: None,
                 max_iterations: None,
                 timeout_secs: Some(5),
                 enabled: true,
@@ -2298,6 +2319,7 @@ mod tests {
                 cwd: work.path().to_path_buf(),
                 prompt: "p".into(),
                 model: None,
+                resume_session: None,
                 max_iterations: None,
                 timeout_secs: Some(5),
                 enabled: true,
@@ -2314,6 +2336,7 @@ mod tests {
                 cwd: work.path().to_path_buf(),
                 prompt: "p".into(),
                 model: None,
+                resume_session: None,
                 max_iterations: None,
                 timeout_secs: Some(5),
                 enabled: false,
@@ -2452,6 +2475,7 @@ mod tests {
             cwd: work.path().to_path_buf(),
             prompt: "p".into(),
             model: None,
+            resume_session: None,
             max_iterations: None,
             timeout_secs: Some(1),
             enabled: true,

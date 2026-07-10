@@ -69,6 +69,13 @@ pub struct AgentRunRequest {
     /// JSONL exists at that path.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// job-artifacts: glob patterns naming this run's OUTPUT files
+    /// (e.g. `["reports/*.pdf"]`). When the run finishes, matches are
+    /// snapshotted + sha256-hashed into the session's artifact store and
+    /// served via `GET /v1/sessions/{id}/artifacts[/{aid}]` — a frozen,
+    /// Bearer-authenticated, per-job file surface for orchestrators.
+    #[serde(default)]
+    pub collect_files: Option<Vec<String>>,
     /// `true` (default) → SSE stream of native agent events.
     /// `false` → wait for completion, return one JSON result.
     /// Ignored when `x_callback` is present (async always 202s).
@@ -202,6 +209,8 @@ async fn agent_run_stream(
     runtime.agent.set_history(session.messages.clone());
 
     let model_for_stream = config.model.clone();
+    let collect_patterns = req.collect_files.clone();
+    let ws_for_snapshot = workspace_dir.clone();
     let prompt = req.prompt;
     let stream = async_stream::stream! {
         // Keep the runtime alive (MCP subprocesses, skill store handle)
@@ -300,6 +309,7 @@ async fn agent_run_stream(
         if let Err(e) = store.save(&mut session) {
             eprintln!("[api_v1] session save failed for {}: {e}", session.id);
         }
+        snapshot_collect_files(collect_patterns.as_deref(), &ws_for_snapshot, &session.id);
 
         if !emitted_error {
             // Terminal sentinel — clients can use this as an unambiguous
@@ -403,7 +413,10 @@ fn resolve_session(
     session_id: Option<&str>,
     model: &str,
 ) -> Result<(crate::session::Session, crate::session::SessionStore), Response> {
-    let store_root = workspace_dir.join(".thclaws").join("sessions");
+    let store_root = workspace_dir
+        .join(".thclaws")
+        .join("state")
+        .join("sessions");
     let store = crate::session::SessionStore::new(store_root);
     match session_id.map(str::trim).filter(|s| !s.is_empty()) {
         Some(id) => match store.load(id) {
@@ -447,7 +460,29 @@ async fn run_outcome_with_session(
     if let Err(e) = store.save(&mut session) {
         eprintln!("[api_v1] session save failed for {}: {e}", session.id);
     }
+    snapshot_collect_files(req.collect_files.as_deref(), workspace_dir, &session.id);
     Ok((outcome, session.id))
+}
+
+/// job-artifacts: freeze the run's declared outputs at completion. Never
+/// fatal — a snapshot failure is logged and the run result still returns.
+fn snapshot_collect_files(
+    patterns: Option<&[String]>,
+    workspace_dir: &std::path::Path,
+    session_id: &str,
+) {
+    let Some(patterns) = patterns.filter(|p| !p.is_empty()) else {
+        return;
+    };
+    match super::artifacts::snapshot_artifacts(workspace_dir, session_id, patterns) {
+        Ok(m) => eprintln!(
+            "[api_v1] artifacts: snapshotted {} file(s) for {} ({} skipped)",
+            m.artifacts.len(),
+            session_id,
+            m.skipped.len()
+        ),
+        Err(e) => eprintln!("[api_v1] artifacts snapshot failed for {session_id}: {e}"),
+    }
 }
 
 fn effective_config(req: &AgentRunRequest) -> AppConfig {
@@ -576,7 +611,7 @@ mod tests {
         // then resolve with that id — should return the persisted session,
         // not mint a fresh one.
         let dir = tempfile::tempdir().unwrap();
-        let store_root = dir.path().join(".thclaws").join("sessions");
+        let store_root = dir.path().join(".thclaws").join("state").join("sessions");
         std::fs::create_dir_all(&store_root).unwrap();
         let store = crate::session::SessionStore::new(store_root);
         let mut seed =

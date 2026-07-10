@@ -1,9 +1,10 @@
 //! Usage tracking — accumulate token usage per provider+model per project.
 //!
-//! Stored in `.thclaws/usage/{provider}/{model}.json` with daily breakdowns.
-//! Each file is a JSON object keyed by date (YYYY-MM-DD) with token counts.
+//! Stored in `.thclaws/state/usage/{provider}/{model}.json` with daily
+//! breakdowns. Each file is a JSON object keyed by date (YYYY-MM-DD) with
+//! token counts.
 //!
-//! Example: `.thclaws/usage/anthropic/claude-sonnet-4-5.json`
+//! Example: `.thclaws/state/usage/anthropic/claude-sonnet-4-5.json`
 //! ```json
 //! {
 //!   "2026-04-13": { "input": 15230, "output": 3420, "cache_write": 500, "cache_read": 12000, "requests": 8 },
@@ -40,9 +41,9 @@ impl UsageTracker {
         Self { root }
     }
 
-    /// Default: `.thclaws/usage/` in cwd.
+    /// Default: `.thclaws/state/usage/` in cwd.
     pub fn default_path() -> PathBuf {
-        PathBuf::from(".thclaws/usage")
+        PathBuf::from(".thclaws/state/usage")
     }
 
     fn model_path(&self, provider: &str, model: &str) -> PathBuf {
@@ -257,7 +258,7 @@ fn epoch_secs() -> u64 {
 /// Best-effort per-workspace usage ledger.
 ///
 /// Appends one JSON line per *finalized agent turn* — the main loop OR a
-/// Task subagent — to `<cwd>/.thclaws/usage.jsonl`. A reader can sum the
+/// Task subagent — to `<cwd>/.thclaws/state/usage.jsonl`. A reader can sum the
 /// lines to get the true token + USD cost of a whole task **including
 /// subagent work**, which the per-model [`UsageTracker`] aggregates by
 /// day (hard to isolate one run) and the session JSONL omits entirely.
@@ -276,7 +277,7 @@ pub fn append_usage_ledger(
     if usage.input_tokens == 0 && usage.output_tokens == 0 {
         return;
     }
-    let dir = cwd.join(".thclaws");
+    let dir = cwd.join(".thclaws").join("state");
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
@@ -384,7 +385,7 @@ mod tests {
             &usage,
         );
 
-        let body = std::fs::read_to_string(dir.path().join(".thclaws/usage.jsonl")).unwrap();
+        let body = std::fs::read_to_string(dir.path().join(".thclaws/state/usage.jsonl")).unwrap();
         let lines: Vec<_> = body.lines().collect();
         assert_eq!(lines.len(), 3, "one ledger line per finalized turn");
 
@@ -407,7 +408,7 @@ mod tests {
     fn ledger_skips_zero_usage() {
         let dir = tempdir().unwrap();
         append_usage_ledger(dir.path(), "main", "anthropic", "m", &Usage::default());
-        assert!(!dir.path().join(".thclaws/usage.jsonl").exists());
+        assert!(!dir.path().join(".thclaws/state/usage.jsonl").exists());
     }
 
     #[test]

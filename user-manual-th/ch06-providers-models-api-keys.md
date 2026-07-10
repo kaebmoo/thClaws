@@ -1,6 +1,6 @@
 # บทที่ 6 — provider, model และ API key
 
-thClaws คุยกับ **provider ได้ทั้งหมดสิบสามราย** โดยตรวจจับให้อัตโนมัติ
+thClaws คุยกับ **provider ได้ทั้งหมดยี่สิบห้าราย** โดยตรวจจับให้อัตโนมัติ
 จากชื่อ model และสลับได้ตลอดเวลาด้วย `/model`, `/provider` หรือ
 คลิกที่แถบ provider/model ใน sidebar (Desktop GUI, v0.7.2+)
 
@@ -8,7 +8,10 @@ thClaws คุยกับ **provider ได้ทั้งหมดสิบส
 
 | Provider | Model prefix | Auth env var | หมายเหตุ |
 |---|---|---|---|
-| Agentic Press | `ap/*` | `AGENTIC_PRESS_LLM_API_KEY` | gateway แบบ OpenAI-compatible; หลาย backend ภายใต้ key เดียว |
+| Moonshot | `moonshot/*` | `MOONSHOT_API_KEY` | Moonshot AI (Kimi); ค่า default `moonshot/kimi-k2.6` |
+| xAI | `xai/*` | `XAI_API_KEY` | xAI Grok; ค่า default `xai/grok-4.3` |
+| Groq | `groq/*` | `GROQ_API_KEY` | Groq LPU (เร็วมาก); `groq/llama-3.3-70b-versatile` |
+| TokenRouter | `tokenrouter/*` | `TOKENROUTER_API_KEY` | Router รวมเข้าถึง 300+ model (`tokenrouter/<vendor>/<model>`) |
 | Anthropic | `claude-*` | `ANTHROPIC_API_KEY` | extended thinking, prompt caching (system + tools) |
 | Anthropic Agent SDK | `agent/*` | — (ใช้ auth ของ Claude Code เอง) | ขับ `claude` CLI ผ่าน subscription Claude Pro / Max แทนการคิดเงินแบบ API ⚠ tool registry ของ thClaws ไม่ข้าม subprocess boundary — model เห็นเฉพาะ toolset ของ Claude Code เท่านั้น tool ของ KMS / MCP / Agent Teams เข้าถึงไม่ได้จาก provider นี้ ต้องสลับไป `claude-*` หากต้องการใช้ |
 | OpenAI | `gpt-*`, `o1-*`, `o3*`, `o4-*` | `OPENAI_API_KEY` | Chat Completions; prompt caching อัตโนมัติ |
@@ -22,8 +25,8 @@ thClaws คุยกับ **provider ได้ทั้งหมดสิบส
 | DashScope | `qwen-*`, `qwq-*` | `DASHSCOPE_API_KEY` | Qwen ของ Alibaba; caching อัตโนมัติ |
 | DeepSeek | `deepseek-*` | `DEEPSEEK_API_KEY` (+ `DEEPSEEK_BASE_URL`) | สาย V4: `deepseek-v4-flash`, `deepseek-v4-pro` ส่วน alias เดิม `deepseek-chat` / `deepseek-reasoner` ยังใช้ได้ในระดับ wire |
 | ThaiLLM (สวทช.) | `thaillm/*` | `THAILLM_API_KEY` | aggregator ที่ `thaillm.or.th` รวม model 8B ภาษาไทยสี่ตัว (OpenThaiGPT, Typhoon-S, Pathumma, THaLLE) มี alias (case-insensitive): `openthaigpt`, `typhoon`, `pathumma`, `thalle` |
-| Z.ai | `zai/*` | `ZAI_API_KEY` (+ `ZAI_BASE_URL`) | Endpoint GLM Coding Plan ที่ `api.z.ai` ค่า default `zai/glm-4.6` ตัวล่าสุด `zai/glm-5.1` (context 202K) เพิ่มใน v0.8.5 ใช้ `ZAI_BASE_URL` override สำหรับ BigModel SKU ที่ `open.bigmodel.cn` |
-| MiniMax | `minimax/*` | `MINIMAX_API_KEY` (+ `MINIMAX_BASE_URL`) | Endpoint สากลที่ `api.minimax.io` รุ่น: `minimax/MiniMax-M2` (200K/131K — flagship, default), `minimax/MiniMax-M1` (context 1M), `minimax/abab7-chat-preview` ผู้ใช้แพลตฟอร์มจีน (`api.minimax.chat`) ต้อง override `MINIMAX_BASE_URL` (auth scheme ต่างกัน — YMMV) เพิ่มใน v0.8.5 |
+| Z.ai | `zai/*` | `ZAI_API_KEY` (+ `ZAI_BASE_URL`) | Endpoint GLM Coding Plan ที่ `api.z.ai` ค่า default `zai/glm-5.2` ใช้ `ZAI_BASE_URL` override สำหรับ BigModel SKU ที่ `open.bigmodel.cn` |
+| MiniMax | `minimax/*` | `MINIMAX_API_KEY` (+ `MINIMAX_BASE_URL`) | Endpoint สากลที่ `api.minimax.io` รุ่น: `minimax/MiniMax-M3` (flagship, default), `minimax/MiniMax-M1` (context 1M), `minimax/abab7-chat-preview` ผู้ใช้แพลตฟอร์มจีน (`api.minimax.chat`) ต้อง override `MINIMAX_BASE_URL` (auth scheme ต่างกัน — YMMV) เพิ่มใน v0.8.5 |
 | Ollama Cloud | `ollama-cloud/*` | `OLLAMA_CLOUD_API_KEY` | Catalog Ollama แบบ hosted (Kimi, GPT-OSS, DeepSeek, Llama ฯลฯ) เป็น OpenAI-compatible ที่ `ollama.com/v1` |
 | NVIDIA NIM | `nvidia/*` | `NVIDIA_API_KEY` (+ `NVIDIA_BASE_URL`) | NVIDIA hosted inference ที่ `integrate.api.nvidia.com/v1` ครอบคลุม Nemotron, Llama, DeepSeek, GLM และอื่น ๆ — prefix `nvidia/` route ทุกตัว ระบบจะตัด prefix ก่อนยิง wire ใช้ env var override สำหรับ on-prem NIM |
 | LMStudio | `lmstudio/*` | — (local) | LMStudio server บน local ที่ `localhost:1234/v1` (OpenAI-compatible) ไม่ต้อง auth model ตามที่โหลดไว้ในแอป LMStudio |
@@ -36,7 +39,6 @@ thClaws คุยกับ **provider ได้ทั้งหมดสิบส
 
 ```
 ❯ /providers
-    agentic-press → ap/gemma4-12b
   * anthropic     → claude-sonnet-4-6
     anthropic-agent → agent/claude-sonnet-4-6
     openrouter    → openrouter/anthropic/claude-sonnet-4-6
@@ -54,7 +56,7 @@ current provider: openai (model: gpt-4o)
 การสลับ model/provider จะตัดสินใจให้คุณอัตโนมัติว่าบทสนทนาจะถูกต่อ
 หรือถูก fork เป็น session ใหม่ โดยดูจากว่า **provider family**
 เปลี่ยนหรือไม่ (Anthropic, OpenAI, Gemini, Ollama, DashScope,
-OpenRouter, Agentic Press ฯลฯ):
+OpenRouter, Moonshot ฯลฯ):
 
 | สลับจาก → ไป | พฤติกรรม | เหตุผล |
 |---|---|---|
@@ -111,8 +113,8 @@ model → claude-sonnet-4-6 (provider: anthropic; saved to .thclaws/settings.jso
 และระบบจะพิมพ์ว่า `unknown model '…' — try /models`
 
 `/models` จะแสดง catalogue ที่ server รายงานมาสำหรับ provider
-ปัจจุบัน สำหรับ Ollama และ Agentic Press ID จะถูกใส่ prefix กลับมาให้ด้วย
-(เช่น `ollama/llama3.2`, `ap/gemma4-26b`) เพื่อให้คุณ paste เข้า
+ปัจจุบัน สำหรับ provider ที่มี prefix (Ollama, Moonshot, Groq ฯลฯ) ID จะถูกใส่ prefix กลับมาให้ด้วย
+(เช่น `ollama/llama3.2`, `moonshot/kimi-k2.6`) เพื่อให้คุณ paste เข้า
 `/model` ได้ทันที
 
 ## Model catalogue — ขนาด context ของแต่ละโมเดล
@@ -303,7 +305,6 @@ ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-...
 OPENROUTER_API_KEY=sk-or-v1-...
 GEMINI_API_KEY=AI...
-AGENTIC_PRESS_LLM_API_KEY=llm_v1_...
 DASHSCOPE_API_KEY=sk-...
 OLLAMA_BASE_URL=http://localhost:11434   # defaults to this anyway
 OPENAI_COMPAT_BASE_URL=http://localhost:8000/v1   # gateway OAI-compat ใดๆ
@@ -364,19 +365,6 @@ token leak
 ไม่ต้องใช้ API key หากใช้ Ollama server ระยะไกล ให้ตั้ง `OLLAMA_BASE_URL`
 (ผ่าน Settings modal หรือ env var)
 
-## ใช้ Agentic Press (multi-model แบบ hosted)
-
-Agentic Press คือ gateway ที่ให้บริการหลาย backend (Gemma 3, GPT
-4o-mini, Claude Sonnet, Llama 4, Qwen 3) ภายใต้ API key เดียว
-เหมาะสำหรับทดลอง model หลายตัวโดยไม่ต้องไปสมัครทีละเจ้า
-
-1. ขอ key จาก dashboard ของ Agentic Press
-2. Paste ลงใน Settings → API Keys (Agentic Press) — หรือตั้ง
-   `AGENTIC_PRESS_LLM_API_KEY`
-3. `/model ap/gemma4-26b` (หรือ model ใดที่มีใน list)
-
-prefix `ap/` จะ route request ผ่าน gateway และ `/models` จะแสดง
-ทุก model ที่ gateway ให้บริการอยู่ในตอนนี้
 
 ## ใช้ OpenRouter (model 300+ ผ่าน key เดียว)
 
