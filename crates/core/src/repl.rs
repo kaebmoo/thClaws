@@ -2631,6 +2631,41 @@ pub fn build_kms_challenge_prompt(kms_name: &str, idea: &str) -> String {
     )
 }
 
+/// Compose the agent-facing prompt fired after a file is ingested into a
+/// KMS (Files-tab "Add to KMS" or `/kms ingest`). The deterministic
+/// ingest only leaves a bare stub page; this turn upgrades it into a real
+/// wiki page — summary + key takeaways + cross-links — using the raw
+/// source the ingest archived. `source_path` is the on-disk source so the
+/// agent can `Read` the full content (KmsRead only surfaces pages).
+pub fn build_kms_summarize_prompt(kms_name: &str, alias: &str, source_path: &str) -> String {
+    format!(
+        "A file was just ingested into the '{kms_name}' knowledge base as the page \
+         '{alias}', which is currently a bare stub. Turn it into a useful curated wiki \
+         page.\n\
+         \n\
+         ## Procedure\n\
+         \n\
+         1. `Read` the raw source at `{source_path}` — that's the full ingested content.\n\
+         2. `KmsSearch(kms: \"{kms_name}\", pattern: ...)` for a few of the source's key \
+         topics to find related existing pages worth cross-linking.\n\
+         3. `KmsWrite(kms: \"{kms_name}\", page: \"{alias}\", content: ...)` to replace the \
+         stub. The content should be:\n\
+         - YAML frontmatter keeping `sources: {alias}` and a `title:` drawn from the source.\n\
+         - A 2–3 sentence **overview** of what the source covers.\n\
+         - **Key takeaways** — a bullet list of the substantive points.\n\
+         - **Related** — `[[wikilinks]]` to the pages you found via KmsSearch (omit if none).\n\
+         \n\
+         ## Hard rules\n\
+         \n\
+         - **Faithful, not a rewrite.** This is a curated index over the raw source — never \
+         invent facts, headings, or takeaways that aren't in the source.\n\
+         - **Summarise, don't dump.** Don't paste the whole article back into the page.\n\
+         - If the source is thin or unreadable, write a short honest note rather than padding.\n\
+         \n\
+         End with one line confirming the page was written."
+    )
+}
+
 /// M6.26 BUG #2: scaffold body for `/memory write` / `/memory edit`.
 /// When `existing` is `Some`, pre-fills with that entry's frontmatter +
 /// body for editing. When `None`, builds a fresh template.
@@ -4982,11 +5017,11 @@ pub async fn run_print_mode_with(
         std::sync::Arc::new(std::sync::RwLock::new(crate::subagent::FactorySnapshot {
             system: system.clone(),
             tools: tool_registry.clone(),
+            model: config.model.clone(),
+            provider: provider.clone(),
         }));
     let factory = Arc::new(ProductionAgentFactory {
-        provider: provider.clone(),
         snapshot: factory_snapshot,
-        model: config.model.clone(),
         max_iterations: config.max_iterations,
         max_depth: crate::subagent::DEFAULT_MAX_DEPTH,
         max_tokens: config.max_tokens,
@@ -5034,6 +5069,7 @@ pub async fn run_print_mode_with(
         .with_max_iterations(config.max_iterations)
         .with_max_tokens(config.max_tokens)
         .with_permission_mode(perm_mode)
+        .with_ask_tools(config.ask_tools.clone().unwrap_or_default())
         .with_hooks(hooks_arc.clone());
 
     // dev-plan/heartbeat: sessions in print mode. Same per-workspace store
@@ -5280,11 +5316,11 @@ pub async fn run_agent_workflow(
     let snapshot = std::sync::Arc::new(std::sync::RwLock::new(crate::subagent::FactorySnapshot {
         system: system.clone(),
         tools: tool_registry.clone(),
+        model: config.model.clone(),
+        provider: provider.clone(),
     }));
     let factory = Arc::new(ProductionAgentFactory {
-        provider: provider.clone(),
         snapshot,
-        model: config.model.clone(),
         max_iterations: config.max_iterations,
         max_depth: crate::subagent::DEFAULT_MAX_DEPTH,
         max_tokens: config.max_tokens,
@@ -5701,6 +5737,8 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         std::sync::Arc::new(std::sync::RwLock::new(crate::subagent::FactorySnapshot {
             system: system.clone(),
             tools: tool_registry.clone(),
+            model: config.model.clone(),
+            provider: provider.clone(),
         }));
     {
         let plugin_agent_dirs = crate::plugins::plugin_agent_dirs();
@@ -5708,9 +5746,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
             crate::agent_defs::AgentDefsConfig::load_with_extra(&plugin_agent_dirs);
         agent_defs.apply_builtin_subagent_overrides(&config);
         let factory = Arc::new(ProductionAgentFactory {
-            provider: provider.clone(),
             snapshot: factory_snapshot.clone(),
-            model: config.model.clone(),
             max_iterations: config.max_iterations,
             max_depth: crate::subagent::DEFAULT_MAX_DEPTH,
             max_tokens: config.max_tokens,
@@ -5783,6 +5819,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     .with_max_iterations(config.max_iterations)
     .with_max_tokens(config.max_tokens)
     .with_permission_mode(perm_mode)
+    .with_ask_tools(config.ask_tools.clone().unwrap_or_default())
     .with_approver(approver.clone())
     .with_hooks(hooks_arc.clone());
 
@@ -7168,6 +7205,16 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     .with_approver(approver.clone())
                     .with_hooks(std::sync::Arc::new(config.hooks.clone()));
                     agent.set_history(history);
+                    // Push the new model + provider into the factory
+                    // snapshot so unpinned subagents spawned after the
+                    // switch inherit the CURRENT model, not the boot one.
+                    {
+                        let mut snap = factory_snapshot
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner());
+                        snap.model = config.model.clone();
+                        snap.provider = agent.provider().clone();
+                    }
                     // Keep the same session id + JSONL file; just update the
                     // model label so the header reflects the active provider.
                     session.model = config.model.clone();
@@ -7253,6 +7300,14 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     .with_approver(approver.clone())
                     .with_hooks(std::sync::Arc::new(config.hooks.clone()));
                     agent.clear_history();
+                    // Same as `/model`: subagents must follow the swap.
+                    {
+                        let mut snap = factory_snapshot
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner());
+                        snap.model = config.model.clone();
+                        snap.provider = agent.provider().clone();
+                    }
                     session = Session::new(&config.model, session.cwd.clone());
                     // M6.20 BUG M2 + M3: provider swap mints a fresh
                     // session; reset yolo flag and permission mode.
@@ -9664,8 +9719,13 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             } else {
                                 String::new()
                             };
+                            let images = if r.images_copied > 0 {
+                                format!(" (+{} local image(s))", r.images_copied)
+                            } else {
+                                String::new()
+                            };
                             println!(
-                                "{COLOR_DIM}{verb} → {} — {}{cascade}{COLOR_RESET}",
+                                "{COLOR_DIM}{verb} → {} — {}{images}{cascade}{COLOR_RESET}",
                                 r.target.display(),
                                 r.summary,
                             );
@@ -14454,12 +14514,12 @@ mod tests {
 
         let approver: Arc<dyn ApprovalSink> = Arc::new(DenyApprover);
         let factory = crate::subagent::ProductionAgentFactory {
-            provider: Arc::new(StubProvider),
             snapshot: Arc::new(std::sync::RwLock::new(crate::subagent::FactorySnapshot {
                 system: String::new(),
                 tools: ToolRegistry::new(),
+                model: "test".into(),
+                provider: Arc::new(StubProvider),
             })),
-            model: "test".into(),
             max_iterations: 1,
             max_depth: 3,
             max_tokens: 8192,
@@ -14534,6 +14594,8 @@ mod tests {
         let factory_snapshot = Arc::new(std::sync::RwLock::new(crate::subagent::FactorySnapshot {
             system: system.clone(),
             tools: tool_registry.clone(),
+            model: cfg.model.clone(),
+            provider: Arc::new(StubProvider),
         }));
         let addendum = "\n\n# Agent Role: TEST\nTEST_RULES\n";
 

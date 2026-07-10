@@ -1491,16 +1491,31 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 .unwrap_or("")
                 .to_string();
             let payload = match crate::kms::read_browse_file(&kms_name, &kind, &file) {
-                Ok(read) => serde_json::json!({
-                    "type": "kms_file_content",
-                    "kms": kms_name,
-                    "kind": kind,
-                    "name": file,
-                    "content": read.content,
-                    "total_bytes": read.total_bytes,
-                    "truncated": read.truncated,
-                    "ok": true,
-                }),
+                Ok(read) => {
+                    // Absolute dir of this file so the viewer can resolve
+                    // relative markdown image links (`![](alias-assets/x.png)`)
+                    // through the /file-asset endpoint. Project-scoped KMS live
+                    // under the workspace and serve fine; user-scoped roots sit
+                    // outside it and the asset endpoint's sandbox will refuse
+                    // them (images stay unresolved there — links are harmless).
+                    let asset_base = crate::kms::resolve(&kms_name)
+                        .map(|k| {
+                            let sub = if kind == "source" { "sources" } else { "pages" };
+                            k.root.join(sub).to_string_lossy().to_string()
+                        })
+                        .unwrap_or_default();
+                    serde_json::json!({
+                        "type": "kms_file_content",
+                        "kms": kms_name,
+                        "kind": kind,
+                        "name": file,
+                        "content": read.content,
+                        "total_bytes": read.total_bytes,
+                        "truncated": read.truncated,
+                        "asset_base": asset_base,
+                        "ok": true,
+                    })
+                }
                 Err(e) => serde_json::json!({
                     "type": "kms_file_content",
                     "kms": kms_name,
@@ -3472,6 +3487,120 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             });
             (ctx.dispatch)(payload.to_string());
             (ctx.dispatch)(crate::kms::build_update_payload().to_string());
+        }
+
+        // Files-tab "Add to KMS" context action: ingest the selected file
+        // into a named KMS (markdown only — mirrors the frontend gate and
+        // `INGEST_EXTENSIONS`). Path is sandbox-checked. Echoes an
+        // `kms_ingest_result` with the minted alias + local-image count so
+        // the tab can toast the outcome; refreshes the KMS sidebar on success.
+        "kms_ingest" => {
+            let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+            let raw_path = msg.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let kms_name = msg
+                .get("kms")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let force = msg.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+
+            let (ok, alias, images_copied, overwrote, error): (bool, String, usize, bool, String) =
+                (|| {
+                    if kms_name.is_empty() {
+                        return (
+                            false,
+                            String::new(),
+                            0,
+                            false,
+                            "no KMS selected".to_string(),
+                        );
+                    }
+                    let path = match crate::sandbox::Sandbox::check(raw_path) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            return (
+                                false,
+                                String::new(),
+                                0,
+                                false,
+                                format!("access denied: {e}"),
+                            )
+                        }
+                    };
+                    let ext_ok = path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| matches!(e.to_ascii_lowercase().as_str(), "md" | "markdown"))
+                        .unwrap_or(false);
+                    if !ext_ok {
+                        return (
+                            false,
+                            String::new(),
+                            0,
+                            false,
+                            "only .md files can be added to a KMS".to_string(),
+                        );
+                    }
+                    let Some(k) = crate::kms::resolve(&kms_name) else {
+                        return (
+                            false,
+                            String::new(),
+                            0,
+                            false,
+                            format!("KMS '{kms_name}' not found"),
+                        );
+                    };
+                    match crate::kms::ingest(&k, &path, None, force) {
+                        Ok(r) => (true, r.alias, r.images_copied, r.overwrote, String::new()),
+                        Err(e) => (false, String::new(), 0, false, e.to_string()),
+                    }
+                })();
+
+            // An alias collision is recoverable: the frontend surfaces a
+            // "Replace" action that re-sends with `force: true`. Flag it so
+            // the tab can tell a collision apart from a hard failure. Only
+            // meaningful when the caller didn't already force.
+            let collision = !ok && !force && error.contains("already exists");
+
+            // On success, hand the tab an agent prompt that upgrades the bare
+            // stub into a real curated page (summary + takeaways + wikilinks).
+            // The tab relays it as a normal chat turn so the main agent authors
+            // it with KmsRead/KmsSearch/KmsWrite. Empty when the ingest failed.
+            let summarize_prompt = if ok {
+                crate::kms::resolve(&kms_name)
+                    .map(|k| {
+                        let src = k.root.join("sources").join(format!("{alias}.md"));
+                        crate::repl::build_kms_summarize_prompt(
+                            &kms_name,
+                            &alias,
+                            &src.to_string_lossy(),
+                        )
+                    })
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+
+            (ctx.dispatch)(
+                serde_json::json!({
+                    "type": "kms_ingest_result",
+                    "id": id,
+                    "path": raw_path,
+                    "kms": kms_name,
+                    "ok": ok,
+                    "alias": alias,
+                    "images_copied": images_copied,
+                    "overwrote": overwrote,
+                    "collision": collision,
+                    "summarize_prompt": summarize_prompt,
+                    "error": error,
+                })
+                .to_string(),
+            );
+            if ok {
+                (ctx.dispatch)(crate::kms::build_update_payload().to_string());
+            }
         }
 
         // Create a new blank KMS page from the per-KMS browser's `+`.

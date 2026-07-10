@@ -799,6 +799,11 @@ pub struct Agent {
     pub max_retries: usize,
     pub thinking_budget: Option<u32>,
     pub permission_mode: PermissionMode,
+    /// Tool names that always trip the approval gate, even under
+    /// `PermissionMode::Auto` (config `askTools`). Interactive-only — with
+    /// an `AutoApprover` sink there's no human to prompt, so a listed tool
+    /// still sails through. Empty = mode alone decides (original behavior).
+    pub ask_tools: Vec<String>,
     approver: Arc<dyn ApprovalSink>,
     history: Arc<Mutex<Vec<Message>>>,
     /// Cooperative cancel signal shared with the worker / driver. M6.17
@@ -880,6 +885,7 @@ impl Agent {
             max_retries: 3,
             thinking_budget: None,
             permission_mode: PermissionMode::Auto,
+            ask_tools: Vec::new(),
             approver: Arc::new(AutoApprover),
             history: Arc::new(Mutex::new(Vec::new())),
             cancel: None,
@@ -1001,6 +1007,13 @@ impl Agent {
         self
     }
 
+    /// Force the approval gate on for these tool names regardless of the
+    /// permission mode (config `askTools`). See the field docs.
+    pub fn with_ask_tools(mut self, tools: Vec<String>) -> Self {
+        self.ask_tools = tools;
+        self
+    }
+
     pub fn with_approver(mut self, approver: Arc<dyn ApprovalSink>) -> Self {
         self.approver = approver;
         self
@@ -1042,6 +1055,10 @@ impl Agent {
     /// (`anthropic-agent` SDK only — other providers return `None`).
     pub fn provider(&self) -> &Arc<dyn Provider> {
         &self.provider
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
     }
 
     pub fn clear_history(&self) {
@@ -1140,6 +1157,10 @@ impl Agent {
         // `permissions::current_mode()` so EnterPlanMode / ExitPlanMode /
         // `/plan` flips take effect mid-turn rather than next-message.
         let permission_mode_default = self.permission_mode;
+        // `askTools`: names that force the approval gate on regardless of
+        // mode (read once per turn — a static config list, unlike the live
+        // `current_mode()` above).
+        let ask_tools = self.ask_tools.clone();
         let approver = self.approver.clone();
         let history = self.history.clone();
         let cancel = self.cancel.clone();
@@ -1158,6 +1179,15 @@ impl Agent {
 
             let mut current_max_tokens = base_max_tokens;
             let mut cumulative_usage = Usage::default();
+
+            // Degenerate-tool-loop breaker: a model that repeats the SAME
+            // failing tool call (same tool, same input, same error) burns the
+            // whole iteration budget learning nothing — grok-4.5 re-sent an
+            // argless WorkflowRun 22× straight. Track a signature of each
+            // all-errors tool iteration; three identical ones in a row ends
+            // the turn with a clear message instead of grinding to the cap.
+            let mut degen_sig: Option<String> = None;
+            let mut degen_count: u32 = 0;
 
             // 0 means unlimited.
             let effective_max = if max_iterations == 0 { usize::MAX } else { max_iterations };
@@ -1802,8 +1832,13 @@ impl Agent {
                     // Approval gate. `asks_for_approval()` covers
                     // both `Ask` (local prompt) and `LineGated`
                     // (plan-07 Phase 1.2 — prompt routed to LINE).
-                    let needs_approval =
-                        permission_mode.asks_for_approval() && tool.requires_approval(input);
+                    // `askTools` forces the gate on for a named tool even
+                    // under `Auto`, bypassing both the mode check and the
+                    // tool's own `requires_approval` — an interactive-only
+                    // escape hatch (an AutoApprover sink still auto-yeses).
+                    let force_ask = ask_tools.iter().any(|t| t.as_str() == name);
+                    let needs_approval = force_ask
+                        || (permission_mode.asks_for_approval() && tool.requires_approval(input));
                     if needs_approval {
                         let req = ApprovalRequest {
                             tool_name: name.clone(),
@@ -1944,6 +1979,50 @@ impl Agent {
                     };
                 }
 
+                // Degenerate-loop signature for THIS iteration: only when
+                // every tool call errored. Name + input + error text (capped)
+                // per call, joined — identical across iterations ⇒ the model
+                // is re-rolling the exact same failing call.
+                let degen_this: Option<String> = if !result_blocks.is_empty()
+                    && result_blocks.iter().all(|b| {
+                        matches!(b, ContentBlock::ToolResult { is_error: true, .. })
+                    }) {
+                    let mut sig = String::new();
+                    for tu in &turn_tool_uses {
+                        let ContentBlock::ToolUse { id, name, input, .. } = tu else { continue };
+                        let err = result_blocks.iter().find_map(|b| match b {
+                            ContentBlock::ToolResult { tool_use_id, content, .. }
+                                if tool_use_id == id =>
+                            {
+                                Some(content.to_text())
+                            }
+                            _ => None,
+                        });
+                        let err = err.unwrap_or_default();
+                        let err_head: String = err.chars().take(200).collect();
+                        sig.push_str(name);
+                        sig.push('\u{1}');
+                        sig.push_str(&input.to_string());
+                        sig.push('\u{1}');
+                        sig.push_str(&err_head);
+                        sig.push('\u{2}');
+                    }
+                    Some(sig)
+                } else {
+                    None
+                };
+                match (&degen_this, &degen_sig) {
+                    (Some(now), Some(prev)) if now == prev => degen_count += 1,
+                    (Some(now), _) => {
+                        degen_sig = Some(now.clone());
+                        degen_count = 1;
+                    }
+                    (None, _) => {
+                        degen_sig = None;
+                        degen_count = 0;
+                    }
+                }
+
                 if !result_blocks.is_empty() {
                     // Drain any user-typed messages that arrived while
                     // we were mid-tool (issue #106). Fold each as an
@@ -1977,6 +2056,38 @@ impl Agent {
                     for text in injected {
                         yield AgentEvent::UserMessageInjected { text };
                     }
+                }
+
+                // Three identical all-errors tool iterations in a row: the
+                // model is stuck re-rolling the same failing call. End the
+                // turn with a plain explanation instead of burning the rest
+                // of the iteration budget (grok-4.5 went 22 rounds here).
+                if degen_count >= 3 {
+                    let first_tool = turn_tool_uses
+                        .iter()
+                        .find_map(|tu| match tu {
+                            ContentBlock::ToolUse { name, .. } => Some(name.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| "tool".to_string());
+                    yield AgentEvent::Text(format!(
+                        "\n[stopped: `{first_tool}` failed with the IDENTICAL call + error \
+                         {degen_count} times in a row — the model keeps re-sending the same \
+                         failing parameters. Try rephrasing the request, or switch to a model \
+                         with stronger tool-calling (this pattern is typical of models that \
+                         can't emit nested tool arguments).]"
+                    ));
+                    if let Ok(mut g) = model_override.lock() {
+                        *g = None;
+                    }
+                    if let Ok(mut g) = next_turn_chunk_timeout.lock() {
+                        *g = None;
+                    }
+                    yield AgentEvent::Done {
+                        stop_reason: Some("degenerate_tool_loop".to_string()),
+                        usage: cumulative_usage,
+                    };
+                    return;
                 }
             }
 
@@ -3666,6 +3777,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "ok");
+    }
+
+    #[tokio::test]
+    async fn ask_tools_forces_approval_under_auto() {
+        use crate::permissions::{DenyApprover, PermissionMode};
+        use tempfile::tempdir;
+
+        // Auto mode would normally never consult the approver — but a tool
+        // named in `askTools` must still hit the gate. DenyApprover vetoes,
+        // so the Write must NOT land and the call is recorded as a denial.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("gated.txt");
+        let args = serde_json::json!({
+            "path": path.to_string_lossy(),
+            "content": "should-not-write",
+        })
+        .to_string();
+        let provider = ScriptedProvider::new(vec![
+            tool_script("toolu_1", "Write", &args),
+            text_script(&["done"]),
+        ]);
+        let agent = Agent::new(provider, ToolRegistry::with_builtins(), "test", "")
+            .with_permission_mode(PermissionMode::Auto)
+            .with_ask_tools(vec!["Write".to_string()])
+            .with_approver(Arc::new(DenyApprover));
+
+        let outcome = collect_agent_turn(agent.run_turn("write".into()))
+            .await
+            .unwrap();
+        assert!(!path.exists(), "askTools should have gated the Write");
+        assert_eq!(outcome.tool_denials, vec!["Write".to_string()]);
     }
 
     // M6.20 BUG M1 regression note: the TodoWrite plan-mode block

@@ -392,6 +392,19 @@ pub fn create(name: &str, scope: KmsScope) -> Result<KmsRef> {
 /// conversion than silently store a blob the model can't read.
 pub const INGEST_EXTENSIONS: &[&str] = &["md", "markdown", "txt", "rst", "log", "json"];
 
+/// Image extensions pulled into `sources/<alias>-assets/` when a
+/// markdown source is ingested (see [`localize_markdown_images`]). A
+/// narrow allowlist so a crafted `![](../secrets.env)` link can't
+/// smuggle a non-image file into the store.
+const INGEST_IMAGE_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp", "ico", "heic", "heif", "tif", "tiff",
+];
+
+/// Per-image size cap when localizing markdown images on ingest. Skip
+/// (leave the link untouched) anything larger so an ingest can't bloat
+/// the KMS with a huge asset. Mirrors content-extractor's 25 MB cap.
+const INGEST_IMAGE_MAX_BYTES: u64 = 25 * 1024 * 1024;
+
 /// Reserved aliases that collide with the KMS starter files — refuse
 /// to ingest into them, otherwise a `/kms ingest notes README.md as index`
 /// would clobber the index with no way back except `--force`.
@@ -453,6 +466,10 @@ pub struct IngestResult {
     pub summary: String,
     pub overwrote: bool,
     pub cascaded: usize,
+    /// Local relative images copied into `sources/<alias>-assets/` and
+    /// re-linked in the archived source (markdown ingest only; 0 for
+    /// text/URL/PDF sources or when the file has no local images).
+    pub images_copied: usize,
 }
 
 /// M6.25 BUG #2: Ingest now SPLITS raw source from wiki page.
@@ -550,6 +567,19 @@ pub fn ingest(
             source_target.display()
         ))
     })?;
+
+    // Pull local relative images referenced by a markdown source into
+    // sources/<alias>-assets/ and re-link them, so the archived copy is
+    // self-contained (best-effort — remote/data/missing/oversized images
+    // and non-markdown sources leave links untouched and return 0).
+    let images_copied = if matches!(ext.as_str(), "md" | "markdown") {
+        let orig_dir = source.parent().unwrap_or_else(|| Path::new("."));
+        localize_markdown_images(orig_dir, &source_target, &kms.root.join("sources"), &alias)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
     let summary = first_summary_line(&source_target);
 
     // Write the page stub with frontmatter pointing at the source.
@@ -595,7 +625,189 @@ pub fn ingest(
         summary,
         overwrote: page_existed,
         cascaded: cascade_count,
+        images_copied,
     })
+}
+
+/// Copy every *local, relative* image an ingested markdown file
+/// references into `sources/<alias>-assets/` and rewrite the links in
+/// `copied_md` (the archived `sources/<alias>.md`) to point at the local
+/// copies. Returns the number of images copied.
+///
+/// Best-effort and conservative — a link is left exactly as-is when it
+/// is a remote URL (`http(s)://`, protocol-relative `//`, any `scheme:`),
+/// a `data:` URI, an absolute filesystem path, doesn't resolve to an
+/// existing file under `orig_dir`, has an extension outside
+/// [`INGEST_IMAGE_EXTENSIONS`], or exceeds [`INGEST_IMAGE_MAX_BYTES`]. A
+/// per-image copy failure is swallowed (link untouched), never aborting
+/// the ingest. Non-markdown callers match nothing and get 0.
+///
+/// On every call the alias's assets dir is recreated fresh, so a
+/// `--force` re-ingest doesn't accumulate stale images.
+fn localize_markdown_images(
+    orig_dir: &Path,
+    copied_md: &Path,
+    sources_dir: &Path,
+    alias: &str,
+) -> Result<usize> {
+    let text = std::fs::read_to_string(copied_md).map_err(|e| {
+        Error::Tool(format!(
+            "read {} for image localize: {e}",
+            copied_md.display()
+        ))
+    })?;
+
+    // Inline markdown images: `![alt](target)` / `![alt](target "title")`
+    // / `![alt](<target>)`. Capture the parens payload; parse the target
+    // out of it in the closure so titles and angle-bracket forms survive.
+    static IMG_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = IMG_RE.get_or_init(|| {
+        regex::Regex::new(r"(?P<pre>!\[[^\]]*\]\()(?P<inner>[^)]*)(?P<post>\))")
+            .expect("static image regex")
+    });
+
+    let assets_dir = sources_dir.join(format!("{alias}-assets"));
+    let _ = std::fs::remove_dir_all(&assets_dir);
+
+    let dir_rel = format!("{alias}-assets");
+    // Canonical source path → already-assigned local relative link, so a
+    // file referenced twice copies once and both links converge.
+    let mut copied: std::collections::HashMap<PathBuf, String> = std::collections::HashMap::new();
+    let mut count: usize = 0;
+
+    let rewritten = re.replace_all(&text, |caps: &regex::Captures| {
+        let pre = &caps["pre"];
+        let inner = &caps["inner"];
+        let post = &caps["post"];
+        let original = format!("{pre}{inner}{post}");
+
+        // Split the parens payload into the URL and an optional trailing
+        // title / whitespace we must preserve verbatim.
+        let (url_raw, suffix) = split_link_target(inner);
+        let url = url_raw.trim();
+        if url.is_empty() {
+            return original;
+        }
+
+        // Remote / non-file targets: leave untouched.
+        let lower = url.to_ascii_lowercase();
+        if lower.starts_with("http://")
+            || lower.starts_with("https://")
+            || lower.starts_with("//")
+            || lower.starts_with("data:")
+            || lower.starts_with("mailto:")
+            || url.contains("://")
+        {
+            return original;
+        }
+
+        // Strip a leading `./`; absolute paths are out of scope.
+        let rel = url.strip_prefix("./").unwrap_or(url);
+        let rel_path = Path::new(rel);
+        if rel_path.is_absolute() {
+            return original;
+        }
+
+        let src_path = orig_dir.join(rel_path);
+        let Ok(canon) = std::fs::canonicalize(&src_path) else {
+            return original;
+        };
+        if !canon.is_file() {
+            return original;
+        }
+        let ext_ok = canon
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| {
+                let e = e.to_ascii_lowercase();
+                INGEST_IMAGE_EXTENSIONS.iter().any(|x| *x == e)
+            })
+            .unwrap_or(false);
+        if !ext_ok {
+            return original;
+        }
+
+        // Reuse an earlier copy of the same file, else copy it now.
+        let new_rel = if let Some(existing) = copied.get(&canon) {
+            existing.clone()
+        } else {
+            let meta = match std::fs::metadata(&canon) {
+                Ok(m) => m,
+                Err(_) => return original,
+            };
+            if meta.len() > INGEST_IMAGE_MAX_BYTES {
+                return original;
+            }
+            let base = sanitize_asset_name(
+                canon
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("image"),
+            );
+            // Index-prefix guarantees uniqueness without collision logic.
+            let fname = format!("{:03}-{base}", count + 1);
+            if std::fs::create_dir_all(&assets_dir).is_err() {
+                return original;
+            }
+            if std::fs::copy(&canon, assets_dir.join(&fname)).is_err() {
+                return original;
+            }
+            let new_rel = format!("{dir_rel}/{fname}");
+            copied.insert(canon.clone(), new_rel.clone());
+            count += 1;
+            new_rel
+        };
+
+        format!("{pre}{new_rel}{suffix}{post}")
+    });
+
+    if count > 0 {
+        std::fs::write(copied_md, rewritten.as_bytes()).map_err(|e| {
+            Error::Tool(format!(
+                "rewrite image links in {}: {e}",
+                copied_md.display()
+            ))
+        })?;
+    }
+    Ok(count)
+}
+
+/// Split a markdown link's parens payload into `(target, trailing)`.
+/// `trailing` is the optional title + surrounding whitespace, preserved
+/// verbatim so only the URL slice is rewritten. The `<...>` angle-bracket
+/// target form isn't special-cased — such a target fails the file
+/// resolution below and is left untouched, which is the safe outcome.
+fn split_link_target(inner: &str) -> (String, String) {
+    let trimmed_start = inner.trim_start();
+    let lead_ws = &inner[..inner.len() - trimmed_start.len()];
+    match trimmed_start.find(char::is_whitespace) {
+        Some(idx) => (
+            trimmed_start[..idx].to_string(),
+            format!("{lead_ws}{}", &trimmed_start[idx..]),
+        ),
+        None => (trimmed_start.to_string(), lead_ws.to_string()),
+    }
+}
+
+/// Filesystem-safe basename for a copied asset — keep it recognisable but
+/// strip anything that could escape the assets dir or confuse tooling.
+fn sanitize_asset_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches('.').to_string();
+    if cleaned.is_empty() {
+        "image".to_string()
+    } else {
+        cleaned
+    }
 }
 
 /// M6.25 BUG #10: re-ingest cascade. Walk every page; if its
@@ -4698,6 +4910,67 @@ mod tests {
         assert!(
             log.contains("## [") && log.contains("] ingested | intro"),
             "log missing header-style entry, got:\n{log}"
+        );
+    }
+
+    #[test]
+    fn ingest_localizes_local_markdown_images() {
+        let _home = scoped_home();
+        let k = create("clips", KmsScope::Project).unwrap();
+        let src_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(src_dir.path().join("images")).unwrap();
+        // A real local image the markdown references (relative, twice).
+        std::fs::write(src_dir.path().join("images/pic.png"), b"\x89PNGfake").unwrap();
+
+        let src = src_dir.path().join("article.md");
+        std::fs::write(
+            &src,
+            "# Article\n\nLead line.\n\n\
+             ![local](images/pic.png)\n\
+             ![again](./images/pic.png)\n\
+             ![titled](images/pic.png \"cap\")\n\
+             ![remote](https://example.com/x.png)\n\
+             ![missing](images/nope.png)\n",
+        )
+        .unwrap();
+
+        let result = ingest(&k, &src, None, false).unwrap();
+        // One physical image, copied once even though referenced 3×.
+        assert_eq!(
+            result.images_copied, 1,
+            "the single local image should copy exactly once"
+        );
+
+        // Asset landed under sources/<alias>-assets/.
+        let asset = k.root.join("sources/article-assets/001-pic.png");
+        assert!(
+            asset.is_file(),
+            "copied asset missing at {}",
+            asset.display()
+        );
+
+        // Archived source: local links rewritten (title preserved),
+        // remote + missing links left exactly as they were.
+        let raw = std::fs::read_to_string(k.root.join("sources/article.md")).unwrap();
+        assert!(
+            raw.contains("![local](article-assets/001-pic.png)"),
+            "local link not rewritten, got:\n{raw}"
+        );
+        assert!(
+            raw.contains("![again](article-assets/001-pic.png)"),
+            "deduped link not rewritten, got:\n{raw}"
+        );
+        assert!(
+            raw.contains("![titled](article-assets/001-pic.png \"cap\")"),
+            "title must survive rewrite, got:\n{raw}"
+        );
+        assert!(
+            raw.contains("![remote](https://example.com/x.png)"),
+            "remote link must stay untouched, got:\n{raw}"
+        );
+        assert!(
+            raw.contains("![missing](images/nope.png)"),
+            "missing-file link must stay untouched, got:\n{raw}"
         );
     }
 

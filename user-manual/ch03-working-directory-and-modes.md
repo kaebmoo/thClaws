@@ -279,7 +279,7 @@ template file that lists every field at its default value. Open
 | `maxTokens` | number | `32000` | (max output tokens per turn) |
 | `maxIterations` | number | `50` | (per-turn tool-call loop cap) |
 | `thinkingBudget` | number | `10000` | [Chapter 6](ch06-providers-models-api-keys.md) (Anthropic extended-thinking) |
-| `searchEngine` | string | `"auto"` | (`auto` / `tavily` / `brave` / `duckduckgo`) |
+| `searchEngine` | string | `"auto"` | (`auto` / `tavily` / `brave` / `serpapi` / `duckduckgo`) |
 
 #### Permissions & tools
 

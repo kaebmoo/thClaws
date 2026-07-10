@@ -551,7 +551,14 @@ async fn get_lines(
 /// silently wipes the user's gateway routing (`gatewayProxy`) and cloud URL,
 /// which surfaces as a misleading "no API key found for provider 'anthropic'"
 /// on the next agent rebuild.
-const INSTALLER_OWNED_SETTINGS_KEYS: &[&str] = &["gatewayProxy", "gateway_use_for", "cloudUrl"];
+///
+/// `model` is here too: `/model` persists the user's pick to the project
+/// settings, and losing it on install meant the post-get `/reload` silently
+/// fell back to the global default. A bundle that explicitly ships `model`
+/// (a publisher pin) still wins — restore only fills keys the bundle left
+/// unset.
+const INSTALLER_OWNED_SETTINGS_KEYS: &[&str] =
+    &["gatewayProxy", "gateway_use_for", "cloudUrl", "model"];
 
 /// Restore installer-owned keys from `prior_raw` onto the freshly-extracted
 /// `.thclaws/settings.json`. Only fills keys the agent's bundle did NOT set,
@@ -777,9 +784,28 @@ mod tests {
         // Agent-owned keys survive untouched.
         assert_eq!(s["imageToolsEnabled"], serde_json::json!(true));
         assert_eq!(s["agent"]["id"], serde_json::json!("image-generator"));
-        // `model` is publisher-shippable, so it is NOT in the installer-owned
-        // set — the agent's omission stands rather than being force-restored.
-        assert!(s.get("model").is_none(), "model is not force-carried");
+        // The user's model pick survives the overwrite — pre-fix the
+        // post-get `/reload` reverted to the global default model.
+        assert_eq!(
+            s["model"],
+            serde_json::json!("claude-x"),
+            "user's model preserved"
+        );
+    }
+
+    #[test]
+    fn restore_keeps_a_publisher_pinned_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let prior = br#"{"model": "user-choice"}"#;
+        // Bundle explicitly pins a model → the pin wins over the prior.
+        write_settings(dir.path(), r#"{"model": "publisher-pin"}"#);
+
+        restore_installer_settings(dir.path(), prior).unwrap();
+
+        assert_eq!(
+            read_settings(dir.path())["model"],
+            serde_json::json!("publisher-pin")
+        );
     }
 
     #[test]

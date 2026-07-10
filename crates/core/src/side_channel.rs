@@ -177,11 +177,18 @@ pub async fn spawn_side_channel(
                         text: s,
                     });
                 }
-                Ok(AgentEvent::ToolCallStart { name, .. }) => {
+                Ok(AgentEvent::ToolCallStart { name, input, .. }) => {
+                    // Progress feedback: build a descriptive label from the
+                    // tool input (e.g. `WebFetch (https://…)`, `Write
+                    // (articles/…/article.md)`, `FetchImages (…/article.md)`)
+                    // instead of the bare tool name, so `/extract` and other
+                    // side-channel agents show WHAT each step is doing, not just
+                    // that a tool ran.
+                    let label = crate::tool_display::tool_label(&name, &input);
                     let _ = events_tx_for_task.send(ViewEvent::SideChannelToolCall {
                         id: id_for_task.clone(),
-                        tool_name: name.clone(),
-                        label: name,
+                        tool_name: name,
+                        label,
                     });
                 }
                 Ok(AgentEvent::Done { .. }) => break,

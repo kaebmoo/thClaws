@@ -36,6 +36,11 @@ type ChatMessage = {
   /// assistant text so the user can see the model is working without
   /// the reasoning blending into the final answer.
   thinking?: string;
+  /// Total accumulated thinking length. `thinking` above is capped at
+  /// MAX_THINKING_CHARS (tail kept) so an hours-long reasoning stream
+  /// can't grow the webview unbounded — this carries the real count
+  /// for the summary line.
+  thinkingChars?: number;
   toolName?: string;
   /// `tool` messages only — flips from false (running) to true (done)
   /// when the matching `chat_tool_result` arrives. Drives the leading
@@ -119,6 +124,15 @@ const MAX_UPLOAD_BYTES = 25 * 1024 * 1024; // 25 MB per uploaded file (--serve /
 // article / log / source file goes to a file so it doesn't bloat the prompt.
 const PASTE_TO_FILE_THRESHOLD = 2000;
 const MAX_UPLOAD_FILES = 5;
+
+/// Cap on the thinking text a bubble HOLDS (not what the model produced —
+/// the full stream persists in the session JSONL). Long agentic runs
+/// accumulate megabytes of reasoning; every delta re-rendered the whole
+/// open `<details>` block and the unbounded string eventually killed the
+/// webview's web-content process (GUI "crash" — the CLI, which just
+/// prints, was unaffected). Keep the tail: that's what the user watches
+/// live. 150k chars ≈ a few thousand lines, bounded relayout cost.
+const MAX_THINKING_CHARS = 150_000;
 
 const HAS_WRY_TRANSPORT =
   typeof window !== "undefined" && typeof window.ipc !== "undefined";
@@ -562,14 +576,26 @@ export function ChatView({ active, modalOpen }: Props) {
             const last = prev[prev.length - 1];
             const chunk = msg.text as string;
             if (last && last.role === "assistant") {
+              const total =
+                (last.thinkingChars ?? last.thinking?.length ?? 0) +
+                chunk.length;
+              let thinking = (last.thinking ?? "") + chunk;
+              if (thinking.length > MAX_THINKING_CHARS) {
+                thinking = thinking.slice(-MAX_THINKING_CHARS);
+              }
               return [
                 ...prev.slice(0, -1),
-                { ...last, thinking: (last.thinking ?? "") + chunk },
+                { ...last, thinking, thinkingChars: total },
               ];
             }
             return [
               ...prev,
-              { role: "assistant", content: "", thinking: chunk },
+              {
+                role: "assistant",
+                content: "",
+                thinking: chunk.slice(-MAX_THINKING_CHARS),
+                thinkingChars: chunk.length,
+              },
             ];
           });
           break;
@@ -1324,10 +1350,26 @@ export function ChatView({ active, modalOpen }: Props) {
                       className="cursor-pointer select-none text-xs"
                       style={{ fontStyle: "normal" }}
                     >
-                      ▾ Thinking ({msg.thinking.length} chars)
+                      ▾ Thinking (
+                      {(msg.thinkingChars ?? msg.thinking.length).toLocaleString()}{" "}
+                      chars
+                      {(msg.thinkingChars ?? 0) > msg.thinking.length
+                        ? `, showing last ${msg.thinking.length.toLocaleString()}`
+                        : ""}
+                      )
                     </summary>
                     <div className="mt-1 whitespace-pre-wrap">
-                      {msg.thinking}
+                      {
+                        // While the reasoning is still streaming (no
+                        // answer text yet → details forced open), render
+                        // only a tail ticker: relayouting the full block
+                        // on every delta is what froze the webview on
+                        // hours-long runs. The full (capped) text renders
+                        // once the answer starts and the block collapses.
+                        msg.content || msg.thinking.length <= 4000
+                          ? msg.thinking
+                          : `…${msg.thinking.slice(-4000)}`
+                      }
                     </div>
                   </details>
                 )}

@@ -61,6 +61,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   "openai-compat": "OpenAI-Compatible (custom endpoint)",
   tavily: "Tavily Search",
   "brave-search": "Brave Search",
+  serpapi: "SerpAPI (Google Search)",
   hal: "HAL Public API (YouTube transcript + Web scrape)",
 };
 

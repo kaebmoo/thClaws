@@ -45,7 +45,7 @@ Defaults:
 | Tool | Approval | Summary |
 |---|---|---|
 | `WebFetch` | prompt | HTTP GET (100 KB body cap, per section). When `HAL_API_KEY` is set, runs **both** a HAL headless-browser scrape **and** a plain HTTP GET in parallel and returns a single combined response with each section labelled (see below). |
-| `WebSearch` | prompt | Web search via Tavily / Brave / DuckDuckGo |
+| `WebSearch` | prompt | Web search via Tavily / Brave / SerpAPI (Google) / DuckDuckGo |
 | `WebScrape` | prompt | Direct HAL scrape with advanced parameters (`wait_for` CSS selector, `scroll_to_bottom`, `remove_selectors`, `output_format`) — appears only when `HAL_API_KEY` is set |
 | `YouTubeTranscript` | prompt | Fetch YouTube captions via HAL (multi-language fallback, optional timestamps) — appears only when `HAL_API_KEY` is set |
 

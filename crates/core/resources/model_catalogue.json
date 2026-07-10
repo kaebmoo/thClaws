@@ -1,7 +1,7 @@
 {
   "schema": 4,
   "source": "baseline 2026-06-10 — pricing synced from LiteLLM (github.com/BerriAI/litellm)",
-  "fetched_at": "2026-07-09T00:00:00Z",
+  "fetched_at": "2026-07-10T00:00:00Z",
   "providers": {
     "anthropic": {
       "list_url": "https://api.anthropic.com/v1/models",
@@ -3547,17 +3547,6 @@
           "output_per_mtok": 0.4,
           "cached_input_per_mtok": 0.01
         },
-        "google/gemini-2.5-flash-lite-preview-09-2025": {
-          "context": 1048576,
-          "max_output": 65535,
-          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-06-10",
-          "free": false,
-          "chat": true,
-          "input_per_mtok": 0.1,
-          "output_per_mtok": 0.4,
-          "cached_input_per_mtok": 0.01
-        },
         "google/gemini-2.5-pro": {
           "context": 1048576,
           "max_output": 65536,
@@ -3878,15 +3867,6 @@
           "chat": true,
           "input_per_mtok": 0.3,
           "output_per_mtok": 1.2
-        },
-        "liquid/lfm-2-24b-a2b": {
-          "context": 32768,
-          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-06-10",
-          "free": false,
-          "chat": true,
-          "input_per_mtok": 0.03,
-          "output_per_mtok": 0.12
         },
         "liquid/lfm-2.5-1.2b-instruct:free": {
           "context": 32768,
@@ -5295,16 +5275,6 @@
           "input_per_mtok": 0.0,
           "output_per_mtok": 0.0
         },
-        "poolside/laguna-xs.2:free": {
-          "context": 131072,
-          "max_output": 8192,
-          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-06-10",
-          "free": true,
-          "chat": true,
-          "input_per_mtok": 0.0,
-          "output_per_mtok": 0.0
-        },
         "qwen/qwen-2.5-72b-instruct": {
           "context": 32768,
           "max_output": 16384,
@@ -5883,15 +5853,6 @@
           "chat": true,
           "input_per_mtok": 0.2,
           "output_per_mtok": 1.15
-        },
-        "switchpoint/router": {
-          "context": 131072,
-          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-06-10",
-          "free": false,
-          "chat": true,
-          "input_per_mtok": 0.85,
-          "output_per_mtok": 3.4
         },
         "tencent/hunyuan-a13b-instruct": {
           "context": 131072,
@@ -7474,6 +7435,21 @@
           "source": "https://api.tokenrouter.com/v1/models",
           "verified_at": "2026-06-14"
         },
+        "tokenrouter/openai/gpt-5.6-luna": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-07-10"
+        },
+        "tokenrouter/openai/gpt-5.6-sol": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-07-10"
+        },
+        "tokenrouter/openai/gpt-5.6-terra": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-07-10"
+        },
         "tokenrouter/openai/gpt-oss-120b": {
           "context": 128000,
           "source": "https://api.tokenrouter.com/v1/models",
@@ -7593,6 +7569,11 @@
           "context": 128000,
           "source": "https://api.tokenrouter.com/v1/models",
           "verified_at": "2026-06-14"
+        },
+        "tokenrouter/x-ai/grok-4.5": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-07-10"
         },
         "tokenrouter/x-ai/grok-build-0.1": {
           "context": 128000,

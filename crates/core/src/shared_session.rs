@@ -877,6 +877,7 @@ impl WorkerState {
         }
         let prev_perm = self.agent.permission_mode;
         let prev_thinking = self.agent.thinking_budget;
+        let prev_ask_tools = self.agent.ask_tools.clone();
         let new_agent = Agent::new(
             provider,
             self.tool_registry.clone(),
@@ -893,6 +894,7 @@ impl WorkerState {
         self.agent = new_agent;
         self.agent.permission_mode = prev_perm;
         self.agent.thinking_budget = prev_thinking;
+        self.agent.ask_tools = prev_ask_tools;
         // Re-wire the externally-held injection queue (#106) so
         // anything queued during the rebuild doesn't get orphaned on
         // the old agent's Vec.
@@ -944,7 +946,7 @@ impl WorkerState {
     ///
     /// Cheap: ToolRegistry clone is just cloning a HashMap of Arc'd
     /// tools (refcount bumps, no tool work). The RwLock is held for
-    /// two field writes and nothing else.
+    /// a few field writes and nothing else.
     pub fn sync_factory_snapshot(&self) {
         // L2: recover from a poisoned lock rather than panicking.
         let mut snap = self
@@ -953,6 +955,13 @@ impl WorkerState {
             .unwrap_or_else(|e| e.into_inner());
         snap.system = self.system_prompt.clone();
         snap.tools = self.tool_registry.clone();
+        // Model + provider too: `rebuild_agent` runs on ReloadConfig
+        // (settings watcher / `/model`), so after a mid-session model
+        // switch unpinned subagents must inherit the NEW model. Pre-fix
+        // the factory kept the worker-init pair for the whole session —
+        // grok main agent kept spawning deepseek workers.
+        snap.model = self.config.model.clone();
+        snap.provider = self.agent.provider().clone();
     }
 }
 
@@ -1677,12 +1686,12 @@ async fn run_worker(
         Arc::new(std::sync::RwLock::new(crate::subagent::FactorySnapshot {
             system: system.clone(),
             tools: tools.clone(),
+            model: config.model.clone(),
+            provider: provider.clone(),
         }));
     let factory_state: Arc<dyn crate::subagent::AgentFactory> = {
         let factory = Arc::new(crate::subagent::ProductionAgentFactory {
-            provider: provider.clone(),
             snapshot: factory_snapshot_state.clone(),
-            model: config.model.clone(),
             max_iterations: config.max_iterations,
             max_depth: crate::subagent::DEFAULT_MAX_DEPTH,
             max_tokens: config.max_tokens,
@@ -1706,7 +1715,7 @@ async fn run_worker(
         // `thclaws.subagent(...)` calls dispatch correctly.
         tools.register(std::sync::Arc::new(
             crate::tools::WorkflowRunTool::new(
-                factory.provider.clone(),
+                provider.clone(),
                 config.model.clone(),
                 Some(subagent_arc),
             )
@@ -1750,6 +1759,11 @@ async fn run_worker(
     // GUI's Ask mode flag had no effect because the Agent was built
     // with the default Auto.
     agent.permission_mode = perm_mode;
+    // `askTools`: tools that always prompt even under Auto (interactive
+    // GUI worker has a real approver, so this bites here).
+    if let Some(ask) = &config.ask_tools {
+        agent.ask_tools = ask.clone();
+    }
     // Mirror the configured mode into the process-wide global so
     // `permissions::current_mode()` (read by the agent's tool-dispatch
     // gate, M2+) starts on the right value before any EnterPlanMode /
@@ -4069,6 +4083,73 @@ async fn handle_line(
             Some(state.session.id.clone()),
         )
         .await;
+        return;
+    }
+
+    // `/kms ingest <name> <file>` intercept — do the deterministic ingest
+    // (copy source, localize images, stub page), then fire an agent turn
+    // that upgrades the stub into a curated page (summary + takeaways +
+    // wikilinks) — the same auto-summary the Files-tab "Add to KMS" gets.
+    if let Some(crate::repl::SlashCommand::KmsIngest {
+        name,
+        file,
+        alias,
+        force,
+    }) = crate::repl::parse_slash(trimmed)
+    {
+        let Some(k) = crate::kms::resolve(&name) else {
+            let _ = events_tx.send(ViewEvent::SlashOutput(format!(
+                "no KMS named '{name}' (try /kms list or /kms new {name})"
+            )));
+            let _ = events_tx.send(ViewEvent::TurnDone);
+            return;
+        };
+        let source = {
+            let p = std::path::PathBuf::from(&file);
+            if p.is_absolute() {
+                p
+            } else {
+                state.cwd.join(&p)
+            }
+        };
+        match crate::kms::ingest(&k, &source, alias.as_deref(), force) {
+            Ok(r) => {
+                let images = if r.images_copied > 0 {
+                    format!(" (+{} local image(s))", r.images_copied)
+                } else {
+                    String::new()
+                };
+                let verb = if r.overwrote { "replaced" } else { "ingested" };
+                let _ = events_tx.send(ViewEvent::SlashOutput(format!(
+                    "{verb} → {} — {}{images} · summarizing…",
+                    r.target.display(),
+                    r.summary
+                )));
+                let src = k.root.join("sources").join(format!("{}.md", r.alias));
+                let rewritten = crate::repl::build_kms_summarize_prompt(
+                    &name,
+                    &r.alias,
+                    &src.to_string_lossy(),
+                );
+                let stream = Box::pin(state.agent.run_turn(rewritten));
+                let lead_mb = crate::team::Mailbox::new(crate::team::Mailbox::default_dir());
+                let _ = lead_mb.write_status("lead", "working", None);
+                drive_turn_stream(
+                    stream,
+                    state,
+                    events_tx,
+                    cancel,
+                    &lead_mb,
+                    input_tx,
+                    Some(state.session.id.clone()),
+                )
+                .await;
+            }
+            Err(e) => {
+                let _ = events_tx.send(ViewEvent::SlashOutput(format!("ingest failed: {e}")));
+                let _ = events_tx.send(ViewEvent::TurnDone);
+            }
+        }
         return;
     }
 

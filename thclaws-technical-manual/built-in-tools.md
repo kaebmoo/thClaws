@@ -259,7 +259,8 @@ Multi-backend web search with auto-detection. Backend priority:
 
 1. **Tavily** — `TAVILY_API_KEY`; clean JSON, includes a synthesized `answer` field
 2. **Brave Search** — `BRAVE_SEARCH_API_KEY`; clean JSON
-3. **DuckDuckGo HTML scrape** — no key required; fallback
+3. **SerpAPI** — `SERPAPI_API_KEY`; real Google results as JSON (key rides as the `api_key` query param; gateway route `/serpapi`)
+4. **DuckDuckGo HTML scrape** — no key required; fallback
 
 Constructed via `WebSearchTool::new("auto" | "tavily" | "brave" | "duckduckgo")`. With `"auto"` (default), tries each in priority order. Explicit engine name forces that backend; `"duckduckgo"` skips the keyed backends entirely.
 
@@ -665,7 +666,7 @@ crates/core/src/tools/
 │                                                          completion auto-restore (covered in
 │                                                          permissions.md §7-8)
 ├── read.rs (411 LOC)                                   ── Read (text + image multimodal)
-├── search.rs (238 LOC)                                 ── WebSearch (Tavily/Brave/DDG)
+├── search.rs (238 LOC)                                 ── WebSearch (Tavily/Brave/SerpAPI/DDG)
 ├── tasks.rs (299 LOC)                                  ── TaskCreate/Update/Get/List + SharedTaskStore
 ├── todo.rs (382 LOC)                                   ── TodoWrite (markdown checklist)
 ├── web.rs (91 LOC)                                     ── WebFetch

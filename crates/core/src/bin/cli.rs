@@ -3,7 +3,7 @@
 use clap::Parser;
 use thclaws_core::config::AppConfig;
 use thclaws_core::dotenv::load_dotenv;
-use thclaws_core::repl::{run_print_mode, run_repl};
+use thclaws_core::repl::run_repl;
 use thclaws_core::sandbox::Sandbox;
 use thclaws_core::{endpoints, secrets};
 

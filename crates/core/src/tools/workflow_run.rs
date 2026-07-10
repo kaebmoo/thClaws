@@ -71,6 +71,21 @@ fn normalize_args(v: Value) -> Value {
     v
 }
 
+/// Hint appended to a successful result when a PRE-AUTHORED script that
+/// references `args` was run with none. A model whose provider dropped the
+/// nested `args` param (grok-4.5) otherwise sees a clean success and has to
+/// guess why the output is empty/degenerate — this tells it what happened
+/// and which parameter shapes fix it. Authored-from-prompt runs are exempt
+/// (the author writes scripts around the absence of args).
+fn argless_hint(scripted: bool, has_args: bool, script: &str) -> Option<&'static str> {
+    (scripted && !has_args && script.contains("args")).then_some(
+        "\n[hint: workflow ran with NO args, but the script references `args` — if it \
+         expects input, re-invoke WorkflowRun with `args` (nested object) or, if your \
+         tool-calling drops nested objects, `args_json` (the same payload as one JSON \
+         string).]",
+    )
+}
+
 pub struct WorkflowRunTool {
     provider: Arc<dyn Provider>,
     model: String,
@@ -138,33 +153,42 @@ impl Tool for WorkflowRunTool {
          queries use the Subagent (`Task`) tool instead. To run a \
          PRE-AUTHORED workflow file shipped with an agent (e.g. \
          `.thclaws/state/workflows/draft-all-parallel.js`), pass `script_path` \
-         instead of `prompt` — the file executes verbatim, no authoring."
+         instead of `prompt` — the file executes verbatim, no authoring. \
+         Parameterize a pre-authored workflow via `args` (any JSON value, \
+         exposed to the script as the global `args` — no TASK.md side-channel \
+         needed: the script reads `args.query` directly)."
     }
 
+    // Property ORDER is load-bearing: grok-4.5's constrained tool-call
+    // decoding silently drops optional properties when the untyped `args`
+    // sorts FIRST in the schema (live-bisected 2026-07-09: identical
+    // schemas, authored order emitted args 5/5, alphabetized order 0/5 —
+    // even when the user message said "pass EXACTLY this input"). serde_json
+    // ships with `preserve_order` (Cargo.toml) so this map reaches the wire
+    // as written: primary params first, args/args_json after. Keep property
+    // descriptions to one line; long-form guidance lives in description().
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
                 "prompt": {
                     "type": "string",
-                    "description": "Natural-language goal for the workflow author. \
-                                    Examples: 'summarise each .rs file under src/ in one line', \
-                                    'run pytest, parse failures, and open issues for the new ones'. \
-                                    Ignored when script_path is given."
+                    "description": "Natural-language goal; the workflow author writes the \
+                                    JS. Ignored when script_path is given."
                 },
                 "script_path": {
                     "type": "string",
                     "description": "Workspace-relative path to a pre-authored workflow .js \
-                                    file to execute verbatim (skips the authoring step). \
-                                    Use for agent-shipped workflows, e.g. \
-                                    '.thclaws/state/workflows/draft-all-parallel.js'."
+                                    file to execute verbatim."
                 },
                 "args": {
                     "description": "Structured input exposed to the script as the global \
-                                    `args` (any JSON value — object/array/string/etc.). Use \
-                                    this to parameterize a pre-authored workflow instead of a \
-                                    TASK.md side-channel, e.g. {\"query\":\"…\",\"kms\":\"…\"}. \
-                                    The script reads it directly: `const q = args.query;`."
+                                    `args` (any JSON value), e.g. {\"query\":\"…\"}."
+                },
+                "args_json": {
+                    "type": "string",
+                    "description": "JSON-encoded alternative to `args` (one JSON string). \
+                                    Ignored when `args` is present."
                 }
             },
             "required": []
@@ -224,7 +248,27 @@ impl Tool for WorkflowRunTool {
         // object, which would reach the script as a string where `args.query`
         // is undefined. If args is a string that parses to a JSON object/array,
         // use the parsed value; a genuine plain-string arg is left untouched.
-        let args_for_thread = input.get("args").cloned().map(normalize_args);
+        //
+        // `args_json` is a flat-STRING escape hatch carrying the same payload,
+        // parsed here into args; `args` wins when both are present. Kept as
+        // belt-and-braces for providers that mangle nested object params —
+        // the original grok-4.5 22/22 args drop turned out to be schema
+        // property ORDER (see input_schema), not nested-object inability.
+        let args_for_thread = input
+            .get("args")
+            .cloned()
+            .or_else(|| {
+                input
+                    .get("args_json")
+                    .and_then(Value::as_str)
+                    .map(|s| Value::String(s.to_string()))
+            })
+            .map(normalize_args);
+        let hint = argless_hint(
+            script_path.is_some(),
+            args_for_thread.is_some(),
+            &script_for_thread,
+        );
         // Install the chat broadcast sender on the blocking worker so the
         // script's thclaws.log / thclaws.subagent progress streams to the
         // chat mid-run (mirrors shell_dispatch's `/workflow run` path).
@@ -299,7 +343,7 @@ impl Tool for WorkflowRunTool {
             total_in,
             total_out
         );
-        Ok(format!("{body}{summary}"))
+        Ok(format!("{body}{summary}{}", hint.unwrap_or_default()))
     }
 }
 
@@ -307,6 +351,52 @@ impl Tool for WorkflowRunTool {
 mod tests {
     use super::normalize_args;
     use serde_json::{json, Value};
+
+    /// grok-4.5 escape hatch: `args_json` (flat string param) must resolve
+    /// to the same value the nested `args` object would have produced, and
+    /// `args` must win when both are present.
+    #[test]
+    fn args_json_string_param_resolves_like_args() {
+        let resolve = |input: Value| -> Option<Value> {
+            input
+                .get("args")
+                .cloned()
+                .or_else(|| {
+                    input
+                        .get("args_json")
+                        .and_then(Value::as_str)
+                        .map(|s| Value::String(s.to_string()))
+                })
+                .map(normalize_args)
+        };
+        // args_json alone → parsed object.
+        assert_eq!(
+            resolve(json!({"args_json": r#"{"query":"OKF","min_iter":4}"#})),
+            Some(json!({"query": "OKF", "min_iter": 4}))
+        );
+        // args wins over args_json.
+        assert_eq!(
+            resolve(json!({"args": {"query":"A"}, "args_json": r#"{"query":"B"}"#})),
+            Some(json!({"query": "A"}))
+        );
+        // neither → None (workflow runs argless).
+        assert_eq!(resolve(json!({"script_path": "x.js"})), None);
+    }
+
+    /// The argless hint fires only for a pre-authored script that references
+    /// `args` and ran with none — authored-from-prompt runs and scripts that
+    /// take no input stay hint-free.
+    #[test]
+    fn argless_hint_only_for_scripted_args_reading_runs() {
+        let hint = super::argless_hint(true, false, "const q = args.query;");
+        assert!(hint.is_some_and(|h| h.contains("args_json")));
+        // args were passed → no hint.
+        assert!(super::argless_hint(true, true, "const q = args.query;").is_none());
+        // script never reads args → no hint.
+        assert!(super::argless_hint(true, false, "'hi'").is_none());
+        // authored from prompt (not script_path) → no hint.
+        assert!(super::argless_hint(false, false, "const q = args.query;").is_none());
+    }
 
     #[test]
     fn normalize_args_recovers_json_string_object() {

@@ -26,6 +26,30 @@ Sync surface (`/workspace/sync/*`, บทที่ 27) mirror *ทั้ง work
 ระหว่างนั้น Job Artifacts ปิดครบทั้งสามข้อ: Bearer auth, scope ต่อ job,
 และ manifest ที่ hash ถูก fix ตอนเก็บ
 
+## ทำไมไม่ใช้ A2A (หรือ ACP)?
+
+คำถามที่เจอบ่อย: มีโปรโตคอลกลางสำหรับ agent คุยกันอยู่แล้ว ทำไมต้อง
+มี endpoint เฉพาะของ thClaws?
+
+**A2A (Agent2Agent Protocol)** — โปรโตคอลเปิดจาก Google (ปัจจุบันอยู่
+ใต้ Linux Foundation) สำหรับให้ agent ต่างค่ายสั่งงานกันได้: ประกาศ
+ความสามารถผ่าน Agent Card, สั่งเป็น task ผ่าน JSON-RPC, stream
+ความคืบหน้าด้วย SSE ส่วน **ACP** มีสองตัวที่ชื่อชนกัน — *Agent
+Communication Protocol* (IBM/BeeAI) ซึ่งควบรวมเข้ากับ A2A ไปแล้ว
+และ *Agent Client Protocol* (Zed) ซึ่งเป็นโปรโตคอล editor ↔ coding
+agent สำหรับฝัง agent ในหน้าจอ editor — คนละเรื่องกับการส่งงานข้าม
+เครื่อง
+
+เหตุผลที่ Job Artifacts ยังต้องมี: **A2A เป็นชั้นสนทนา ส่วน artifacts
+เป็นชั้น storage** — artifact ของ A2A คือ message parts ที่ไหลกลับมา
+กับ task ระหว่างคุย ไม่ได้ให้สัญญาเรื่องความคงทน แต่ artifact ของ
+thClaws คือไฟล์จริงใน workspace ที่ถูก freeze เป็น snapshot + sha256
+ตอน run จบ แล้ว**ดึงซ้ำได้ทีหลังด้วย id** ต่อให้ไฟล์ต้นทางถูกแก้ไปแล้ว
+(semantics แบบ CI artifacts ตามที่เทียบไว้ข้างบน) และในทางปฏิบัติ
+orchestrator ที่ถือแค่ API token ใช้ curl สามคำสั่งก็ครบ ไม่ต้องมี
+A2A client ถ้าวันหน้า thClaws มี A2A facade มันก็จะเสิร์ฟผลลัพธ์จาก
+artifact store ตัวนี้อยู่ดี — สองอย่างนี้ไม่ได้แทนกัน
+
 ## เริ่มใช้งาน
 
 เปิด worker:

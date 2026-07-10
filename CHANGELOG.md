@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.89.0] — 2026-07-10
+
+Tutorial Studio gets a NOTE-first /outline skill and deterministic slide rendering, the Business Agent ships as a new first-party offering, KMS ingest grows quality-of-life improvements, and search gains a real Google backend via SerpAPI alongside fine-grained tool-approval controls and a tool-loop breaker.
+
+### Added
+- **Tutorial Studio: /outline skill, structured outline import, and deterministic slide rendering.** A new `/outline` skill supports NOTE-first authoring directly in the workspace, `outline-import` ingests structured outline markdown files incrementally by slide ID, and the slide-layout renderer is now deterministic with consistent spacing in video builds.
+- **Business Agent — a new first-party agent with per-task GUI.** Ships vendored Anthropic knowledge-work packs alongside a GUI shell that exposes a dedicated interface per task type.
+- **Force-approval on specific tools under `permissions:auto`.** The `askTools` setting lets you mark individual tools as always-require-approval even when the session-wide policy is auto-approve, so dangerous tools stay gated without switching the whole session to manual.
+- **KMS ingest now auto-authors a curated page, copies local images, and handles alias collisions.** Ingesting a source auto-generates a curated landing page (replacing the stub), copies local images referenced in markdown, and offers a Replace action when an alias collides. An "Add to KMS" context action on `.md` files in the file tree lets you ingest without leaving the workspace.
+- **Degenerate-tool-loop breaker.** After three consecutive rounds where every tool call fails, the engine now breaks the loop instead of burning tokens indefinitely.
+- **Descriptive tool-call progress in the side channel.** Slash commands like `/extract` now stream human-readable tool-call labels instead of raw function names.
+- **SerpAPI search backend with Settings key entry.** Enter a SerpAPI key in the Settings modal to get real Google search results through the search tool — full engine, gateway, and docs integration.
+
+### Fixed
+- **Tutorial Studio: Thai text shaping.** Slide rendering now uses HarfBuzz (libraqm) for correct Thai glyph placement when available.
+- **Unpinned subagent workers now track mid-session model switches.** Subagents launched without a pinned model follow your active model selection when you switch models mid-session instead of sticking with the original.
+- **Agent publishing: dry-run lies, republish pair loss, and missing settings.json files.** `publish --dry-run` no longer claims a private agent doesn't exist when it does, republishing a private agent restores the public/private pair correctly, and settings.json files for training-video-generator, webapp-coder-workflow, and tutorial-studio that were silently dropped from the catalog are restored and tracked.
+- **Research agent: deterministic source links and args resilience.** `../sources/` links are now derived deterministically from the URL slug instead of varying across runs, and a missing `args.query` throws a real error (instead of silently passing `undefined`) with an `args_json` hint for models that stringify args.
+- **Thinking bubble no longer crashes the webview.** Unbounded reasoning streams are capped so the GUI doesn't crash on extremely long thinking blocks.
+- **Grok-4.5 WorkflowRun args preserved.** Schema property ordering is now preserved so Grok-4.5, which drops unordered args, correctly passes structured input to WorkflowRun.
+- **KMS viewer renders source images.** Source images embedded in KMS pages were 404 in the viewer — they now resolve and display correctly.
+- **Content Extractor prefers WebFetch and stops saving placeholder sources.** The extractor now uses WebFetch (with HAL) as its primary fetch path and no longer writes a placeholder source file before extraction completes.
+- **Gateway-active workspaces force `halEnabled` on.** HAL-dependent features like browser-rendered WebFetch no longer silently break in gateway-provisioned workspaces.
+
 ## [0.88.0] — 2026-07-09
 
 Tutorial Studio ships as a first-party agent for building AI-native courses end-to-end, the engine gets a working hooks system alongside job artifacts and a full headless surface, and the research / book-author agents level up with cross-linked KMS pages, source caching, and optional chapter targets.

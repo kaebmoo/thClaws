@@ -2178,9 +2178,18 @@ pub async fn dispatch(
                     } else {
                         String::new()
                     };
+                    let images = if r.images_copied > 0 {
+                        format!(" (+{} local image(s))", r.images_copied)
+                    } else {
+                        String::new()
+                    };
                     emit(
                         events_tx,
-                        format!("{verb} → {} — {}{cascade}", r.target.display(), r.summary),
+                        format!(
+                            "{verb} → {} — {}{images}{cascade}",
+                            r.target.display(),
+                            r.summary
+                        ),
                     );
                 }
                 Err(e) => emit(events_tx, format!("ingest failed: {e}")),

@@ -198,6 +198,7 @@ fn preview(s: &str, cap: usize) -> String {
 /// - `Read (crates/core/src/repl.rs)`
 /// - `Grep (ToolCallStart)`
 /// - `WebFetch (https://example.com/…)`
+/// - `FetchImages (articles/…/article.md)`
 /// - `Task (agent=dev-glm)`
 /// - fallback: `ToolName`
 pub(crate) fn tool_label(name: &str, input: &serde_json::Value) -> String {
@@ -219,10 +220,14 @@ pub(crate) fn tool_label(name: &str, input: &serde_json::Value) -> String {
             .get("pattern")
             .and_then(|v| v.as_str())
             .map(|p| preview(p, PREVIEW_CAP)),
-        "WebFetch" => input
+        "WebFetch" | "WebScrape" | "YouTubeTranscript" => input
             .get("url")
             .and_then(|v| v.as_str())
             .map(|u| preview(u, 60)),
+        "FetchImages" => input
+            .get("markdown_path")
+            .and_then(|v| v.as_str())
+            .map(|p| preview(p, PREVIEW_CAP)),
         "WebSearch" => input
             .get("query")
             .and_then(|v| v.as_str())
@@ -725,5 +730,21 @@ mod tests {
     fn label_websearch_query() {
         let label = tool_label("WebSearch", &json!({"query": "rust tokio select"}));
         assert_eq!(label, "WebSearch (rust tokio select)");
+    }
+
+    #[test]
+    fn label_extract_flow_tools() {
+        // The /extract side-channel steps must read as progress, not bare
+        // tool names. WebScrape/YouTubeTranscript share WebFetch's url arm;
+        // FetchImages surfaces the markdown path it's downloading images for.
+        let scrape = tool_label("WebScrape", &json!({"url": "https://claude.com/blog/x"}));
+        assert_eq!(scrape, "WebScrape (https://claude.com/blog/x)");
+        let yt = tool_label("YouTubeTranscript", &json!({"url": "https://youtu.be/abc"}));
+        assert_eq!(yt, "YouTubeTranscript (https://youtu.be/abc)");
+        let fetch = tool_label(
+            "FetchImages",
+            &json!({"markdown_path": "articles/loops/article.md"}),
+        );
+        assert_eq!(fetch, "FetchImages (articles/loops/article.md)");
     }
 }

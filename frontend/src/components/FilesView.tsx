@@ -12,8 +12,10 @@ import {
   FolderPlus,
   Download,
   Trash2,
+  Library,
 } from "lucide-react";
 import { send, subscribe } from "../hooks/useIPC";
+import { assetUrl, workspacePrefix } from "../lib/assetUrl";
 import { useTheme } from "../hooks/useTheme";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { CodeEditor } from "./CodeEditor";
@@ -196,36 +198,6 @@ function isMarkdownPath(path: string): boolean {
 // strip-prefix middleware peels that off before forwarding to the
 // runner pod. The pod's --serve also registers the file-asset route
 // PREFIXED with the same path so the Host()+PathPrefix() rule
-// matches. `window.location.origin` is just scheme+host — no path —
-// so `${origin}/file-asset/...` would skip the prefix entirely and
-// 404 at Traefik. Walk the prefix out of `location.pathname` instead.
-// Desktop / single-tenant `--serve` have no prefix; match returns "".
-function workspacePrefix(): string {
-  // Path scheme — thclaws.cloud/u/<handle>/<slug>/… → the 3-segment prefix.
-  const u = location.pathname.match(/^(\/u\/[^/]+\/[^/]+)/);
-  if (u) return u[1];
-  // Subdomain scheme — <handle>.thclaws.cloud/<slug>/… → the slug is the
-  // first path segment (handle is in the hostname). The engine still
-  // serves at root behind Traefik's strip-prefix, so the file-asset URL
-  // just needs this one-segment prefix to route back through Traefik.
-  if (/\.thclaws\.cloud$/i.test(location.hostname)) {
-    const s = location.pathname.match(/^(\/[^/]+)/);
-    if (s) return s[1];
-  }
-  return "";
-}
-
-// Build a same-origin URL for the custom protocol's file-asset handler.
-// Keeping path separators unencoded lets the browser treat the URL as
-// a directory structure, so relative references inside the HTML (e.g.
-// `<link href="style.css">`) resolve to sibling files on disk.
-function assetUrl(absPath: string): string {
-  const normalized = absPath.replace(/\\/g, "/");
-  const segments = normalized.split("/").map(encodeURIComponent).join("/");
-  const leadingSlash = segments.startsWith("/") ? "" : "/";
-  return `${window.location.origin}${workspacePrefix()}/file-asset${leadingSlash}${segments}`;
-}
-
 // Inject a <base href> pointing at the markdown file's parent directory
 // via the file-asset handler so relative refs in srcDoc'd HTML (e.g.
 // `<img src="img/foo.png">` from `![alt](img/foo.png)`) resolve to the
@@ -261,6 +233,13 @@ export function FilesView({ active }: Props) {
   const [entryMenu, setEntryMenu] = useState<
     { x: number; y: number; path: string; name: string; isDir: boolean } | null
   >(null);
+  // KMS list (name/scope) for the entry menu's "Add to KMS" submenu.
+  // Kept in sync via `kms_update` broadcasts; requested once on mount.
+  const [kmsList, setKmsList] = useState<{ name: string; scope: string }[]>([]);
+  // Whether the entry menu's "Add to KMS" row is expanded into its KMS
+  // picker (only used when more than one KMS exists). Reset when the menu
+  // opens/closes so it never leaks between right-clicks.
+  const [kmsPick, setKmsPick] = useState(false);
   // New file / folder name modal. null = closed; otherwise which kind.
   const [createKind, setCreateKind] = useState<"file" | "folder" | null>(null);
   const [createName, setCreateName] = useState("");
@@ -455,6 +434,81 @@ export function FilesView({ active }: Props) {
     setDragActive(false);
     uploadDroppedFiles(files);
   };
+
+  // Keep the KMS list fresh for the entry menu's "Add to KMS" action.
+  // The backend broadcasts `kms_update` on any KMS change; request it once
+  // on mount so the picker is populated before the first right-click.
+  useEffect(() => {
+    const unsub = subscribe((msg) => {
+      if (msg.type !== "kms_update") return;
+      const list = Array.isArray(msg.kmss) ? msg.kmss : [];
+      setKmsList(
+        list
+          .map((k: { name?: unknown; scope?: unknown }) => ({
+            name: String(k.name ?? ""),
+            scope: String(k.scope ?? ""),
+          }))
+          .filter((k: { name: string }) => k.name),
+      );
+    });
+    send({ type: "kms_list" });
+    return unsub;
+  }, []);
+
+  // Collapse the "Add to KMS" picker whenever the entry menu opens or
+  // closes, so a stale expansion never carries into the next right-click.
+  useEffect(() => {
+    setKmsPick(false);
+  }, [entryMenu]);
+
+  // Ingest a .md file into the named KMS (Files-tab "Add to KMS"). Mirrors
+  // the delete/rename request-id + one-shot subscription pattern. On an
+  // alias collision (`force` false) the backend flags `collision`; we then
+  // confirm and re-ingest with `force: true` to replace the existing entry.
+  const addToKms = useCallback(
+    (path: string, name: string, kmsName: string, force = false) => {
+      const reqId = Date.now() + Math.floor(Math.random() * 100000);
+      const unsub = subscribe((msg) => {
+        if (msg.type !== "kms_ingest_result" || msg.id !== reqId) return;
+        unsub();
+        if (msg.ok) {
+          const imgs = Number(msg.images_copied ?? 0);
+          const verb = msg.overwrote ? "updated in" : "added to";
+          setSaveToast(
+            `${verb} ${kmsName}: ${String(msg.alias ?? name)}${
+              imgs > 0 ? ` (+${imgs} image${imgs === 1 ? "" : "s"})` : ""
+            } — summarizing…`,
+          );
+          setTimeout(() => setSaveToast(null), 3500);
+          // Auto-summary: hand the backend-composed prompt to the main
+          // agent as a normal chat turn so it upgrades the stub page into
+          // a curated summary (KmsRead/KmsSearch/KmsWrite). Visible in chat.
+          const prompt = String(msg.summarize_prompt ?? "");
+          if (prompt) send({ type: "shell_input", text: prompt });
+          return;
+        }
+        if (msg.collision) {
+          // Recoverable: an entry with this alias already exists. Ask
+          // before overwriting it (and its images), then force-ingest.
+          void platformConfirm({
+            title: "Replace in KMS?",
+            message: `"${name}" already exists in ${kmsName}. Replace the existing entry?`,
+            yesLabel: "Replace",
+            noLabel: "Cancel",
+          }).then((confirmed) => {
+            if (confirmed) addToKms(path, name, kmsName, true);
+          });
+          return;
+        }
+        setSaveToast(
+          `add to KMS failed: ${name}${msg.error ? ` — ${msg.error}` : ""}`,
+        );
+        setTimeout(() => setSaveToast(null), 3500);
+      });
+      send({ type: "kms_ingest", id: reqId, path, kms: kmsName, force });
+    },
+    [],
+  );
 
   // Delete a file or folder from the tree context menu. Confirms first
   // with the native dialog, then `file_delete` (sandbox-checked; recursive
@@ -1291,6 +1345,48 @@ export function FilesView({ active }: Props) {
                   setEntryMenu(null);
                 }}
               />
+            )}
+            {/* Markdown-only: ingest into a KMS. One KMS → ingest
+                straight away; several → expand an inline picker; none →
+                a hint toast. */}
+            {!entryMenu.isDir && /\.(md|markdown)$/i.test(entryMenu.name) && (
+              <>
+                <MenuItem
+                  icon={<Library size={13} />}
+                  label={
+                    kmsList.length > 1
+                      ? `Add to KMS${kmsPick ? " ▾" : " ▸"}`
+                      : "Add to KMS"
+                  }
+                  onClick={() => {
+                    const m = entryMenu;
+                    if (kmsList.length === 0) {
+                      setEntryMenu(null);
+                      setSaveToast("no KMS yet — create one first");
+                      setTimeout(() => setSaveToast(null), 3000);
+                    } else if (kmsList.length === 1) {
+                      setEntryMenu(null);
+                      addToKms(m.path, m.name, kmsList[0].name);
+                    } else {
+                      setKmsPick((v) => !v);
+                    }
+                  }}
+                />
+                {kmsPick &&
+                  kmsList.length > 1 &&
+                  kmsList.map((k) => (
+                    <MenuItem
+                      key={`${k.scope}:${k.name}`}
+                      icon={<Library size={12} />}
+                      label={`↳ ${k.name}`}
+                      onClick={() => {
+                        const m = entryMenu;
+                        setEntryMenu(null);
+                        addToKms(m.path, m.name, k.name);
+                      }}
+                    />
+                  ))}
+              </>
             )}
             <MenuItem
               icon={<Pencil size={13} />}

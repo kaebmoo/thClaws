@@ -89,6 +89,15 @@ pub struct AppConfig {
     #[serde(skip)]
     pub disallowed_tools: Option<Vec<String>>,
 
+    /// Tool names that ALWAYS prompt for approval, even under
+    /// `permissions: "auto"` (None = none). Interactive-only: it forces
+    /// the approval gate on for these tools regardless of the mode, so it
+    /// only has an effect where a human approver is wired (desktop GUI /
+    /// CLI). Under an auto-approving sink (`-p`, team agents, multiuser
+    /// pods) there's no one to prompt, so it's a silent no-op there.
+    #[serde(skip)]
+    pub ask_tools: Option<Vec<String>>,
+
     /// Resume session ID (None = new session). CLI: --resume
     #[serde(skip)]
     pub resume_session: Option<String>,
@@ -533,6 +542,7 @@ impl Default for AppConfig {
             search_engine: "auto".to_string(),
             allowed_tools: None,
             disallowed_tools: None,
+            ask_tools: None,
             resume_session: None,
             hooks: crate::hooks::HooksConfig::default(),
             bash_sandbox: "workspace".to_string(),
@@ -701,6 +711,11 @@ pub struct ProjectConfig {
     /// Tool names disallowed (flat list, thClaws native format).
     #[serde(rename = "disallowedTools")]
     pub disallowed_tools: Option<Vec<String>>,
+    /// Tool names that always prompt for approval even under
+    /// `permissions: "auto"` (interactive surfaces only — see the
+    /// `AppConfig::ask_tools` docs).
+    #[serde(rename = "askTools")]
+    pub ask_tools: Option<Vec<String>>,
     /// GUI window width (logical pixels). When `None`, the GUI picks
     /// a size at startup based on the primary monitor's logical
     /// resolution: 1760×962 on workstation-class displays
@@ -905,6 +920,7 @@ impl Default for ProjectConfig {
             search_engine: None,
             allowed_tools: None,
             disallowed_tools: None,
+            ask_tools: None,
             window_width: None,
             window_height: None,
             gui_scale: None,
@@ -1109,9 +1125,11 @@ impl ProjectConfig {
         let template = r#"{
   "_doc": "thClaws project settings. Every available field is listed below at its default value — change a value to override, or delete a field (or set it to null on Option fields) to inherit the global default. windowWidth/windowHeight default to a monitor-resolution-aware size picked at GUI startup (1760x962 on >=1920x1080 displays, 1200x800 otherwise) when left null. See user-manual ch10 for the field reference.",
   "_doc_model": "null = pick automatically from the first provider you have credentials for (DeepSeek → DashScope → OpenAI → Anthropic). Set an explicit id (e.g. \"claude-sonnet-4-6\") to pin one.",
+  "_doc_askTools": "Tool names that ALWAYS prompt for approval even under permissions:auto (e.g. [\"Bash\",\"Write\"]). Interactive only — desktop GUI / CLI where a human can answer; ignored under -p, team agents, and multiuser pods (auto-approved, no one to ask).",
   "workspaceVersion": 2,
   "model": null,
   "permissions": "auto",
+  "askTools": [],
   "maxTokens": 32000,
   "maxIterations": 50,
   "thinkingBudget": 10000,
@@ -1452,6 +1470,9 @@ impl ProjectConfig {
         }
         if let Some(ref tools) = self.disallowed_tools {
             config.disallowed_tools = Some(tools.clone());
+        }
+        if let Some(ref tools) = self.ask_tools {
+            config.ask_tools = Some(tools.clone());
         }
         if let Some(ref kms) = self.kms {
             config.kms_active = kms.active.clone();
@@ -1983,7 +2004,8 @@ impl AppConfig {
         // newly-shipped routable providers are covered automatically. Per-model
         // eligibility (Featured + priced) is enforced at routing time, so a
         // non-featured model still falls back to BYOK even when the proxy is on.
-        config.gateway_use_for = if in_gateway_pod || config.gateway_proxy {
+        let gateway_on = in_gateway_pod || config.gateway_proxy;
+        config.gateway_use_for = if gateway_on {
             crate::shared::GATEWAY_ALL_PROVIDERS
                 .iter()
                 .map(|s| s.to_string())
@@ -1991,6 +2013,18 @@ impl AppConfig {
         } else {
             Vec::new()
         };
+
+        // HAL is free and reachable through the gateway, and `WebFetch`
+        // already keys its HAL path off `hal_available()` (true whenever the
+        // gateway is active). Force the HAL *tools* on to match, so
+        // `WebScrape` / `YouTubeTranscript` get registered — otherwise a skill
+        // that names `WebScrape` (e.g. content-extractor's `/extract`) finds no
+        // such tool and silently falls back to the browser, never touching HAL.
+        // Direct BYOK mode still respects the explicit `halEnabled` toggle since
+        // HAL calls cost money there.
+        if gateway_on {
+            config.hal_enabled = true;
+        }
 
         if config.model != Self::default().model {
             model_explicit = true;
@@ -2445,6 +2479,24 @@ mod tests {
             plain.gateway_use_for.len() < multi.gateway_use_for.len()
                 || plain.gateway_use_for.is_empty(),
             "single-tenant must not blanket-force the gateway"
+        );
+    }
+
+    #[test]
+    fn gateway_active_forces_hal_tools_on() {
+        let _guard = crate::kms::test_env_lock();
+        // HAL is free + reachable through the gateway, so the HAL tools
+        // (`WebScrape` / `YouTubeTranscript`) must auto-register even when
+        // `halEnabled` was never set. Regression: content-extractor's `/extract`
+        // named `WebScrape`, but its workspace had halEnabled:false alongside
+        // gatewayProxy:true, so the tool wasn't registered and the subagent
+        // silently fell back to the browser — never touching HAL.
+        std::env::set_var("THCLAWS_USES_GATEWAY", "1");
+        let cfg = AppConfig::load();
+        std::env::remove_var("THCLAWS_USES_GATEWAY");
+        assert!(
+            cfg.unwrap().hal_enabled,
+            "gateway-active config must force HAL tools on"
         );
     }
 
