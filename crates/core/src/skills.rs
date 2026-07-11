@@ -174,6 +174,16 @@ pub struct SkillDef {
     /// prompt. See `dev-plan/43`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_gate: Option<String>,
+    /// A "job skill" declares `isolated: true` in its frontmatter. When
+    /// set, `SkillTool::call` runs the skill in a fresh sub-agent context
+    /// (SKILL.md becomes the sub-agent's instructions, the caller's `task`
+    /// arg its first message) and returns only the sub-agent's final
+    /// result to the main conversation — instead of pasting the body +
+    /// every intermediate tool step inline, which a long multi-run session
+    /// re-sends on every model call. Guidance/interactive skills omit it
+    /// and run inline as before. See dev-plan (isolated-skills).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub isolated: bool,
     pub dir: PathBuf,
     /// Body access goes through [`Self::content`]. Serialization
     /// always materializes to a string so cached SkillDef snapshots
@@ -238,6 +248,7 @@ impl SkillDef {
             when_to_use,
             model: None,
             tool_gate: None,
+            isolated: false,
             dir,
             content: SkillContent::Eager(content),
         }
@@ -550,6 +561,10 @@ impl SkillStore {
             .or_else(|| frontmatter.get("tool_gate"))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+        let isolated = frontmatter
+            .get("isolated")
+            .map(|s| matches!(s.trim().to_ascii_lowercase().as_str(), "true" | "yes" | "1"))
+            .unwrap_or(false);
 
         // Canonicalize once at index time so the `{skill_dir}`
         // substitution inside the lazy body load doesn't have to —
@@ -569,6 +584,7 @@ impl SkillStore {
             when_to_use,
             model,
             tool_gate,
+            isolated,
             dir: abs_dir.clone(),
             // Body is read on demand by `SkillDef::content()`. Only
             // the path + abs_dir are captured at boot.
@@ -613,6 +629,10 @@ fn parse_builtin_skill(fallback_name: &str, raw: &str) -> Option<SkillDef> {
         .or_else(|| frontmatter.get("tool_gate"))
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    let isolated = frontmatter
+        .get("isolated")
+        .map(|s| matches!(s.trim().to_ascii_lowercase().as_str(), "true" | "yes" | "1"))
+        .unwrap_or(false);
 
     let synthetic_dir = PathBuf::from(format!("<builtin>/{name}"));
     let body_with_subst = body.replace("{skill_dir}", &synthetic_dir.to_string_lossy());
@@ -623,6 +643,7 @@ fn parse_builtin_skill(fallback_name: &str, raw: &str) -> Option<SkillDef> {
         when_to_use,
         model,
         tool_gate,
+        isolated,
         dir: synthetic_dir,
         content: SkillContent::Eager(body_with_subst),
     })
@@ -1328,13 +1349,47 @@ pub struct SkillTool {
     /// subagent scoped via `AgentDef::skills` — loading any name outside
     /// the set is refused.
     allowed: Option<std::sync::Arc<std::collections::HashSet<String>>>,
+    /// Isolated job-skill execution slot. A `Weak` to break the
+    /// factory → snapshot → tool registry → SkillTool → factory Arc
+    /// cycle; the surface that owns the `AgentFactory` populates it via
+    /// [`Self::factory_slot`] after the factory is built. Empty or
+    /// not-upgradable ⇒ the skill runs inline (tests, the HTTP surface
+    /// that registers no subagent tool, etc.).
+    factory:
+        std::sync::Arc<std::sync::OnceLock<std::sync::Weak<dyn crate::subagent::AgentFactory>>>,
+    /// Cancel token propagated into an isolated skill's sub-agent turn.
+    cancel: Option<crate::cancel::CancelToken>,
+    /// This tool's agent depth. An isolated skill spawns at `depth + 1`
+    /// and falls back to inline past a small cap so a skill that (however
+    /// indirectly) invokes itself can't recurse without bound.
+    depth: usize,
 }
+
+/// Appended to an isolated job-skill's sub-agent instructions so its
+/// return payload stays small in the caller's context — the whole point
+/// of running isolated is that the main conversation gets the result,
+/// not every intermediate step.
+const ISOLATED_SKILL_RETURN_CONTRACT: &str = "\n\n---\n\
+# Isolated run — return contract\n\
+You are running this skill as an isolated job in your own context. The \
+caller (the main conversation) will see ONLY your final message, not your \
+intermediate steps. When the job is done, reply with a COMPACT result: the \
+path(s) of any files you produced, a one-line status, and any warnings or \
+fields you could not fill. Do NOT echo file contents or paste large outputs \
+back — keep the result small.";
+
+/// Depth past which an isolated skill degrades to inline execution, to
+/// stop a skill that transitively re-invokes itself from recursing.
+const MAX_ISOLATED_SKILL_DEPTH: usize = 4;
 
 impl SkillTool {
     pub fn new(store: SkillStore) -> Self {
         Self {
             store: std::sync::Arc::new(std::sync::Mutex::new(store)),
             allowed: None,
+            factory: std::sync::Arc::new(std::sync::OnceLock::new()),
+            cancel: None,
+            depth: 0,
         }
     }
 
@@ -1347,7 +1402,93 @@ impl SkillTool {
         Self {
             store,
             allowed: None,
+            factory: std::sync::Arc::new(std::sync::OnceLock::new()),
+            cancel: None,
+            depth: 0,
         }
+    }
+
+    /// Shared handle to this tool's isolated-execution factory slot. The
+    /// surface that builds the `AgentFactory` calls
+    /// `slot.set(Arc::downgrade(&factory))` once the factory exists, so
+    /// isolated job-skills can spawn a sub-agent. Clone the `Arc` before
+    /// the tool is moved into the registry, then set it afterwards.
+    /// Idempotent (`OnceLock::set` ignores a second set).
+    pub fn factory_slot(
+        &self,
+    ) -> std::sync::Arc<std::sync::OnceLock<std::sync::Weak<dyn crate::subagent::AgentFactory>>>
+    {
+        self.factory.clone()
+    }
+
+    /// Propagate the worker's cancel token so an isolated skill's
+    /// sub-agent turn aborts on stop/ctrl-C like a `Task` spawn.
+    pub fn with_cancel(mut self, token: crate::cancel::CancelToken) -> Self {
+        self.cancel = Some(token);
+        self
+    }
+
+    /// Set the agent depth this tool runs at (isolated skills spawn at
+    /// `depth + 1`). Defaults to 0 (top-level agent).
+    pub fn with_depth(mut self, depth: usize) -> Self {
+        self.depth = depth;
+        self
+    }
+
+    /// Run an isolated ("job") skill in a fresh sub-agent: the SKILL.md
+    /// body becomes the sub-agent's instructions, `task` its first
+    /// message, and only the sub-agent's final text returns to the
+    /// caller. Returns `None` when isolation isn't available (no `task`
+    /// arg, no factory wired on this surface, or past the recursion cap),
+    /// so `call` runs the skill inline instead.
+    async fn try_run_isolated(
+        &self,
+        name: &str,
+        description: &str,
+        model_spec: Option<&SkillModelSpec>,
+        body: &str,
+        input: &Value,
+    ) -> Option<Result<String>> {
+        let task = input.get("task").and_then(Value::as_str)?;
+        if task.trim().is_empty() || self.depth >= MAX_ISOLATED_SKILL_DEPTH {
+            return None;
+        }
+        // Upgrade the Weak factory; absent (tests, HTTP surface) ⇒ inline.
+        let factory = self.factory.get()?.upgrade()?;
+
+        // Pin the skill's recommended model only if the frontmatter names
+        // one — the factory's `subagent_model` further guards against a
+        // cross-provider pin misrouting.
+        let model = model_spec.and_then(|m| m.candidates().first().cloned());
+        let agent_def = crate::agent_defs::AgentDef {
+            name: format!("skill:{name}"),
+            description: description.to_string(),
+            instructions: format!("{body}{ISOLATED_SKILL_RETURN_CONTRACT}"),
+            model,
+            ..Default::default()
+        };
+
+        let task = task.to_string();
+        let agent = match factory.build(&task, Some(&agent_def), self.depth + 1).await {
+            Ok(a) => a,
+            Err(e) => return Some(Err(e)),
+        };
+        let stream = agent.run_turn(task);
+        let outcome =
+            crate::agent::collect_agent_turn_with_cancel(stream, self.cancel.clone()).await;
+        // Audit: persist the isolated run's full transcript to its own
+        // child session — the tool loop it kept out of the parent context
+        // stays recorded on disk.
+        crate::subagent::persist_subagent_session(
+            &agent,
+            &factory.base_model(),
+            &format!("skill:{name}"),
+        );
+        Some(match outcome {
+            Ok(o) if !o.text.trim().is_empty() => Ok(o.text),
+            Ok(_) => Ok(format!("(job skill '{name}' finished with no output)")),
+            Err(e) => Err(e),
+        })
     }
 
     /// Scope this tool to an allow-list of skill names (per-subagent,
@@ -1403,6 +1544,10 @@ impl Tool for SkillTool {
                 "name": {
                     "type": "string",
                     "description": "Name of the skill to invoke. See the system prompt's `# Available skills` section, or call `SkillList()` / `SkillSearch(query: ...)` to discover."
+                },
+                "task": {
+                    "type": "string",
+                    "description": "For a job skill (one that produces a result — the `# Available skills` entry marks it as isolated): the specific task to run, including inputs and desired output (e.g. 'fill the annual contract from /workspace/uploads/KSY_Order_Form.xlsx, output DOCX'). The skill runs in its own context and returns only its result. Omit for guidance skills."
                 }
             },
             "required": ["name"]
@@ -1430,38 +1575,65 @@ impl Tool for SkillTool {
             }
         }
 
-        let store = self.store.lock().unwrap();
+        // Extract everything we need from the store, then drop the lock:
+        // a std Mutex guard is not `Send` and can't be held across the
+        // `.await` of an isolated skill's sub-agent run below.
+        let (isolated, body, dir, model_spec, tool_gate, description) = {
+            let store = self.store.lock().unwrap();
+            let skill = store.get(name).ok_or_else(|| {
+                let available = store.names().join(", ");
+                Error::Tool(format!(
+                    "skill '{}' not found. Available: {}",
+                    name,
+                    if available.is_empty() {
+                        "none"
+                    } else {
+                        &available
+                    }
+                ))
+            })?;
+            // Lazy-load the body on first invocation (dev-plan/06:
+            // discover() reads only frontmatter at boot; `.content()`
+            // materializes + caches the body now).
+            (
+                skill.isolated,
+                skill.content().into_owned(),
+                skill.dir.clone(),
+                skill.model.clone(),
+                skill.tool_gate.clone(),
+                skill.description.clone(),
+            )
+        };
 
-        let skill = store.get(name).ok_or_else(|| {
-            let available = store.names().join(", ");
-            Error::Tool(format!(
-                "skill '{}' not found. Available: {}",
-                name,
-                if available.is_empty() {
-                    "none"
-                } else {
-                    &available
-                }
-            ))
-        })?;
+        // Job skill (`isolated: true`): run it in its own sub-agent and
+        // return only the result, so the main conversation doesn't
+        // accumulate every intermediate step. Falls through to inline
+        // when isolation isn't available (no `task` arg, no factory wired
+        // on this surface, or the recursion cap).
+        if isolated {
+            if let Some(res) = self
+                .try_run_isolated(name, &description, model_spec.as_ref(), &body, &input)
+                .await
+            {
+                return res;
+            }
+        }
 
-        // Lazy-load the body on first SkillTool invocation. After P1
-        // dev-plan/06: SkillStore::discover() only read the
-        // frontmatter at boot; this `.content()` call materializes
-        // the body now and caches it in the SkillDef's OnceLock.
-        let mut result = skill.content().into_owned();
+        // Inline path: guidance/interactive skills, or a job skill that
+        // couldn't isolate.
+        let mut result = body;
 
         // Auto-detect runtime needs: requirements.txt + scripts/ dir.
         // The skill author doesn't have to repeat install instructions
         // in their SKILL.md — we surface them here so the model
         // notices on every invocation. Idempotent: pip install with
         // already-installed deps is a no-op + cached.
-        append_skill_runtime_hints(&mut result, &skill.dir);
+        append_skill_runtime_hints(&mut result, &dir);
 
         // Open the tool gate this skill declares (if any), making the
         // gated tool group visible to the model from the next turn. The
         // gate is process-global and session-sticky (dev-plan/43).
-        if let Some(gate) = skill.tool_gate.as_deref() {
+        if let Some(gate) = tool_gate.as_deref() {
             crate::tools::activate_gate(gate);
             result.push_str(&format!(
                 "\n\n_(The `{gate}` tools are now available for this session.)_\n"
@@ -1476,7 +1648,7 @@ impl Tool for SkillTool {
         // forking the whole skill body. Falls through to the
         // frontmatter spec when no override is set.
         let effective_spec =
-            crate::skills_state::skill_override(name).or_else(|| skill.model.clone());
+            crate::skills_state::skill_override(name).or_else(|| model_spec.clone());
 
         // If a recommendation exists (from override OR frontmatter),
         // ask the worker's resolver to apply it. The resolver writes
@@ -1969,6 +2141,34 @@ mod tests {
         assert!(
             store.get("lint").is_some(),
             "should find .claude/skills/lint"
+        );
+    }
+
+    #[test]
+    fn isolated_frontmatter_parses() {
+        let workspace = tempdir().unwrap();
+        let skills_dir = workspace.path().join(".thclaws/skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        create_skill(
+            &skills_dir,
+            "jobby",
+            "---\nname: jobby\ndescription: a job skill\nisolated: true\n---\nbody",
+            &[],
+        );
+        create_skill(
+            &skills_dir,
+            "guide",
+            "---\nname: guide\ndescription: a guidance skill\n---\nbody",
+            &[],
+        );
+        let store = SkillStore::discover_in(workspace.path(), &[]);
+        assert!(
+            store.get("jobby").expect("jobby present").isolated,
+            "`isolated: true` frontmatter should parse to true"
+        );
+        assert!(
+            !store.get("guide").expect("guide present").isolated,
+            "a skill without `isolated:` should default to false (runs inline)"
         );
     }
 

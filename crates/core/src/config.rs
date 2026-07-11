@@ -183,6 +183,16 @@ pub struct AppConfig {
     #[serde(default, alias = "autoLearn")]
     pub auto_learn: bool,
 
+    /// "Job runner" mode (isolated-skills / session-per-run). When true the
+    /// worker archives the current session and starts a fresh one BEFORE
+    /// every user turn, so a workspace used to run the same skill on input
+    /// after input never accumulates (and re-sends) earlier runs' context.
+    /// Off by default — a normal chat keeps its history for multi-turn
+    /// continuity. The prior session is saved to disk first, so nothing is
+    /// lost: the audit trail stays complete (archive, not delete).
+    #[serde(default, alias = "sessionResetPerTurn")]
+    pub session_reset_per_turn: bool,
+
     /// KMS name target for auto-learn. Project-scope. Auto-created on
     /// first run. Default `self_learn` — dedicated audit-log-style KMS
     /// for session pages, kept separate from
@@ -562,6 +572,7 @@ impl Default for AppConfig {
             mcp_servers: Vec::new(),
             kms_active: Vec::new(),
             auto_learn: false,
+            session_reset_per_turn: false,
             auto_learn_kms: default_auto_learn_kms(),
             auto_learn_reconcile_hours: default_auto_learn_reconcile_hours(),
             claude_md_compat: false,

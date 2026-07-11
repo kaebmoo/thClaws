@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.90.0] — 2026-07-11
+
+Admin panel gains per-user usage tracking, per-model cost breakdowns, and credit adjustment, sub-agents persist every run to a child session and skills can declare isolated execution, serve ships a job-runner mode, and cloud workspaces get shell and pre-auth fixes.
+
+### Added
+- **Admin panel: per-user usage, per-model cost breakdown, and credit adjustment.** The user management page now shows per-user usage totals, clicking Usage breaks down costs by model, and root users can adjust individual credit balances directly from the management UI.
+- **Sub-agent runs persist to child sessions.** Every sub-agent invocation now archives its full transcript to its own child session, so past runs are browsable and accountable instead of evaporating when the sub-agent exits. ([#3](https://github.com/thClaws/thClaws/issues/3))
+- **Isolated job-skills run in their own sub-agent.** Skills can declare `isolated: true` in SKILL.md frontmatter; the engine spawns a dedicated sub-agent to run them, keeping long-running jobs from polluting the parent session context.
+- **Job-runner mode for `thclaws serve`.** A new `--job-runner` flag resets the session per turn and writes outputs to archive-safe paths, so serve can act as a one-shot job executor without accumulating state across invocations. ([#1](https://github.com/thClaws/thClaws/issues/1))
+
+### Fixed
+- **Webapp IPC no longer drops messages during initial WebSocket connect.** Outbound IPC sends during the brief window between page load and WS handshake are now buffered and flushed on connect, preventing silent message loss on real-time views like the PTY Shell tab.
+- **Gateway pre-authorisation checks actual balance, not just non-zero.** Requests are now authorised against the available credit balance rather than a simple `>0` check, so users at exactly zero credits are correctly denied instead of slipping through.
+- **PTY Shell tab uses bash in cloud workspaces.** Cloud runner shells now default to `/bin/bash` instead of Debian's `/bin/sh` (dash), fixing compatibility with bash-isms in user commands.
+- **Cloud workspace seeds no longer pin the default model.** Gateway-provisioned workspaces no longer bake a pinned model into `settings.json`, so users see their actual default model instead of a stale seed value.
+
 ## [0.89.0] — 2026-07-10
 
 Tutorial Studio gets a NOTE-first /outline skill and deterministic slide rendering, the Business Agent ships as a new first-party offering, KMS ingest grows quality-of-life improvements, and search gains a real Google backend via SerpAPI alongside fine-grained tool-approval controls and a tool-loop breaker.

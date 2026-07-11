@@ -1301,7 +1301,12 @@ mod tests {
             .call(json!({"name": "dreams", "scope": "project"}))
             .await
             .unwrap();
-        assert_eq!(first, second);
+        // Idempotent on the KMS itself — both calls ensure the same store at
+        // the same path. Only the FIRST call attaches it to the active set, so
+        // the second omits the "· attached to active set" suffix; compare the
+        // path-bearing core rather than the exact message.
+        let core = |s: &str| s.split(" · attached").next().unwrap().to_string();
+        assert_eq!(core(&first), core(&second));
     }
 
     #[tokio::test]

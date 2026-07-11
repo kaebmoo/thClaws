@@ -264,6 +264,27 @@ fn subagent_model<'a>(pinned: Option<&'a str>, session_model: &'a str) -> &'a st
     }
 }
 
+/// Persist a completed sub-agent's transcript to its own child session
+/// file, for audit + debugging. Best-effort — a logging failure never
+/// affects the run. Shared by Task (`SubAgentTool`) and isolated
+/// job-skills so every delegated run is recorded on disk, not merely
+/// surfaced as a compact result in the parent conversation: the
+/// intermediate steps a sub-agent keeps OUT of the parent's LLM context
+/// still land here under `.thclaws/state/sessions/sub-<id>.jsonl`, so the
+/// "how" (which files were read, what a script did) stays auditable.
+pub(crate) fn persist_subagent_session(agent: &Agent, model: &str, role: &str) {
+    let cwd = crate::workdir::current_workdir();
+    let dir = cwd.join(".thclaws").join("state").join("sessions");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let mut sess = crate::session::Session::new(model, cwd.to_string_lossy().to_string());
+    sess.title = Some(format!("subagent:{role}"));
+    sess.sync(agent.history_snapshot());
+    let path = dir.join(format!("sub-{}.jsonl", sess.id));
+    let _ = sess.append_to(&path);
+}
+
 #[async_trait]
 impl AgentFactory for ProductionAgentFactory {
     fn base_model(&self) -> String {
@@ -681,6 +702,14 @@ impl Tool for SubAgentTool {
         // parent's cancel token between stream events. Pre-fix the
         // subagent stream ran to completion regardless of ctrl-C.
         let outcome = collect_agent_turn_with_cancel(stream, self.cancel.clone()).await?;
+
+        // Audit: persist the sub-agent's full transcript to its own child
+        // session (its intermediate steps never reached the parent context).
+        persist_subagent_session(
+            &agent,
+            &self.factory.base_model(),
+            agent_name.unwrap_or("Task"),
+        );
 
         // dev-plan/32 Stage I: push this turn's Usage to the workflow
         // usage sink if one is active on this thread. No-op outside

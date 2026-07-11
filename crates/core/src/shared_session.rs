@@ -1483,6 +1483,10 @@ async fn run_worker(
         crate::team::set_lead_team_dir(&td);
     }
     let skill_tool = crate::skills::SkillTool::new_from_handle(skill_store.clone());
+    // Capture the isolated-execution slot before the tool moves into the
+    // registry; wired to the factory once it's built (below) so `isolated:
+    // true` job skills run in a sub-agent.
+    let skill_factory_slot = skill_tool.factory_slot();
     tools.register(std::sync::Arc::new(skill_tool));
     // dev-plan/06 P2: SkillList + SkillSearch are always registered
     // (regardless of skills_listing_strategy) so any strategy can use
@@ -1725,6 +1729,12 @@ async fn run_worker(
         ));
         factory
     };
+    // Wire isolated ("job") skills to the factory just built: the main
+    // SkillTool gets a Weak handle so `isolated: true` skills spawn a
+    // sub-agent instead of pasting their body + steps inline. Weak keeps
+    // the factory → snapshot → registry → SkillTool → factory reference
+    // from leaking. Until now the slot was empty ⇒ job skills ran inline.
+    let _ = skill_factory_slot.set(std::sync::Arc::downgrade(&factory_state));
     // Apply `disallowed_tools` to the main agent's registry. Until
     // this was wired, the config field was parsed (config.rs maps
     // both flat `disallowedTools` and nested `permissions.deny`)
@@ -2046,10 +2056,12 @@ async fn run_worker(
         match input {
             ShellInput::Line(text) => {
                 cancel.reset();
+                maybe_reset_session_per_turn(&mut state, &events_tx, &plan_persist_path);
                 handle_line(text, &mut state, &events_tx, &cancel, &input_tx_self).await;
             }
             ShellInput::LineWithImages { text, images } => {
                 cancel.reset();
+                maybe_reset_session_per_turn(&mut state, &events_tx, &plan_persist_path);
                 handle_line_with_images(
                     text,
                     images,
@@ -3676,6 +3688,34 @@ async fn run_auto_learn_pipeline(
     crate::auto_learn::log_event(&format!(
         "reconcile ok: kms={kms_name} (next due in {hours}h)"
     ));
+}
+
+/// Job-runner mode (`config.session_reset_per_turn`): archive the current
+/// session and start a fresh one BEFORE a user turn so repeated runs don't
+/// accumulate (and re-send) each other's context. Archive-first ⇒ the old
+/// session stays on disk, so the audit trail is complete (this is a reset,
+/// not a delete). No-op when the mode is off or history is empty. Unlike
+/// `NewSession` it deliberately skips the auto-learn pipeline — this fires
+/// on every turn, so it must stay cheap.
+fn maybe_reset_session_per_turn(
+    state: &mut WorkerState,
+    events_tx: &broadcast::Sender<ViewEvent>,
+    plan_persist_path: &std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
+) {
+    if !state.config.session_reset_per_turn || state.agent.history_snapshot().is_empty() {
+        return;
+    }
+    save_history(&state.agent, &mut state.session, &state.session_store);
+    state.agent.clear_history();
+    state.session = Session::new(&state.config.model, state.cwd.to_string_lossy());
+    if let (Some(store), Ok(mut g)) = (state.session_store.as_ref(), plan_persist_path.lock()) {
+        let path = store.path_for(&state.session.id);
+        let _ = state.session.write_header_if_missing(&path);
+        *g = Some(path);
+    }
+    crate::tools::plan_state::clear();
+    state.approver.reset_session_flag();
+    let _ = events_tx.send(ViewEvent::HistoryReplaced(Vec::new()));
 }
 
 pub(crate) fn save_history(agent: &Agent, session: &mut Session, store: &Option<SessionStore>) {
