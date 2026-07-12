@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.94.0] — 2026-07-13
+
+Plan-mode and KMS sidebar fixes.
+
+### Fixed
+- **Plan mode: the sidebar Approve button no longer disappears the first time you use `/plan` in a fresh workspace.** A startup session reload was resetting the permission mode from Plan back to the default and dropping the approval button before it could be clicked; the reset now only runs on a genuine session switch.
+- **KMS: the sidebar knowledge-base list repopulates after returning from a fullscreen GUI-shell tab.** It previously read "None yet" despite an active KMS because the one-shot list snapshot was missed when the sidebar remounted — it now re-requests the list on mount.
+
 ## [0.93.0] — 2026-07-12
 
 The tutorial studio gains chapter rename, voice-over generation, a batch generate modal, and a Generate All button, alongside fixes for chapter numbering, slide insertion, slide-type locking, and paste fidelity.

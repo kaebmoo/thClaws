@@ -2127,6 +2127,9 @@ async fn run_worker(
                 )));
             }
             ShellInput::LoadSession(id) => {
+                // Capture the outgoing session id BEFORE the load so we can
+                // tell a real session switch from a same-id reload below.
+                let prev_session_id = state.session.id.clone();
                 let Some(ref store) = state.session_store else {
                     continue;
                 };
@@ -2261,9 +2264,21 @@ async fn run_worker(
                 // user's "allow for session" decision from session A
                 // continued to auto-approve in session B, and a Plan
                 // mode set in A leaked into B with no plan to submit.
-                state.approver.reset_session_flag();
-                let _ = crate::permissions::take_pre_plan_mode();
-                crate::permissions::set_current_mode_and_broadcast(state.agent.permission_mode);
+                //
+                // Guard on a REAL switch (id != prev): a same-id reload —
+                // e.g. the frontend's startup auto-load firing right after
+                // the user entered plan mode + submitted a plan — must NOT
+                // clobber the current session's ephemeral yolo / plan mode.
+                // That race reset the mode to Auto and dropped the sidebar
+                // Approve button the first time /plan was used in a fresh
+                // workspace (plan_state survives via restore_from_session
+                // above, so "type approve" still worked — mode was the only
+                // casualty).
+                if id != prev_session_id {
+                    state.approver.reset_session_flag();
+                    let _ = crate::permissions::take_pre_plan_mode();
+                    crate::permissions::set_current_mode_and_broadcast(state.agent.permission_mode);
+                }
                 let display = DisplayMessage::from_messages(&state.session.messages);
                 let _ = events_tx.send(ViewEvent::HistoryReplaced(display));
                 // Refresh so the sidebar's "current session" highlight
