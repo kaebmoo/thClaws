@@ -41,4 +41,7 @@ jobs:
         # scan + unbounded namespace-decl allocation) — transitive via the
         # office-doc (docx/xlsx/pptx) parsers; low-severity DoS on
         # user-supplied files. Drop when those deps allow a patched quick-xml.
-        run: cargo audit --ignore RUSTSEC-2026-0187 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
+        # RUSTSEC-2026-0204 (crossbeam-epoch fmt::Pointer on an invalid raw
+        # pointer, low): the engine never Debug-formats a raw Atomic; real fix
+        # is crossbeam-epoch >=0.9.20 once the MSRV-aware resolver selects it.
+        run: cargo audit --ignore RUSTSEC-2026-0187 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2026-0204
