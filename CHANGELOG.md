@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.92.0] — 2026-07-12
+
+GUI shells gain isolated one-shot turns that keep generated output separate from the main conversation, and the tutorial studio ships fixes for slide generation, cloud access, file URL resolution, and video status display.
+
+### Added
+- **Isolated one-shot turns for GUI shells.** GUI shells can now request a turn that runs in an isolated context via `streamTurn isolated:true`, keeping generated output separate from the main conversation. The tutorial studio uses this for slide generation (`aiCompose`/`aiPrompt`).
+
+### Fixed
+- **Generate Slide persists a slide type change before rendering.** Changing a slide's type and then generating content now saves the type change first, so the generated output matches the new type instead of the old one.
+- **Tutorial studio serves as a webapp tab in cloud, not a standalone shell.** Cloud users can now open the tutorial studio as a webapp tab inside the main app, fixing access that previously required a separate shell window.
+- **GUI shell `fileUrl` resolves to HTTP in cloud webapp embeds.** File URLs in GUI shells now correctly resolve to HTTP when embedded in a cloud webapp, instead of the non-functional `thclaws://` protocol.
+- **Video status pill only appears when a slide has or makes a video.** The video status indicator no longer shows on slides without an existing or in-progress video.
+
 ## [0.91.0] — 2026-07-12
 
 `/doctor` checks agent-declared dependencies from the manifest, the tutorial studio ships a redesigned editor with outline alignment, Generate Slide, and modern slide typography, cloud push/pull warns before overwriting diverged work and syncs the full workspace, and engine fixes land for `/reload`, provider error attribution, and stale model sources.

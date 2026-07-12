@@ -78,6 +78,15 @@ pub enum ShellInput {
     /// Raw line submitted by the user. Slash-prefix → dispatched as
     /// command, anything else → fed to the agent as a prompt.
     Line(String),
+    /// Like `Line`, but run on a throwaway child agent whose history
+    /// starts empty and is discarded when the turn ends — the shared
+    /// session and its running context are never touched. Lets a
+    /// GUI-shell agent (e.g. tutorial-studio) fire many independent
+    /// one-shot generations without the shared history — and per-turn
+    /// input tokens — growing without bound. Streams the same
+    /// text/tool_call/tool_result/done events as `Line`. Slash commands
+    /// aren't supported here (there's no persistent session to act on).
+    IsolatedLine(String),
     /// Like `Line` but with one or more inline image attachments
     /// (paste / drag-drop into the chat composer). Each attachment is
     /// `(media_type, base64_data)`. Slash commands aren't expected
@@ -2063,6 +2072,10 @@ async fn run_worker(
                 maybe_reset_session_per_turn(&mut state, &events_tx, &plan_persist_path);
                 handle_line(text, &mut state, &events_tx, &cancel, &input_tx_self).await;
             }
+            ShellInput::IsolatedLine(text) => {
+                cancel.reset();
+                handle_isolated_line(text, &mut state, &events_tx, &cancel, &input_tx_self).await;
+            }
             ShellInput::LineWithImages { text, images } => {
                 cancel.reset();
                 maybe_reset_session_per_turn(&mut state, &events_tx, &plan_persist_path);
@@ -3712,6 +3725,72 @@ async fn run_auto_learn_pipeline(
 /// not a delete). No-op when the mode is off or history is empty. Unlike
 /// `NewSession` it deliberately skips the auto-learn pipeline — this fires
 /// on every turn, so it must stay cheap.
+/// Run one turn on a fresh throwaway child agent (empty history), then
+/// discard it — the shared `state.agent`/`state.session` are set aside
+/// untouched for the duration, so nothing accumulates. The child is
+/// swapped in as the active agent so the shared `drive_turn_stream` path
+/// runs verbatim (multi-tenant working-dir scope, gateway member billing
+/// attribution, streaming, cancellation), then the real agent + session
+/// are restored and the throwaway session is deleted so it never shows up
+/// in `/sessions`.
+async fn handle_isolated_line(
+    text: String,
+    state: &mut WorkerState,
+    events_tx: &broadcast::Sender<ViewEvent>,
+    cancel: &crate::cancel::CancelToken,
+    input_tx: &mpsc::Sender<ShellInput>,
+) {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        let _ = events_tx.send(ViewEvent::TurnDone);
+        return;
+    }
+    // Fresh child from the live factory snapshot — same provider / model /
+    // tools / system prompt as the main agent, but no history.
+    let mut child = match state.agent_factory.build(&text, None, 1).await {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = events_tx.send(ViewEvent::ErrorText(format!(
+                "isolated turn could not start: {e}"
+            )));
+            let _ = events_tx.send(ViewEvent::TurnDone);
+            return;
+        }
+    };
+    child.permission_mode = state.agent.permission_mode;
+
+    let saved_agent = std::mem::replace(&mut state.agent, child);
+    let saved_session = std::mem::replace(
+        &mut state.session,
+        Session::new(&state.config.model, state.cwd.to_string_lossy()),
+    );
+    let throwaway_id = state.session.id.clone();
+
+    let stream = Box::pin(state.agent.run_turn(text));
+    let lead_mb = crate::team::Mailbox::new(crate::team::Mailbox::default_dir());
+    drive_turn_stream(
+        stream,
+        state,
+        events_tx,
+        cancel,
+        &lead_mb,
+        input_tx,
+        Some(throwaway_id.clone()),
+    )
+    .await;
+
+    // Restore the real agent + session; drop the throwaway.
+    state.agent = saved_agent;
+    state.session = saved_session;
+    if let Some(store) = state.session_store.as_ref() {
+        let _ = store.delete(&throwaway_id);
+    }
+    let _ = events_tx.send(ViewEvent::SessionListRefresh(build_session_list(
+        &state.session_store,
+        &state.session.id,
+    )));
+}
+
 fn maybe_reset_session_per_turn(
     state: &mut WorkerState,
     events_tx: &broadcast::Sender<ViewEvent>,
