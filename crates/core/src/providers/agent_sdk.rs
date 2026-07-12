@@ -654,8 +654,14 @@ mod tests {
         assert_eq!(resolve_claude_bin("my-claude-wrapper"), "my-claude-wrapper");
     }
 
+    // `falls_back_to_bare_name_when_nothing_found` removes the process-global
+    // PATH; serialize it with every test that reads PATH so they don't race
+    // (the parallel runner otherwise intermittently flaked `find_on_path`).
+    static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn falls_back_to_bare_name_when_nothing_found() {
+        let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         // With an empty PATH and (almost certainly) none of the fallback
         // locations present in the test env, we still return "claude" so
         // the caller's not-found error fires with the helpful message
@@ -674,6 +680,7 @@ mod tests {
 
     #[test]
     fn find_on_path_locates_a_ubiquitous_binary() {
+        let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         // `sh` is on PATH in every CI/dev env; prove the PATH walk works.
         assert!(find_on_path("sh").is_some());
         assert!(find_on_path("definitely-not-a-real-binary-xyzzy").is_none());

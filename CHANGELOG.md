@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.93.0] — 2026-07-12
+
+The tutorial studio gains chapter rename, voice-over generation, a batch generate modal, and a Generate All button, alongside fixes for chapter numbering, slide insertion, slide-type locking, and paste fidelity.
+
+### Added
+- **Chapter rename via a hover pencil icon.** Clicking the pencil icon next to a chapter title opens an inline rename field, replacing the previous double-click gesture.
+- **Voice-over controls in the slide editor.** Each slide now exposes a voice-over panel with provider and voice selection, plus a generate button for producing spoken audio from the slide contents.
+- **Batch 'Generate Slides' modal replaces the split/combine workflow.** The new modal generates multiple slides in one pass and automatically skips slides that already have content, keeping bulk generation fast.
+- **Chapter pane 'Generate All' button for regenerating the entire deck.** A single button in the chapter pane regenerates every slide at once, replacing the three individual controls previously required.
+
+### Fixed
+- **Chapter number badge is 1-based, matching UI order.** Chapter numbering now starts at 1 in the UI badge instead of 0.
+- **+ button inserts a slide after the active slide, not at the end.** Clicking the add-slide button now places the new slide directly after the currently selected slide.
+- **Slide type is locked in the AI compose prompt.** The user-selected slide type is now included in the prompt sent to the AI, preventing the model from changing types during generation.
+- **Pasted slides carry their rendered assets.** Copying and pasting a slide now preserves all rendered images and assets, not just the text content.
+
 ## [0.92.0] — 2026-07-12
 
 GUI shells gain isolated one-shot turns that keep generated output separate from the main conversation, and the tutorial studio ships fixes for slide generation, cloud access, file URL resolution, and video status display.
