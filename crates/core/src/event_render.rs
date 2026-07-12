@@ -193,6 +193,7 @@ pub fn render_chat_dispatches(ev: &ViewEvent) -> Vec<String> {
         // function is called — see the early-return in
         // `gui::spawn_event_translator` / the equivalent web hook.
         ViewEvent::QuitRequested => vec![],
+        ViewEvent::ReloadRequested => vec![],
         ViewEvent::PlanUpdate(plan) => {
             let payload = serde_json::json!({
                 "type": "chat_plan_update",
@@ -645,6 +646,7 @@ pub fn render_terminal_ansi(state: &mut TerminalRenderState, ev: &ViewEvent) -> 
         )),
         ViewEvent::McpAppCallToolResult { .. } => None,
         ViewEvent::QuitRequested => None,
+        ViewEvent::ReloadRequested => None,
         ViewEvent::PlanUpdate(_) => None,
         ViewEvent::TodoUpdate(_) => None,
         ViewEvent::SkillModelNote(text) => Some(format!("\r\n\x1b[2;3m{text}\x1b[0m\r\n")),

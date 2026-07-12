@@ -427,6 +427,10 @@ pub enum ViewEvent {
     /// `UserEvent::QuitRequested` so the tao loop runs the same
     /// save-and-exit path as the window-close button. Issue #52.
     QuitRequested,
+    /// Worker → event-loop signal: GUI `/reload`. The loop persists the
+    /// current window size (the re-exec otherwise restores the size from
+    /// the last normal close, not the live one) then re-execs.
+    ReloadRequested,
     /// Active plan changed. `Some(plan)` for submit / update_step,
     /// `None` for clear. The translator forwards this as a
     /// `chat_plan_update` IPC envelope to the right-side
@@ -2292,12 +2296,23 @@ async fn run_worker(
                 // Rebuild so the agent actually sees the newly-registered
                 // MCP tools on its next turn.
                 if let Err(e) = state.rebuild_agent(true) {
+                    // The MCP server is fine — its tools are already in the
+                    // registry. rebuild_agent failed because the *current
+                    // model's* provider couldn't be built (usually a missing
+                    // key / unroutable model), which blocks normal turns too,
+                    // not just MCP. Attribute it to the model, not the server,
+                    // so the user fixes the right thing. Tools attach on the
+                    // next successful rebuild (/reload after resolving).
+                    let _ = events_tx.send(ViewEvent::SlashOutput(format!(
+                        "[mcp] '{server_name}' connected ({tool_count} tools)"
+                    )));
                     let _ = events_tx.send(ViewEvent::ErrorText(format!(
-                        "[mcp] '{server_name}' tools registered but rebuild failed: {e}"
+                        "Current model '{}' isn't ready — {e}. Set a key or switch model with /model, then /reload.",
+                        state.config.model
                     )));
                 } else {
                     let _ = events_tx.send(ViewEvent::SlashOutput(format!(
-                        "[mcp] '{server_name}' connected"
+                        "[mcp] '{server_name}' connected ({tool_count} tools)"
                     )));
                 }
                 // Update sidebar with real tool count now that the server is live.

@@ -43,6 +43,7 @@ pub mod context;
 #[cfg(feature = "cost_bridge")]
 pub mod cost_bridge;
 pub mod deploy_client;
+pub mod doctor;
 pub mod dotenv;
 pub mod endpoints;
 pub mod error;

@@ -1,7 +1,7 @@
 {
   "schema": 4,
   "source": "baseline 2026-06-10 — pricing synced from LiteLLM (github.com/BerriAI/litellm)",
-  "fetched_at": "2026-07-11T00:00:00Z",
+  "fetched_at": "2026-07-12T00:00:00Z",
   "providers": {
     "anthropic": {
       "list_url": "https://api.anthropic.com/v1/models",
@@ -2201,13 +2201,6 @@
       "list_url": "https://api.openai.com/v1/models",
       "default_context": 128000,
       "models": {
-        "gpt-4o-mini-tts": {
-          "chat": false,
-          "kind": "tts",
-          "tts_price_per_kchar_usd": 0.015,
-          "source": "OpenAI TTS char-rate basis (tts-1 tier); manual estimate — verify + manual:gpt-4o-mini-tts",
-          "verified_at": "2026-07-05"
-        },
         "gpt-3.5-turbo": {
           "context": 16385,
           "max_output": 4096,
@@ -2386,6 +2379,13 @@
           "input_per_mtok": 0.15,
           "output_per_mtok": 0.6,
           "cached_input_per_mtok": 0.075
+        },
+        "gpt-4o-mini-tts": {
+          "chat": false,
+          "kind": "tts",
+          "tts_price_per_kchar_usd": 0.015,
+          "source": "OpenAI TTS char-rate basis (tts-1 tier); manual estimate — verify + manual:gpt-4o-mini-tts",
+          "verified_at": "2026-07-05"
         },
         "gpt-5": {
           "context": 400000,
@@ -2704,6 +2704,27 @@
           "input_per_mtok": 30.0,
           "output_per_mtok": 180.0,
           "cached_input_per_mtok": 3.0
+        },
+        "gpt-5.6-luna": {
+          "context": 1050000,
+          "source": "https://api.openai.com/v1/models + litellm:gpt-5.6-luna",
+          "verified_at": "2026-07-12",
+          "input_per_mtok": 1.0,
+          "output_per_mtok": 6.0
+        },
+        "gpt-5.6-sol": {
+          "context": 1050000,
+          "source": "https://api.openai.com/v1/models + litellm:gpt-5.6-sol",
+          "verified_at": "2026-07-12",
+          "input_per_mtok": 5.0,
+          "output_per_mtok": 30.0
+        },
+        "gpt-5.6-terra": {
+          "context": 1050000,
+          "source": "https://api.openai.com/v1/models + litellm:gpt-5.6-terra",
+          "verified_at": "2026-07-12",
+          "input_per_mtok": 2.5,
+          "output_per_mtok": 15.0
         },
         "gpt-image-2": {
           "source": "manual:https://platform.openai.com/docs/pricing",

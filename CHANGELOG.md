@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.91.0] — 2026-07-12
+
+`/doctor` checks agent-declared dependencies from the manifest, the tutorial studio ships a redesigned editor with outline alignment, Generate Slide, and modern slide typography, cloud push/pull warns before overwriting diverged work and syncs the full workspace, and engine fixes land for `/reload`, provider error attribution, and stale model sources.
+
+### Added
+- **`/doctor` checks agent-declared dependencies from the manifest.** Agents can declare `requires.python` and `requires.system` in their catalog manifest; `/doctor` verifies those dependencies are installed and reports missing ones. The tutorial studio drops its agent-local doctor in favor of this engine-level check.
+- **Tutorial studio redesign: outline-aligned editor, Generate Slide, hideable Copilot, and modern slide typography.** The slide editor pane now aligns with the course outline, a Generate Slide action creates slides directly, the Copilot pane can be hidden on wide layouts, and slides render with Kanit + Sarabun fonts for a lighter, airier design. Pillow is preinstalled in cloud workspaces for slide rendering.
+- **`/cloud push` and `/cloud pull` warn before overwriting diverged work.** If local and remote workspaces have diverged, push and pull now show a warning before proceeding, preventing accidental data loss.
+
+### Fixed
+- **`/reload` restores the live window size, not the last-closed one.** The reload command now captures the current window dimensions instead of restoring whatever size the window had when it was last closed.
+- **`/cloud push` and `/cloud pull` sync the full workspace including state and sessions.** Push and pull previously missed the `state/` and `sessions/` directories; they now teleport the complete workspace.
+- **Error messages no longer incorrectly blame MCP when a model provider fails to build.** When the current model's provider cannot be constructed, the engine now reports the actual failure instead of attributing it to MCP.
+- **Engine no longer reads `~/.claude/settings.json` as a model source.** The user-global Claude settings file is no longer consulted for model configuration, preventing stale or unintended model overrides from leaking in.
+
 ## [0.90.0] — 2026-07-11
 
 Admin panel gains per-user usage tracking, per-model cost breakdowns, and credit adjustment, sub-agents persist every run to a child session and skills can declare isolated execution, serve ships a job-runner mode, and cloud workspaces get shell and pre-auth fixes.

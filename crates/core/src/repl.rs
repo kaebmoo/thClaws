@@ -442,7 +442,12 @@ pub enum SlashCommand {
     /// automatically — this is the escape hatch for everything
     /// else.
     ReloadPrompt,
-    Doctor,
+    /// Environment + agent-dependency preflight. `fix` (from `/doctor
+    /// --fix`) additionally installs the missing agent dependencies
+    /// declared in the workspace `manifest.json` `requires` block.
+    Doctor {
+        fix: bool,
+    },
     Skills,
     /// Org-policy SSO subcommands (Phase 4).
     /// `/sso login`  — interactive OIDC login via browser + loopback callback
@@ -861,7 +866,7 @@ pub enum CloudSlash {
     /// uuid) instead of updating the original — i.e. forking. One detach op for
     /// both "switch the agent here" and "fork it".
     Unbind,
-    /// `/cloud push [<slug>] [--delete] [--dry-run] [--force-rebind]` — mirror
+    /// `/cloud push [<slug>] [--delete] [--dry-run] [--force-rebind] [--force]` — mirror
     /// the working dir UP to a hosted cloud workspace (dev-plan/51). A bare
     /// `<slug>` (or `--workspace <slug>`) selects the target when you have more
     /// than one. Em/en dashes are normalized to `--` (smart-dash tolerance).
@@ -870,6 +875,7 @@ pub enum CloudSlash {
         dry_run: bool,
         workspace: Option<String>,
         force_rebind: bool,
+        force: bool,
     },
     /// `/cloud pull […]` — mirror a hosted cloud workspace DOWN to the cwd.
     Pull {
@@ -877,6 +883,7 @@ pub enum CloudSlash {
         dry_run: bool,
         workspace: Option<String>,
         force_rebind: bool,
+        force: bool,
     },
 }
 
@@ -1707,7 +1714,12 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
         "fork" => SlashCommand::Fork,
         "reload" | "restart" => SlashCommand::Reload,
         "reload-prompt" | "reload_prompt" | "refresh-prompt" => SlashCommand::ReloadPrompt,
-        "doctor" | "diag" => SlashCommand::Doctor,
+        "doctor" | "diag" => SlashCommand::Doctor {
+            fix: {
+                let a = args.trim();
+                a == "--fix" || a == "fix"
+            },
+        },
         "sso" => match args.trim() {
             "" | "status" => SlashCommand::Sso {
                 sub: SsoSubcommand::Status,
@@ -1921,6 +1933,9 @@ fn parse_cloud_subcommand(args: &str) -> SlashCommand {
             let delete = has("--delete");
             let dry_run = has("--dry-run");
             let force_rebind = has("--force-rebind");
+            // `--force` skips the divergence guard (overwrite the other end's
+            // newer changes). Distinct from `--force-rebind` (pairing check).
+            let force = has("--force");
             // Target workspace: `--workspace <slug>` or the first positional
             // (non-flag) token, so `/cloud push <slug>` works without the flag.
             let workspace = toks
@@ -1939,6 +1954,7 @@ fn parse_cloud_subcommand(args: &str) -> SlashCommand {
                     dry_run,
                     workspace,
                     force_rebind,
+                    force,
                 })
             } else {
                 SlashCommand::Cloud(CloudSlash::Pull {
@@ -1946,6 +1962,7 @@ fn parse_cloud_subcommand(args: &str) -> SlashCommand {
                     dry_run,
                     workspace,
                     force_rebind,
+                    force,
                 })
             }
         }
@@ -1953,7 +1970,7 @@ fn parse_cloud_subcommand(args: &str) -> SlashCommand {
             "unknown cloud subcommand: '{other}' \
              (try: /cloud status, /cloud list [--mine], /cloud get <slug>, \
              /cloud publish, /cloud unbind, \
-             /cloud push|pull [<slug>] [--delete] [--dry-run] [--force-rebind])"
+             /cloud push|pull [<slug>] [--delete] [--dry-run] [--force-rebind] [--force])"
         )),
     }
 }
@@ -3788,7 +3805,7 @@ pub fn built_in_commands() -> &'static [BuiltInCommand] {
         BuiltInCommand { name: "cwd",      description: "Show current working directory",             category: "System", usage: "" },
         BuiltInCommand { name: "usage",    description: "Show token usage by provider and model",     category: "System", usage: "" },
         BuiltInCommand { name: "cost",     description: "Show or reset accumulated session cost",     category: "System", usage: "[reset]" },
-        BuiltInCommand { name: "doctor",   description: "Run diagnostics",                            category: "System", usage: "" },
+        BuiltInCommand { name: "doctor",   description: "Diagnostics + agent-dependency preflight (--fix installs missing deps)", category: "System", usage: "[--fix]" },
         BuiltInCommand { name: "config",   description: "Set a config value (session-only)",          category: "System", usage: "key=value" },
         BuiltInCommand { name: "quit",     description: "Exit",                                       category: "System", usage: "" },
     ]
@@ -8650,7 +8667,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         summary_history.len()
                     );
                 }
-                SlashCommand::Doctor => {
+                SlashCommand::Doctor { fix } => {
                     println!(
                         "{COLOR_DIM}── {} diagnostics ──{COLOR_RESET}",
                         crate::branding::current().name
@@ -8731,6 +8748,25 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         "{COLOR_DIM}history:    {} messages{COLOR_RESET}",
                         agent.history_snapshot().len()
                     );
+                    let report = crate::doctor::diagnose();
+                    let section = crate::doctor::render(&report);
+                    if !section.is_empty() {
+                        print!("{section}");
+                    }
+                    if fix {
+                        if report.has_installable_gaps() {
+                            println!("{COLOR_DIM}── installing missing agent dependencies ──{COLOR_RESET}");
+                            print!("{}", crate::doctor::apply(&report));
+                        } else if report.found {
+                            println!(
+                                "{COLOR_DIM}--fix: nothing to install — all agent dependencies satisfied{COLOR_RESET}"
+                            );
+                        } else {
+                            println!(
+                                "{COLOR_DIM}--fix: no agent manifest in this workspace (nothing to install){COLOR_RESET}"
+                            );
+                        }
+                    }
                 }
                 SlashCommand::Permissions(mode) => {
                     if mode.is_empty() {
@@ -11098,14 +11134,14 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 println!("{line}");
                             }
                         }
-                        CloudSlash::Push { delete, dry_run, workspace, force_rebind } => {
+                        CloudSlash::Push { delete, dry_run, workspace, force_rebind, force } => {
                             let cwd = std::env::current_dir().unwrap_or_default();
-                            let opts = crate::cloud::cmd::SyncOpts { delete, dry_run, workspace, force_rebind };
+                            let opts = crate::cloud::cmd::SyncOpts { delete, dry_run, workspace, force_rebind, force };
                             crate::cloud::cmd::push_streaming(&cwd, None, cloud_cfg.as_ref(), opts, &mut |line| println!("{line}")).await;
                         }
-                        CloudSlash::Pull { delete, dry_run, workspace, force_rebind } => {
+                        CloudSlash::Pull { delete, dry_run, workspace, force_rebind, force } => {
                             let cwd = std::env::current_dir().unwrap_or_default();
-                            let opts = crate::cloud::cmd::SyncOpts { delete, dry_run, workspace, force_rebind };
+                            let opts = crate::cloud::cmd::SyncOpts { delete, dry_run, workspace, force_rebind, force };
                             crate::cloud::cmd::pull_streaming(&cwd, None, cloud_cfg.as_ref(), opts, &mut |line| println!("{line}")).await;
                         }
                     }

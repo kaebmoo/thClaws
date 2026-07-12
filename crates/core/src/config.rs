@@ -4,8 +4,13 @@
 //!   1. CLI flags
 //!   2. `.thclaws/settings.json` (project)
 //!   3. `~/.config/thclaws/settings.json` (user)
-//!   4. `~/.claude/settings.json` (Claude Code fallback)
-//!   5. Compiled-in defaults
+//!   4. Compiled-in defaults (credential-aware — see `preferred_default_model`)
+//!
+//! The user-global `~/.claude/settings.json` is deliberately NOT a model
+//! source: importing Claude Code's `model` (e.g. a `…[1m]` alias thClaws
+//! can't route) silently overrode the credential-aware default and left
+//! users on a provider they never chose. Project-level `.claude/settings.json`
+//! (committed per-repo) is still honored as a migration convenience.
 //!
 //! API keys are never stored in config files — only in env vars or `.env` files.
 
@@ -1881,11 +1886,11 @@ impl AppConfig {
         // 2. User-level: ~/.config/thclaws/settings.json.
         candidates.extend(Self::user_config_paths());
 
-        // Tracks whether any settings layer (user / project / Claude Code
-        // fallback / CLI override) explicitly pinned a `model`. When it
-        // stays false the effective model is just the compiled-in
-        // placeholder, and startup is free to pick a credential-aware
-        // default provider (see the `preferred_default_model` step below).
+        // Tracks whether any settings layer (user / project / CLI
+        // override) explicitly pinned a `model`. When it stays false the
+        // effective model is just the compiled-in placeholder, and startup
+        // is free to pick a credential-aware default provider (see the
+        // `preferred_default_model` step below).
         let mut model_explicit = false;
 
         let mut config = None;
@@ -1905,11 +1910,11 @@ impl AppConfig {
             break;
         }
 
-        // 3. Claude Code fallback.
-        if config.is_none() {
-            config = Self::load_claude_code_fallback();
-        }
-
+        // No user-global Claude Code fallback: `~/.claude/settings.json`
+        // must not seed `model`/permissions (it silently pulled in an
+        // unroutable model the user never chose). `config` stays None here
+        // when no thClaws layer exists, so `preferred_default_model` below
+        // picks a credential-aware default instead.
         let mut config = config.unwrap_or_default();
 
         // User-level MCP: ~/.config/thclaws/mcp.json, then ~/.claude/mcp.json.
@@ -2225,31 +2230,6 @@ impl AppConfig {
             }
         }
         vec![]
-    }
-
-    /// Fallback: read Claude Code's `~/.claude/settings.json` if our config
-    /// is missing. Extracts model, permission mode. Returns None if not found.
-    pub fn load_claude_code_fallback() -> Option<Self> {
-        let home = crate::util::home_dir()?;
-        let path = home.join(".claude/settings.json");
-        let contents = std::fs::read_to_string(path).ok()?;
-        let v: serde_json::Value = serde_json::from_str(&contents).ok()?;
-        let mut config = Self::default();
-        if let Some(m) = v.get("model").and_then(|m| m.as_str()) {
-            config.model = crate::providers::ProviderKind::resolve_alias(m);
-        }
-        if let Some(mode) = v
-            .get("permissions")
-            .and_then(|p| p.get("default_mode"))
-            .and_then(|m| m.as_str())
-        {
-            config.permissions = match mode {
-                "bypassPermissions" | "acceptEdits" => "auto",
-                _ => "ask",
-            }
-            .to_string();
-        }
-        Some(config)
     }
 
     /// Resolve the provider kind implied by the model string.
