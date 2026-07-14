@@ -1,7 +1,7 @@
 {
   "schema": 4,
   "source": "baseline 2026-06-10 — pricing synced from LiteLLM (github.com/BerriAI/litellm)",
-  "fetched_at": "2026-07-12T00:00:00Z",
+  "fetched_at": "2026-07-15T00:00:00Z",
   "providers": {
     "anthropic": {
       "list_url": "https://api.anthropic.com/v1/models",
@@ -3886,24 +3886,6 @@
           "input_per_mtok": 0.3,
           "output_per_mtok": 1.2
         },
-        "liquid/lfm-2.5-1.2b-instruct:free": {
-          "context": 32768,
-          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-06-10",
-          "free": true,
-          "chat": true,
-          "input_per_mtok": 0.0,
-          "output_per_mtok": 0.0
-        },
-        "liquid/lfm-2.5-1.2b-thinking:free": {
-          "context": 32768,
-          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-06-10",
-          "free": true,
-          "chat": true,
-          "input_per_mtok": 0.0,
-          "output_per_mtok": 0.0
-        },
         "mancer/weaver": {
           "context": 8000,
           "max_output": 2000,
@@ -5018,16 +5000,6 @@
           "input_per_mtok": 0.039,
           "output_per_mtok": 0.18
         },
-        "openai/gpt-oss-120b:free": {
-          "context": 131072,
-          "max_output": 131072,
-          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-06-10",
-          "free": true,
-          "chat": true,
-          "input_per_mtok": 0.0,
-          "output_per_mtok": 0.0
-        },
         "openai/gpt-oss-20b": {
           "context": 131072,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
@@ -5812,15 +5784,6 @@
           "chat": true,
           "input_per_mtok": 0.04,
           "output_per_mtok": 0.05
-        },
-        "sao10k/l3.1-70b-hanami-x1": {
-          "context": 16000,
-          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-06-10",
-          "free": false,
-          "chat": true,
-          "input_per_mtok": 3.0,
-          "output_per_mtok": 3.0
         },
         "sao10k/l3.1-euryale-70b": {
           "context": 131072,
@@ -7229,6 +7192,11 @@
           "context": 128000,
           "source": "https://api.tokenrouter.com/v1/models",
           "verified_at": "2026-06-30"
+        },
+        "tokenrouter/bytedance-seed/seedream-5.0-pro": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-07-15"
         },
         "tokenrouter/claude-haiku-4-5": {
           "context": 200000,

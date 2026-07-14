@@ -604,6 +604,12 @@
       t.on("error", function (p) {
         self._onError(p);
       });
+      // Session (re)load / reconnect: repaint the whole transcript so a
+      // browser that detached from a running turn lands back on its
+      // history instead of a blank view.
+      t.on("history", function (p) {
+        self._hydrate(p && p.messages);
+      });
     }
 
     // ── public API ──
@@ -628,6 +634,31 @@
       this._scroll.innerHTML = "";
       this._body = null;
       this._buffer = "";
+    }
+    // Repaint the transcript from a `history` snapshot (session (re)load /
+    // reconnect). Replaces whatever is on screen with the past messages —
+    // user/agent bubbles + tool chips — so it stays in sync with the
+    // engine's session. No-op on an empty/absent list so a fresh session's
+    // intro line survives. Public so a shell can also drive it directly.
+    hydrate(messages) {
+      if (!Array.isArray(messages) || messages.length === 0) return;
+      this.clear();
+      for (var i = 0; i < messages.length; i++) {
+        var m = messages[i] || {};
+        if (m.role === "user") this._append("user", m.content || "");
+        else if (m.role === "assistant") this._append("agent", m.content || "");
+        else if (m.role === "tool") {
+          var chip = document.createElement("div");
+          chip.className = "thc-chat-tool";
+          chip.textContent = m.content || "tool";
+          this._scroll.appendChild(chip);
+        }
+        // system prompts / unknown roles aren't rendered as bubbles
+      }
+      this._toBottom();
+    }
+    _hydrate(messages) {
+      this.hydrate(messages);
     }
     get busy() {
       return !!this._busy;

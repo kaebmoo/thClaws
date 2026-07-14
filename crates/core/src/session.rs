@@ -1334,6 +1334,22 @@ impl SessionStore {
             if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
                 continue;
             }
+            // Skip subagent session files (`sub-<id>.jsonl`, written by
+            // subagent.rs::persist_subagent_session). They are internal
+            // transcripts, never user-resumable: the filename carries a
+            // `sub-` prefix but the header `id` inside does NOT, so a
+            // `load(meta.id)` derives `<id>.jsonl` and can't find the
+            // `sub-<id>.jsonl` file — surfacing them made every click on
+            // one in the session list fail with "Failed to load session".
+            // A heavy workflow run mints dozens, which then dominated the
+            // most-recent-first list and crowded out real sessions.
+            if path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s.starts_with("sub-"))
+            {
+                continue;
+            }
             if let Ok(meta) = Session::load_meta_from(&path) {
                 out.push(meta);
             }
@@ -2321,6 +2337,31 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = SessionStore::new(dir.path().to_path_buf());
         assert!(store.rename("sess-nonexistent", "x").is_err());
+    }
+
+    #[test]
+    fn list_excludes_subagent_session_files() {
+        // subagent.rs persists `sub-<id>.jsonl` whose header `id` LACKS the
+        // `sub-` prefix, so list()->load(meta.id) can't find the file.
+        // They must not surface in the user-facing session list.
+        let dir = tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let mut real = Session::new("m", "/tmp");
+        real.sync(vec![Message::user("hello")]);
+        store.save(&mut real).unwrap();
+        // A subagent transcript: filename `sub-sess-*.jsonl`, header id
+        // `sess-*` (the mismatch subagent.rs actually writes).
+        std::fs::write(
+            dir.path().join("sub-sess-deadbeef.jsonl"),
+            "{\"type\":\"header\",\"id\":\"sess-deadbeef\",\"model\":\"m\",\"cwd\":\"/tmp\",\"created_at\":1}\n",
+        )
+        .unwrap();
+        let ids: Vec<String> = store.list().unwrap().into_iter().map(|m| m.id).collect();
+        assert!(ids.contains(&real.id), "real session should be listed");
+        assert!(
+            !ids.iter().any(|id| id == "sess-deadbeef"),
+            "subagent session must be excluded; got {ids:?}"
+        );
     }
 
     #[test]

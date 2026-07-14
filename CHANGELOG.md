@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.95.0] — 2026-07-15
+
+Research engine improvements, KMS graph toggle, and Files-tab context-menu actions.
+
+### Added
+- **KMS graph: a toggle hides orphan (uncited) source nodes from the graph view.**
+- **Files tab: "Translate" added to the context menu for `.md` files.**
+- **Files tab: "Summarize" added to the context menu for `.md` files.**
+- **GUI shell: the chat transcript is now restored when reconnecting to a chat-first shell.**
+- **Marketplace: Gmail MCP (community, ISC) added to the catalog.**
+- **Subagent: cross-provider model pins are now allowed when the pinned provider is usable.**
+
+### Fixed
+- **Research: the ## Sources linker for graph page→source edges is now deterministic.** The linking order previously varied between runs.
+- **Research: "auto" depth mode is now actually adaptive.** It honours the max_iter setting (6) instead of ignoring it and falling back to a non-adaptive strategy.
+- **Engine: `/cloud push` and `/cloud pull` now hard-error when the working directory is unreadable,** instead of failing silently.
+- **Session list: subagent session files are no longer listed as user sessions.**
+- **Workflow: the parallel fan-out cap is decoupled from the CPU core count.** It previously capped at the number of cores regardless of the intended concurrency.
+
+### Changed
+- **Research: worker roles (fetcher, source-archiver) now run in parallel instead of sequentially.**
+- **Research: worker roles are pinned to deepseek-v4-flash for better performance.**
+
 ## [0.94.0] — 2026-07-13
 
 Plan-mode and KMS sidebar fixes.

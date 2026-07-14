@@ -3732,46 +3732,50 @@ pub async fn dispatch(
                         workspace,
                         force_rebind,
                         force,
-                    } => {
-                        let cwd = std::env::current_dir().unwrap_or_default();
-                        crate::cloud::cmd::push_streaming(
-                            &cwd,
-                            None,
-                            cloud_cfg.as_ref(),
-                            crate::cloud::cmd::SyncOpts {
-                                delete,
-                                dry_run,
-                                workspace,
-                                force_rebind,
-                                force,
-                            },
-                            &mut emit,
-                        )
-                        .await;
-                    }
+                    } => match std::env::current_dir() {
+                        Ok(cwd) => {
+                            crate::cloud::cmd::push_streaming(
+                                &cwd,
+                                None,
+                                cloud_cfg.as_ref(),
+                                crate::cloud::cmd::SyncOpts {
+                                    delete,
+                                    dry_run,
+                                    workspace,
+                                    force_rebind,
+                                    force,
+                                },
+                                &mut emit,
+                            )
+                            .await;
+                        }
+                        Err(e) => emit(format!("push failed: can't read cwd: {e}")),
+                    },
                     CloudSlash::Pull {
                         delete,
                         dry_run,
                         workspace,
                         force_rebind,
                         force,
-                    } => {
-                        let cwd = std::env::current_dir().unwrap_or_default();
-                        crate::cloud::cmd::pull_streaming(
-                            &cwd,
-                            None,
-                            cloud_cfg.as_ref(),
-                            crate::cloud::cmd::SyncOpts {
-                                delete,
-                                dry_run,
-                                workspace,
-                                force_rebind,
-                                force,
-                            },
-                            &mut emit,
-                        )
-                        .await;
-                    }
+                    } => match std::env::current_dir() {
+                        Ok(cwd) => {
+                            crate::cloud::cmd::pull_streaming(
+                                &cwd,
+                                None,
+                                cloud_cfg.as_ref(),
+                                crate::cloud::cmd::SyncOpts {
+                                    delete,
+                                    dry_run,
+                                    workspace,
+                                    force_rebind,
+                                    force,
+                                },
+                                &mut emit,
+                            )
+                            .await;
+                        }
+                        Err(e) => emit(format!("pull failed: can't read cwd: {e}")),
+                    },
                 }
             });
         }

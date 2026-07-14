@@ -240,27 +240,36 @@ pub struct ProductionAgentFactory {
     pub hooks: Option<Arc<crate::hooks::HooksConfig>>,
 }
 
-/// Pick the model a subagent runs under. Subagents reuse the parent's
-/// provider (built for `session_model`'s provider), and the model id is sent
-/// verbatim to that provider — it is NOT re-resolved to a fresh provider. So
-/// a pinned `model:` from a *different* provider would misroute (e.g. a
-/// subagent pinned to `claude-haiku-4-5` on a deepseek session lands on the
-/// deepseek endpoint → "model not found in catalog"). Honor the pin only when
-/// it resolves to the same provider kind as the session model; otherwise fall
-/// back to the user's current model, which is guaranteed to match the provider.
-fn subagent_model<'a>(pinned: Option<&'a str>, session_model: &'a str) -> &'a str {
-    match pinned {
-        Some(p) => {
-            let pinned_kind = crate::providers::ProviderKind::detect(p);
-            if pinned_kind.is_some()
-                && pinned_kind == crate::providers::ProviderKind::detect(session_model)
-            {
-                p
-            } else {
-                session_model
-            }
-        }
-        None => session_model,
+/// Pick the model a subagent runs under. An unpinned def inherits the session
+/// model. A pinned `model:` is HONORED whenever its provider is *usable* — the
+/// same provider as the session, OR it has its own BYOK key, OR the gateway is
+/// configured to route it — because `create_subagent` builds a matching
+/// provider for a cross-provider pin instead of blindly reusing the parent's
+/// (which would send e.g. `claude-haiku-4-5` to a deepseek endpoint → "model
+/// not found"). It falls back to the session model only when the pin can't be
+/// served at all, so an explicit choice degrades to "runs on the current
+/// model" rather than a hard 404. Keep this decision in lockstep with the
+/// provider build in `create_subagent` and the usage attribution below.
+fn subagent_model<'a>(
+    pinned: Option<&'a str>,
+    session_model: &'a str,
+    config: &crate::config::AppConfig,
+) -> &'a str {
+    let Some(p) = pinned else {
+        return session_model;
+    };
+    let Some(pk) = crate::providers::ProviderKind::detect(p) else {
+        // Unknown provider for this id — nothing can route it; keep session.
+        return session_model;
+    };
+    let same_provider = crate::providers::ProviderKind::detect(session_model) == Some(pk);
+    if same_provider
+        || pk.has_key_available()
+        || crate::providers::thclaws_gateway::for_kind(config, pk).is_some()
+    {
+        p
+    } else {
+        session_model
     }
 }
 
@@ -317,7 +326,32 @@ impl AgentFactory for ProductionAgentFactory {
                 snap.provider.clone(),
             )
         };
-        let model = subagent_model(agent_def.and_then(|d| d.model.as_deref()), &session_model);
+        // Resolve the subagent's model, then a provider that can serve it.
+        // Unpinned (and same-provider-pinned) subagents reuse the parent's
+        // provider. A cross-provider pin we choose to honor gets a
+        // freshly-built provider so the model id routes to its own endpoint;
+        // if that build unexpectedly fails we degrade to the session model on
+        // the parent provider rather than misrouting the pinned id.
+        let (model, provider): (String, Arc<dyn Provider>) =
+            match agent_def.and_then(|d| d.model.as_deref()) {
+                None => (session_model.clone(), provider),
+                Some(pin) => {
+                    let sub_config = crate::config::AppConfig::load().unwrap_or_default();
+                    let chosen = subagent_model(Some(pin), &session_model, &sub_config).to_string();
+                    let session_kind = crate::providers::ProviderKind::detect(&session_model);
+                    if crate::providers::ProviderKind::detect(&chosen) == session_kind {
+                        // same provider, or the pin fell back to the session model
+                        (chosen, provider)
+                    } else {
+                        let mut c = sub_config;
+                        c.model = chosen.clone();
+                        match crate::repl::build_provider(&c) {
+                            Ok(p) => (chosen, p),
+                            Err(_) => (session_model.clone(), provider),
+                        }
+                    }
+                }
+            };
 
         // System prompt: parent's full prompt + (optional) agent
         // instructions + (when nested) the subagent-mode addendum.
@@ -729,7 +763,14 @@ impl Tool for SubAgentTool {
             // same selection as the build path, so a cross-provider pin that
             // fell back to the session model is billed to what actually ran.
             let base_model = self.factory.base_model();
-            let eff_model = subagent_model(agent_def.and_then(|d| d.model.as_deref()), &base_model);
+            // Same selection as the build path (same config-driven usability
+            // check) so a cross-provider pin is billed to what actually ran.
+            let attr_config = crate::config::AppConfig::load().unwrap_or_default();
+            let eff_model = subagent_model(
+                agent_def.and_then(|d| d.model.as_deref()),
+                &base_model,
+                &attr_config,
+            );
             let provider = crate::providers::ProviderKind::detect(eff_model)
                 .map(|k| k.name())
                 .unwrap_or("unknown");
@@ -811,26 +852,52 @@ mod tests {
     }
 
     #[test]
-    fn subagent_model_falls_back_when_pin_is_a_different_provider() {
-        // Session on deepseek; subagent pins an Anthropic model. The shared
-        // provider is deepseek's, so honoring the pin would misroute — fall
-        // back to the session model instead.
+    fn subagent_model_honors_pin_only_when_provider_is_usable() {
+        use std::sync::Mutex;
+        // Serialise this test's env mutation (cargo runs lib tests in
+        // parallel), mirroring the gateway module's env-touching tests.
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("THCLAWS_DISABLE_KEYCHAIN", "1");
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        std::env::remove_var("THCLAWS_GATEWAY_API_KEY");
+
+        let empty = crate::config::AppConfig::default();
+
+        // Same provider as the session → honored regardless of creds.
         assert_eq!(
-            subagent_model(Some("claude-haiku-4-5"), "deepseek-v4-pro"),
-            "deepseek-v4-pro"
-        );
-        // Same provider as the session → the pin is honored.
-        assert_eq!(
-            subagent_model(Some("claude-haiku-4-5"), "claude-sonnet-4-6"),
+            subagent_model(Some("claude-haiku-4-5"), "claude-sonnet-4-6", &empty),
             "claude-haiku-4-5"
         );
         // No pin → session model.
-        assert_eq!(subagent_model(None, "deepseek-v4-pro"), "deepseek-v4-pro");
+        assert_eq!(
+            subagent_model(None, "deepseek-v4-pro", &empty),
+            "deepseek-v4-pro"
+        );
         // Unrecognized pin → session model (can't confirm it routes).
         assert_eq!(
-            subagent_model(Some("totally-unknown-model"), "gpt-5.5"),
+            subagent_model(Some("totally-unknown-model"), "gpt-5.5", &empty),
             "gpt-5.5"
         );
+        // Cross-provider pin with no BYOK key and no gateway route → falls back.
+        assert_eq!(
+            subagent_model(Some("claude-haiku-4-5"), "deepseek-v4-pro", &empty),
+            "deepseek-v4-pro"
+        );
+        // Cross-provider pin the GATEWAY is configured to route → honored,
+        // even on a deepseek session (create_subagent builds a matching
+        // provider). Access key present so the overlay resolves; native key
+        // absent so BYOK doesn't suppress the overlay.
+        std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw-test");
+        let mut routed = crate::config::AppConfig::default();
+        routed.gateway_use_for = vec!["anthropic".to_string()];
+        assert_eq!(
+            subagent_model(Some("claude-haiku-4-5"), "deepseek-v4-pro", &routed),
+            "claude-haiku-4-5"
+        );
+
+        std::env::remove_var("THCLAWS_GATEWAY_API_KEY");
+        std::env::remove_var("THCLAWS_DISABLE_KEYCHAIN");
     }
 
     struct ScriptedProvider {

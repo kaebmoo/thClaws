@@ -11135,14 +11135,22 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             }
                         }
                         CloudSlash::Push { delete, dry_run, workspace, force_rebind, force } => {
-                            let cwd = std::env::current_dir().unwrap_or_default();
-                            let opts = crate::cloud::cmd::SyncOpts { delete, dry_run, workspace, force_rebind, force };
-                            crate::cloud::cmd::push_streaming(&cwd, None, cloud_cfg.as_ref(), opts, &mut |line| println!("{line}")).await;
+                            match std::env::current_dir() {
+                                Ok(cwd) => {
+                                    let opts = crate::cloud::cmd::SyncOpts { delete, dry_run, workspace, force_rebind, force };
+                                    crate::cloud::cmd::push_streaming(&cwd, None, cloud_cfg.as_ref(), opts, &mut |line| println!("{line}")).await;
+                                }
+                                Err(e) => println!("push failed: can't read cwd: {e}"),
+                            }
                         }
                         CloudSlash::Pull { delete, dry_run, workspace, force_rebind, force } => {
-                            let cwd = std::env::current_dir().unwrap_or_default();
-                            let opts = crate::cloud::cmd::SyncOpts { delete, dry_run, workspace, force_rebind, force };
-                            crate::cloud::cmd::pull_streaming(&cwd, None, cloud_cfg.as_ref(), opts, &mut |line| println!("{line}")).await;
+                            match std::env::current_dir() {
+                                Ok(cwd) => {
+                                    let opts = crate::cloud::cmd::SyncOpts { delete, dry_run, workspace, force_rebind, force };
+                                    crate::cloud::cmd::pull_streaming(&cwd, None, cloud_cfg.as_ref(), opts, &mut |line| println!("{line}")).await;
+                                }
+                                Err(e) => println!("pull failed: can't read cwd: {e}"),
+                            }
                         }
                     }
                 }

@@ -1262,10 +1262,21 @@ fn parallel(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<Js
     let handle = tokio::runtime::Handle::try_current()
         .map_err(|_| js_error("workflow: no tokio runtime available for parallel spawn"))?;
     let cancel = workflow_cancel_clone();
-    let cap = std::thread::available_parallelism()
-        .map(|n| n.get().saturating_sub(2))
-        .unwrap_or(4)
-        .clamp(1, 16);
+    // Subagent fan-out is I/O-bound: every parallel future just awaits the
+    // gateway/LLM on the single `block_on` thread, so the ceiling is the
+    // gateway's tolerance, NOT local CPU. The old `cores-2` heuristic was a
+    // CPU-bound-work metric misapplied here — on a cpu-limited cloud runner
+    // (`available_parallelism()==1`) it collapsed to 1 and silently
+    // serialized every `thclaws.parallel` stage (searchers, synthesizers,
+    // reviewers all ran one-at-a-time). Use an I/O-appropriate fixed default,
+    // overridable via THCLAWS_WORKFLOW_PARALLELISM for gateways with tighter
+    // (or looser) concurrency budgets.
+    let cap = std::env::var("THCLAWS_WORKFLOW_PARALLELISM")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(8)
+        .clamp(1, 32);
     let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(cap));
 
     let results: Vec<Result<WorkerOut, String>> = handle.block_on(async move {
