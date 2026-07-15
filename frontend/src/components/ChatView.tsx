@@ -911,6 +911,31 @@ export function ChatView({ active, modalOpen }: Props) {
     if (active && !modalOpen) inputRef.current?.focus();
   }, [active, modalOpen]);
 
+  // Copy any selected page text (message bubbles, tool output, code, …) on
+  // Cmd/Ctrl+C. The desktop webview blocks navigator.clipboard, so route the
+  // selection through the IPC bridge (browser --serve mode uses the native
+  // clipboard). Textarea/input selections report empty via window.getSelection,
+  // so this never shadows normal input-field copy — only DOM text selections
+  // are intercepted. Scoped to the active tab so it doesn't fire over Terminal.
+  useEffect(() => {
+    if (!active) return;
+    const onCopyKey = (e: KeyboardEvent) => {
+      const isMac = navigator.platform.startsWith("Mac");
+      const mod = isMac ? e.metaKey : e.ctrlKey;
+      if (!mod || e.altKey || (e.key !== "c" && e.key !== "C")) return;
+      const sel = window.getSelection()?.toString() ?? "";
+      if (!sel) return; // no page selection → let the input / browser handle it
+      e.preventDefault();
+      if (typeof window !== "undefined" && !window.ipc && navigator.clipboard) {
+        navigator.clipboard.writeText(sel).catch(() => {});
+      } else {
+        send({ type: "clipboard_write", text: sel });
+      }
+    };
+    document.addEventListener("keydown", onCopyKey, true);
+    return () => document.removeEventListener("keydown", onCopyKey, true);
+  }, [active]);
+
   useEffect(() => {
     // Only follow new content if the user hasn't scrolled up to read.
     if (isAtBottomRef.current) {
