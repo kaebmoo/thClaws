@@ -1934,8 +1934,12 @@ fn parse_cloud_subcommand(args: &str) -> SlashCommand {
             let dry_run = has("--dry-run");
             let force_rebind = has("--force-rebind");
             // `--force` skips the divergence guard (overwrite the other end's
-            // newer changes). Distinct from `--force-rebind` (pairing check).
-            let force = has("--force");
+            // newer changes). `--force-rebind` bypasses the binding/identity
+            // check — and since deliberately re-pointing a folder at a
+            // workspace *is* an overwrite, it's a superset that implies
+            // `--force` too. Users reasonably expect `--force-rebind` to push
+            // (or pull) through in any case, including over divergence.
+            let force = has("--force") || force_rebind;
             // Target workspace: `--workspace <slug>` or the first positional
             // (non-flag) token, so `/cloud push <slug>` works without the flag.
             let workspace = toks
@@ -12314,6 +12318,54 @@ mod tests {
         assert_eq!(parse_slash("/quit"), Some(SlashCommand::Quit));
         assert_eq!(parse_slash("/q"), Some(SlashCommand::Quit));
         assert_eq!(parse_slash("/exit"), Some(SlashCommand::Quit));
+    }
+
+    #[test]
+    fn parse_slash_cloud_push_force_rebind_implies_force() {
+        // `--force-rebind` is a superset of `--force`: it must also skip the
+        // divergence guard so the push goes through in any case. Also tolerates
+        // an em-dash (—force-rebind) from smart-dash terminals/IMEs.
+        for input in [
+            "/cloud push nvidia-gpu --force-rebind",
+            "/cloud push nvidia-gpu —force-rebind",
+        ] {
+            match parse_slash(input) {
+                Some(SlashCommand::Cloud(CloudSlash::Push {
+                    force_rebind,
+                    force,
+                    ..
+                })) => {
+                    assert!(force_rebind, "force_rebind should be set for {input:?}");
+                    assert!(force, "force-rebind must imply force for {input:?}");
+                }
+                other => panic!("expected Cloud::Push for {input:?}, got {other:?}"),
+            }
+        }
+        // Plain push: neither flag.
+        match parse_slash("/cloud push nvidia-gpu") {
+            Some(SlashCommand::Cloud(CloudSlash::Push {
+                force,
+                force_rebind,
+                ..
+            })) => {
+                assert!(!force && !force_rebind);
+            }
+            other => panic!("expected Cloud::Push, got {other:?}"),
+        }
+        // Pull honours the same superset rule.
+        match parse_slash("/cloud pull nvidia-gpu --force-rebind") {
+            Some(SlashCommand::Cloud(CloudSlash::Pull {
+                force,
+                force_rebind,
+                ..
+            })) => {
+                assert!(
+                    force_rebind && force,
+                    "force-rebind must imply force on pull"
+                );
+            }
+            other => panic!("expected Cloud::Pull, got {other:?}"),
+        }
     }
 
     #[test]
