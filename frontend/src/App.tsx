@@ -39,6 +39,12 @@ import { ContextWarningBanner } from "./components/ContextWarningBanner";
 import { useEditingShortcuts } from "./hooks/useEditingShortcuts";
 import { send, subscribe } from "./hooks/useIPC";
 
+// SSO sign-in (Google / enterprise IdP) isn't wired to a usable feature yet,
+// so the desktop button is hidden until it does something — showing it now is
+// just noise. Flip to `true` to bring it back. (It stays hidden on cloud-hosted
+// workspaces regardless; the visitor is already authenticated upstream.)
+const SSO_SIGN_IN_ENABLED: boolean = false;
+
 type Tab = "terminal" | "chat" | "files" | "team" | "ui" | "shell" | "browser";
 
 // Fires `frontend_ready` once on mount. Mounted only after both
@@ -887,14 +893,14 @@ export default function App() {
         >
           <Maximize2 size={14} />
         </button>
-        {/* Hide the SSO Sign-in button on any cloud-hosted workspace
-            (gateway OR BYOK). The engine returns "hosted" from
-            secrets_backend_get whenever THCLAWS_WORKSPACE_ID (or
-            THCLAWS_GATEWAY_API_KEY) is set — the visitor is already
-            authenticated at the cloud-routing layer, so a second SSO
-            flow inside the workspace is just noise. Local desktop
-            installs keep the button. */}
-        {secretsBackend !== "hosted" && <LoginButton />}
+        {/* Sign-in button gated off via SSO_SIGN_IN_ENABLED until the SSO
+            feature is usable. When re-enabled it also stays hidden on any
+            cloud-hosted workspace (gateway OR BYOK): the engine returns
+            "hosted" from secrets_backend_get whenever THCLAWS_WORKSPACE_ID
+            (or THCLAWS_GATEWAY_API_KEY) is set, so the visitor is already
+            authenticated at the cloud-routing layer and a second SSO flow
+            inside the workspace is just noise. */}
+        {SSO_SIGN_IN_ENABLED && secretsBackend !== "hosted" && <LoginButton />}
       </div>
       )}
 
