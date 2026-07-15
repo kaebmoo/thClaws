@@ -481,6 +481,32 @@ thc-chat .thc-msg-system .thc-msg-body {
   font-size: 13px;
 }
 
+/* GFM tables rendered inside agent messages. Scrolls horizontally on narrow
+   shells instead of overflowing the bubble. */
+thc-chat .thc-md-table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 13px;
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+thc-chat .thc-md-table th,
+thc-chat .thc-md-table td {
+  border: 1px solid var(--border);
+  padding: 5px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+thc-chat .thc-md-table thead th {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+thc-chat .thc-md-table tbody tr:nth-child(even) td {
+  background: var(--bg-secondary);
+}
+
 /* Tool-call chip — grey + quiet, like the main app's inline tool row. */
 thc-chat .thc-chat-tool {
   align-self: flex-start;

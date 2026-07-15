@@ -526,6 +526,87 @@
     return out.join("\n");
   }
 
+  // GFM pipe tables → <table>. Lenient like the doc renderers' delimiter
+  // repair: a header row followed by a delimiter row (cells of :?-+:?) starts a
+  // table regardless of exact column-count match — rows are padded/truncated to
+  // the header width, so an LLM's miscounted delimiter still renders.
+  function chatTableCells(line) {
+    var t = line.trim();
+    if (t.charAt(0) === "|") t = t.slice(1);
+    if (t.charAt(t.length - 1) === "|") t = t.slice(0, -1);
+    return t.split("|").map(function (c) {
+      return c.trim();
+    });
+  }
+  function chatDelimRow(line) {
+    var t = line.trim();
+    if (t.indexOf("|") === -1 || t.indexOf("-") === -1) return false;
+    var cells = chatTableCells(line);
+    if (!cells.length) return false;
+    for (var i = 0; i < cells.length; i++) {
+      if (!/^:?-+:?$/.test(cells[i])) return false;
+    }
+    return true;
+  }
+  function chatCellAlign(cell) {
+    var l = cell.charAt(0) === ":";
+    var r = cell.charAt(cell.length - 1) === ":";
+    if (l && r) return "center";
+    if (r) return "right";
+    return "";
+  }
+  function chatGroupTable(src) {
+    var lines = src.split("\n");
+    var out = [];
+    var i = 0;
+    while (i < lines.length) {
+      var header = lines[i];
+      if (
+        header.indexOf("|") !== -1 &&
+        header.trim() !== "" &&
+        i + 1 < lines.length &&
+        chatDelimRow(lines[i + 1])
+      ) {
+        var head = chatTableCells(header);
+        var aligns = chatTableCells(lines[i + 1]).map(chatCellAlign);
+        var ncol = head.length;
+        var rows = [];
+        var j = i + 2;
+        while (
+          j < lines.length &&
+          lines[j].indexOf("|") !== -1 &&
+          lines[j].trim() !== "" &&
+          !chatDelimRow(lines[j])
+        ) {
+          rows.push(chatTableCells(lines[j]));
+          j++;
+        }
+        var style = function (c) {
+          return aligns[c] ? ' style="text-align:' + aligns[c] + '"' : "";
+        };
+        var html = '<table class="thc-md-table"><thead><tr>';
+        for (var h = 0; h < ncol; h++) {
+          html += "<th" + style(h) + ">" + (head[h] || "") + "</th>";
+        }
+        html += "</tr></thead><tbody>";
+        for (var r = 0; r < rows.length; r++) {
+          html += "<tr>";
+          for (var c = 0; c < ncol; c++) {
+            html += "<td" + style(c) + ">" + (rows[r][c] || "") + "</td>";
+          }
+          html += "</tr>";
+        }
+        html += "</tbody></table>";
+        out.push(html);
+        i = j;
+      } else {
+        out.push(header);
+        i++;
+      }
+    }
+    return out.join("\n");
+  }
+
   function chatMarkdown(src) {
     if (!src) return "";
     var codeBlocks = [];
@@ -548,12 +629,13 @@
     });
     src = chatGroupList(src, "^- (.+)$", "ul");
     src = chatGroupList(src, "^\\d+\\. (.+)$", "ol");
+    src = chatGroupTable(src);
     src = src
       .split(/\n{2,}/)
       .map(function (chunk) {
         var trimmed = chunk.trim();
         if (!trimmed) return "";
-        if (/^(<h\d|<ul|<ol|<pre|<p)/.test(trimmed)) return trimmed;
+        if (/^(<h\d|<ul|<ol|<pre|<p|<table)/.test(trimmed)) return trimmed;
         return "<p>" + trimmed.replace(/\n/g, "<br>") + "</p>";
       })
       .join("\n");
