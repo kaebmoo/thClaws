@@ -3,6 +3,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { send, subscribe } from "../hooks/useIPC";
+import { promptHistory, recordPrompt } from "../hooks/promptHistory";
 import { useTheme } from "../hooks/useTheme";
 import {
   SlashCommandPopup,
@@ -209,12 +210,11 @@ export function TerminalView({ active, modalOpen }: Props) {
     // Reset to true on chat_done (next prompt is rendered) and on
     // local submit (line erased, no prompt visible until next turn).
     let promptShowing = false;
-    // Prompt-history ring for Up/Down arrow recall (bash-style). The
-    // array grows on every successful submit; `historyIndex === -1`
-    // means "not navigating — lineBuffer is the user's own typing".
-    // Anything else is an index into `history`, oldest at 0, newest
-    // at `history.length - 1`.
-    const history: string[] = [];
+    // Prompt-history ring for Up/Down arrow recall (bash-style), shared with
+    // the Chat tab and persisted across restarts (see hooks/promptHistory).
+    // `historyIndex === -1` means "not navigating — lineBuffer is the user's
+    // own typing"; anything else indexes `history`, oldest 0, newest last.
+    const history = promptHistory();
     let historyIndex = -1;
     // Snapshot of whatever the user had been typing before they
     // started pressing Up, so Down past the newest entry restores it
@@ -299,21 +299,11 @@ export function TerminalView({ active, modalOpen }: Props) {
       if (promptShowing) redrawLine();
     };
 
-    // Record a successfully-submitted prompt in the recall ring.
-    // Skips exact duplicates of the most recent entry (Ctrl+↑ in bash
-    // etc. — no value in cycling through "ls ls ls"). Also resets the
-    // navigation cursor so the next Up arrow starts from the newest.
-    const HISTORY_MAX = 200;
+    // Record a successfully-submitted prompt in the shared recall ring
+    // (trim + consecutive-dup collapse + persistence live in recordPrompt),
+    // then reset the navigation cursor so the next Up starts from the newest.
     const pushHistory = (entry: string) => {
-      const trimmed = entry.trim();
-      if (trimmed.length === 0) return;
-      if (history.length > 0 && history[history.length - 1] === trimmed) {
-        historyIndex = -1;
-        savedDraft = "";
-        return;
-      }
-      history.push(trimmed);
-      if (history.length > HISTORY_MAX) history.shift();
+      recordPrompt(entry);
       historyIndex = -1;
       savedDraft = "";
     };

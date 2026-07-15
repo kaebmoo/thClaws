@@ -5,6 +5,7 @@ import rehypeHighlight from "rehype-highlight";
 import { resolveAssetSrc } from "../lib/fileAsset";
 import { Check, Copy, Paperclip } from "lucide-react";
 import { basePath, send, subscribe } from "../hooks/useIPC";
+import { promptHistory, recordPrompt } from "../hooks/promptHistory";
 import { useTheme } from "../hooks/useTheme";
 import { useVersion } from "../hooks/useVersion";
 import logoDark from "../assets/thClaws-logo-dark.png";
@@ -290,6 +291,11 @@ export function ChatView({ active, modalOpen }: Props) {
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  // Bash-style prompt-history recall (shared with the Terminal tab). -1 = not
+  // navigating (the textarea holds the user's own draft); otherwise an index
+  // into promptHistory(). savedDraft restores the draft on Down past the newest.
+  const histIndexRef = useRef(-1);
+  const savedDraftRef = useRef("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
   // IDs of drag-drop `file_upload` requests in flight, so the shared
@@ -941,6 +947,13 @@ export function ChatView({ active, modalOpen }: Props) {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const text = input.trim();
+    // Record every non-empty submission in the shared recall ring and reset
+    // navigation so the next Up starts from the newest entry.
+    if (text) {
+      recordPrompt(text);
+      histIndexRef.current = -1;
+      savedDraftRef.current = "";
+    }
     if (askPrompt) {
       if (!text) return;
       setInput("");
@@ -1074,6 +1087,49 @@ export function ChatView({ active, modalOpen }: Props) {
           if (cmd) acceptSlashCommand(cmd);
           return;
         }
+      }
+    }
+    // Prompt-history recall (bash-style Up/Down), shared with the Terminal tab.
+    // The slash popup owns the arrows when open (handled above, returns first).
+    // Entering history from a fresh draft needs the caret on the edge line so
+    // multi-line editing keeps working; once navigating, Up/Down always cycle.
+    if ((e.key === "ArrowUp" || e.key === "ArrowDown") && !e.nativeEvent.isComposing) {
+      const el = e.currentTarget;
+      const caret = el.selectionStart ?? input.length;
+      const navigating = histIndexRef.current !== -1;
+      const hist = promptHistory();
+      const caretToEnd = () =>
+        requestAnimationFrame(() => {
+          const t = inputRef.current;
+          if (t) t.selectionStart = t.selectionEnd = t.value.length;
+        });
+      if (e.key === "ArrowUp") {
+        const atFirstLine = !input.slice(0, caret).includes("\n");
+        if ((navigating || atFirstLine) && hist.length > 0) {
+          e.preventDefault();
+          if (histIndexRef.current === -1) {
+            savedDraftRef.current = input;
+            histIndexRef.current = hist.length - 1;
+          } else if (histIndexRef.current > 0) {
+            histIndexRef.current -= 1;
+          }
+          setInput(hist[histIndexRef.current]);
+          caretToEnd();
+          return;
+        }
+      } else if (navigating) {
+        // ArrowDown while navigating → newer entry, or restore the draft.
+        e.preventDefault();
+        if (histIndexRef.current < hist.length - 1) {
+          histIndexRef.current += 1;
+          setInput(hist[histIndexRef.current]);
+        } else {
+          histIndexRef.current = -1;
+          setInput(savedDraftRef.current);
+          savedDraftRef.current = "";
+        }
+        caretToEnd();
+        return;
       }
     }
     // Multi-line textarea behaviour:
@@ -1717,7 +1773,12 @@ export function ChatView({ active, modalOpen }: Props) {
           <textarea
             ref={inputRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value);
+              // User edited the line → leave history navigation (their text is
+              // the live draft again). Recall itself uses setInput, not onChange.
+              histIndexRef.current = -1;
+            }}
             onKeyDown={handleInputKeyDown}
             onPaste={onPaste}
             placeholder={inputPlaceholder}
