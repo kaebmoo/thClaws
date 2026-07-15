@@ -4313,6 +4313,27 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
                     .with_strip_model_prefix("atlascloud/"),
             ))
         }
+        ProviderKind::NineRouter => {
+            // 9router (github.com/decolua/9router) — self-hosted OpenAI-
+            // compatible router/gateway (default localhost:20128). Model ids
+            // use the `9router/<alias>/<model>` routing prefix locally; the
+            // `9router/` prefix is stripped before the request so 9router sees
+            // `<alias>/<model>` (e.g. `kr/claude-sonnet-4.5`), which its model
+            // resolver splits on the first `/`. BYOK — the user runs the
+            // instance and supplies NINEROUTER_API_KEY.
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "NINEROUTER_BASE_URL",
+                "http://localhost:20128/v1",
+                api_key,
+            );
+            Ok(Arc::new(
+                OpenAIProvider::new(key)
+                    .with_base_url(url)
+                    .with_strip_model_prefix("9router/"),
+            ))
+        }
         ProviderKind::TokenRouter => {
             // TokenRouter (tokenrouter.com) — OpenAI-compatible unified
             // gateway to 300+ models. Models use the
