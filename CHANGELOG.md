@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.96.0] — 2026-07-15
+
+New BYOK provider, catalogue additions, and fixes for bash cancellation and app layout.
+
+### Added
+- **Atlas Cloud: a new BYOK provider with an OpenAI-compatible API, surfaced as a managed key in Settings.**
+- **Catalogue: QwenCloud and ThaiLLM model lists are now included.**
+
+### Fixed
+- **Bash: a turn cancel now kills the in-flight process, not just its timeout.**
+- **UI: the app root is pinned to the viewport top and descendant scroll containers use `overflow-clip`, preventing the navbar from scrolling off-screen and inner scroll from shifting the app viewport.**
+
 ## [0.95.0] — 2026-07-15
 
 Research engine improvements, KMS graph toggle, and Files-tab context-menu actions.
