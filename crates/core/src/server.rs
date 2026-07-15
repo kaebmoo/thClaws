@@ -1476,8 +1476,18 @@ async fn handle_socket(socket: WebSocket, state: ServeState, shared: Arc<SharedS
             let sessions_dir = initial_session_roots
                 .as_ref()
                 .map(|r: &crate::multi_tenant::SessionRoots| r.sessions_dir.clone());
-            let payload = build_initial_state_payload(sessions_dir);
-            initial_dispatch(payload);
+            let payload = build_initial_state_payload(sessions_dir.clone());
+            let _ = initial_dispatch(payload);
+            // Hydrate a chat-first gui-shell (`<thc-chat>`) with the active
+            // session's transcript on (re)connect. The worker's input queue
+            // only drains between turns, so we read the session from disk
+            // here rather than asking the worker to re-emit — a browser
+            // reconnecting MID-run gets its history immediately instead of
+            // after the (possibly minutes-long) turn finishes. Targeted to
+            // THIS client; no broadcast, no worker involvement.
+            if let Some(hist) = build_gui_shell_history_payload(sessions_dir) {
+                let _ = initial_dispatch(hist);
+            }
         }),
         on_zoom: Arc::new(|_scale| {
             // Browser handles its own zoom (Cmd-+/-); no server-side
@@ -1709,6 +1719,35 @@ fn build_initial_state_payload(sessions_dir: Option<std::path::PathBuf>) -> Stri
         "version": crate::version::VERSION,
     })
     .to_string()
+}
+
+/// Build the `gui_shell_event`/`history` envelope for the active session so
+/// a reconnecting chat-first shell (`<thc-chat>`) repaints its transcript.
+///
+/// The "active" session is the most-recent non-empty one on disk — in
+/// serve single-tenant the running turn keeps saving it, so it IS the
+/// worker's current session. This mirrors the frontend's dev-plan/36
+/// "restore most-recent non-empty session" heuristic (App.tsx), just for
+/// the gui-shell path. Reads disk (not the turn-blocked worker queue), so
+/// it works even while a run is streaming — completed turns come from the
+/// file, the in-flight turn keeps streaming live over the same WS.
+/// `None` when there's no non-empty session (fresh workspace) so the
+/// shell's own intro/"Welcome" line stands.
+fn build_gui_shell_history_payload(sessions_dir: Option<std::path::PathBuf>) -> Option<String> {
+    let store = sessions_dir
+        .map(SessionStore::new)
+        .or_else(|| SessionStore::default_path().map(SessionStore::new))?;
+    let meta = store
+        .list()
+        .ok()?
+        .into_iter()
+        .find(|m| m.message_count > 0)?;
+    let session = store.load(&meta.id).ok()?;
+    let display = crate::shared_session::DisplayMessage::from_messages(&session.messages);
+    if display.is_empty() {
+        return None;
+    }
+    Some(crate::event_render::gui_shell_history_envelope(&display))
 }
 
 /// KMS list for the initial-state payload. Mirrors the structure

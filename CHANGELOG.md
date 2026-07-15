@@ -7,6 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.95.0] — 2026-07-15
+
+Research engine improvements, KMS graph toggle, and Files-tab context-menu actions.
+
+### Added
+- **KMS graph: a toggle hides orphan (uncited) source nodes from the graph view.**
+- **Files tab: "Translate" added to the context menu for `.md` files.**
+- **Files tab: "Summarize" added to the context menu for `.md` files.**
+- **GUI shell: the chat transcript is now restored when reconnecting to a chat-first shell.**
+- **Marketplace: Gmail MCP (community, ISC) added to the catalog.**
+- **Subagent: cross-provider model pins are now allowed when the pinned provider is usable.**
+
+### Fixed
+- **Research: the ## Sources linker for graph page→source edges is now deterministic.** The linking order previously varied between runs.
+- **Research: "auto" depth mode is now actually adaptive.** It honours the max_iter setting (6) instead of ignoring it and falling back to a non-adaptive strategy.
+- **Engine: `/cloud push` and `/cloud pull` now hard-error when the working directory is unreadable,** instead of failing silently.
+- **Session list: subagent session files are no longer listed as user sessions.**
+- **Workflow: the parallel fan-out cap is decoupled from the CPU core count.** It previously capped at the number of cores regardless of the intended concurrency.
+
+### Changed
+- **Research: worker roles (fetcher, source-archiver) now run in parallel instead of sequentially.**
+- **Research: worker roles are pinned to deepseek-v4-flash for better performance.**
+
+## [0.94.0] — 2026-07-13
+
+Plan-mode and KMS sidebar fixes.
+
+### Fixed
+- **Plan mode: the sidebar Approve button no longer disappears the first time you use `/plan` in a fresh workspace.** A startup session reload was resetting the permission mode from Plan back to the default and dropping the approval button before it could be clicked; the reset now only runs on a genuine session switch.
+- **KMS: the sidebar knowledge-base list repopulates after returning from a fullscreen GUI-shell tab.** It previously read "None yet" despite an active KMS because the one-shot list snapshot was missed when the sidebar remounted — it now re-requests the list on mount.
+
+## [0.93.0] — 2026-07-12
+
+The tutorial studio gains chapter rename, voice-over generation, a batch generate modal, and a Generate All button, alongside fixes for chapter numbering, slide insertion, slide-type locking, and paste fidelity.
+
+### Added
+- **Chapter rename via a hover pencil icon.** Clicking the pencil icon next to a chapter title opens an inline rename field, replacing the previous double-click gesture.
+- **Voice-over controls in the slide editor.** Each slide now exposes a voice-over panel with provider and voice selection, plus a generate button for producing spoken audio from the slide contents.
+- **Batch 'Generate Slides' modal replaces the split/combine workflow.** The new modal generates multiple slides in one pass and automatically skips slides that already have content, keeping bulk generation fast.
+- **Chapter pane 'Generate All' button for regenerating the entire deck.** A single button in the chapter pane regenerates every slide at once, replacing the three individual controls previously required.
+
+### Fixed
+- **Chapter number badge is 1-based, matching UI order.** Chapter numbering now starts at 1 in the UI badge instead of 0.
+- **+ button inserts a slide after the active slide, not at the end.** Clicking the add-slide button now places the new slide directly after the currently selected slide.
+- **Slide type is locked in the AI compose prompt.** The user-selected slide type is now included in the prompt sent to the AI, preventing the model from changing types during generation.
+- **Pasted slides carry their rendered assets.** Copying and pasting a slide now preserves all rendered images and assets, not just the text content.
+
+## [0.92.0] — 2026-07-12
+
+GUI shells gain isolated one-shot turns that keep generated output separate from the main conversation, and the tutorial studio ships fixes for slide generation, cloud access, file URL resolution, and video status display.
+
+### Added
+- **Isolated one-shot turns for GUI shells.** GUI shells can now request a turn that runs in an isolated context via `streamTurn isolated:true`, keeping generated output separate from the main conversation. The tutorial studio uses this for slide generation (`aiCompose`/`aiPrompt`).
+
+### Fixed
+- **Generate Slide persists a slide type change before rendering.** Changing a slide's type and then generating content now saves the type change first, so the generated output matches the new type instead of the old one.
+- **Tutorial studio serves as a webapp tab in cloud, not a standalone shell.** Cloud users can now open the tutorial studio as a webapp tab inside the main app, fixing access that previously required a separate shell window.
+- **GUI shell `fileUrl` resolves to HTTP in cloud webapp embeds.** File URLs in GUI shells now correctly resolve to HTTP when embedded in a cloud webapp, instead of the non-functional `thclaws://` protocol.
+- **Video status pill only appears when a slide has or makes a video.** The video status indicator no longer shows on slides without an existing or in-progress video.
+
+## [0.91.0] — 2026-07-12
+
+`/doctor` checks agent-declared dependencies from the manifest, the tutorial studio ships a redesigned editor with outline alignment, Generate Slide, and modern slide typography, cloud push/pull warns before overwriting diverged work and syncs the full workspace, and engine fixes land for `/reload`, provider error attribution, and stale model sources.
+
+### Added
+- **`/doctor` checks agent-declared dependencies from the manifest.** Agents can declare `requires.python` and `requires.system` in their catalog manifest; `/doctor` verifies those dependencies are installed and reports missing ones. The tutorial studio drops its agent-local doctor in favor of this engine-level check.
+- **Tutorial studio redesign: outline-aligned editor, Generate Slide, hideable Copilot, and modern slide typography.** The slide editor pane now aligns with the course outline, a Generate Slide action creates slides directly, the Copilot pane can be hidden on wide layouts, and slides render with Kanit + Sarabun fonts for a lighter, airier design. Pillow is preinstalled in cloud workspaces for slide rendering.
+- **`/cloud push` and `/cloud pull` warn before overwriting diverged work.** If local and remote workspaces have diverged, push and pull now show a warning before proceeding, preventing accidental data loss.
+
+### Fixed
+- **`/reload` restores the live window size, not the last-closed one.** The reload command now captures the current window dimensions instead of restoring whatever size the window had when it was last closed.
+- **`/cloud push` and `/cloud pull` sync the full workspace including state and sessions.** Push and pull previously missed the `state/` and `sessions/` directories; they now teleport the complete workspace.
+- **Error messages no longer incorrectly blame MCP when a model provider fails to build.** When the current model's provider cannot be constructed, the engine now reports the actual failure instead of attributing it to MCP.
+- **Engine no longer reads `~/.claude/settings.json` as a model source.** The user-global Claude settings file is no longer consulted for model configuration, preventing stale or unintended model overrides from leaking in.
+
+## [0.90.0] — 2026-07-11
+
+Admin panel gains per-user usage tracking, per-model cost breakdowns, and credit adjustment, sub-agents persist every run to a child session and skills can declare isolated execution, serve ships a job-runner mode, and cloud workspaces get shell and pre-auth fixes.
+
+### Added
+- **Admin panel: per-user usage, per-model cost breakdown, and credit adjustment.** The user management page now shows per-user usage totals, clicking Usage breaks down costs by model, and root users can adjust individual credit balances directly from the management UI.
+- **Sub-agent runs persist to child sessions.** Every sub-agent invocation now archives its full transcript to its own child session, so past runs are browsable and accountable instead of evaporating when the sub-agent exits. ([#3](https://github.com/thClaws/thClaws/issues/3))
+- **Isolated job-skills run in their own sub-agent.** Skills can declare `isolated: true` in SKILL.md frontmatter; the engine spawns a dedicated sub-agent to run them, keeping long-running jobs from polluting the parent session context.
+- **Job-runner mode for `thclaws serve`.** A new `--job-runner` flag resets the session per turn and writes outputs to archive-safe paths, so serve can act as a one-shot job executor without accumulating state across invocations. ([#1](https://github.com/thClaws/thClaws/issues/1))
+
+### Fixed
+- **Webapp IPC no longer drops messages during initial WebSocket connect.** Outbound IPC sends during the brief window between page load and WS handshake are now buffered and flushed on connect, preventing silent message loss on real-time views like the PTY Shell tab.
+- **Gateway pre-authorisation checks actual balance, not just non-zero.** Requests are now authorised against the available credit balance rather than a simple `>0` check, so users at exactly zero credits are correctly denied instead of slipping through.
+- **PTY Shell tab uses bash in cloud workspaces.** Cloud runner shells now default to `/bin/bash` instead of Debian's `/bin/sh` (dash), fixing compatibility with bash-isms in user commands.
+- **Cloud workspace seeds no longer pin the default model.** Gateway-provisioned workspaces no longer bake a pinned model into `settings.json`, so users see their actual default model instead of a stale seed value.
+
 ## [0.89.0] — 2026-07-10
 
 Tutorial Studio gets a NOTE-first /outline skill and deterministic slide rendering, the Business Agent ships as a new first-party offering, KMS ingest grows quality-of-life improvements, and search gains a real Google backend via SerpAPI alongside fine-grained tool-approval controls and a tool-loop breaker.

@@ -61,6 +61,15 @@ let wsSend: ((msg: IPCMessage) => void) | null = null;
 let reconnectDelayMs = 250;
 const RECONNECT_MAX_MS = 5000;
 
+// Messages sent while the socket is still CONNECTING, flushed on open.
+// Components that send on mount (ThemeProvider's `theme_get`, sidebar
+// fetches, …) race the initial WS handshake; without this buffer those
+// requests were silently dropped, so e.g. the persisted theme never
+// loaded on a page refresh. Only the initial-connect window buffers —
+// sends while disconnected still drop (reconnect re-syncs via the
+// `frontend_ready` snapshot instead).
+let wsConnectQueue: IPCMessage[] = [];
+
 /**
  * Path prefix the frontend lives under, with a trailing slash.
  *
@@ -98,6 +107,9 @@ function connectWs() {
     // `frontend_ready` arm calls `on_send_initial_state` which (today)
     // is a stub but will become the snapshot builder per SERVE9.
     wsSend!({ type: "frontend_ready" });
+    const queued = wsConnectQueue;
+    wsConnectQueue = [];
+    queued.forEach((m) => wsSend!(m));
   };
   ws.onmessage = (ev) => {
     try {
@@ -125,6 +137,8 @@ if (typeof window !== "undefined" && !window.ipc) {
   wsSend = (msg) => {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(msg));
+    } else if (ws && ws.readyState === WebSocket.CONNECTING) {
+      wsConnectQueue.push(msg);
     } else {
       console.warn("[ipc] ws not open, dropped:", msg);
     }

@@ -193,6 +193,7 @@ pub fn render_chat_dispatches(ev: &ViewEvent) -> Vec<String> {
         // function is called — see the early-return in
         // `gui::spawn_event_translator` / the equivalent web hook.
         ViewEvent::QuitRequested => vec![],
+        ViewEvent::ReloadRequested => vec![],
         ViewEvent::PlanUpdate(plan) => {
             let payload = serde_json::json!({
                 "type": "chat_plan_update",
@@ -392,8 +393,32 @@ pub fn render_gui_shell_dispatch(ev: &ViewEvent) -> Option<String> {
             })
             .to_string(),
         ),
+        // Session (re)load / switch: ship the whole transcript so a
+        // chat-first shell (`<thc-chat>`) can repaint its history — the
+        // reconnect case a browser hits after detaching from a running
+        // run. Without this arm HistoryReplaced fell through to `None`
+        // and Mode B shells never saw prior turns.
+        ViewEvent::HistoryReplaced(messages) => Some(gui_shell_history_envelope(messages)),
         _ => None,
     }
+}
+
+/// One `gui_shell_event` envelope carrying a full transcript snapshot as
+/// `{event:"history", payload:{messages:[{role,content}]}}`. Shared by the
+/// `HistoryReplaced` dispatch arm above and the serve-mode reconnect
+/// hydration (server.rs), so both emit the identical shape a shell's
+/// `on("history")` handler consumes.
+pub fn gui_shell_history_envelope(messages: &[crate::shared_session::DisplayMessage]) -> String {
+    let msgs: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|m| serde_json::json!({ "role": m.role, "content": strip_ansi(&m.content) }))
+        .collect();
+    serde_json::json!({
+        "type": "gui_shell_event",
+        "event": "history",
+        "payload": { "messages": msgs },
+    })
+    .to_string()
 }
 
 // ── ANSI strip ─────────────────────────────────────────────────────
@@ -645,6 +670,7 @@ pub fn render_terminal_ansi(state: &mut TerminalRenderState, ev: &ViewEvent) -> 
         )),
         ViewEvent::McpAppCallToolResult { .. } => None,
         ViewEvent::QuitRequested => None,
+        ViewEvent::ReloadRequested => None,
         ViewEvent::PlanUpdate(_) => None,
         ViewEvent::TodoUpdate(_) => None,
         ViewEvent::SkillModelNote(text) => Some(format!("\r\n\x1b[2;3m{text}\x1b[0m\r\n")),
@@ -874,5 +900,31 @@ mod chat_render_tests {
             !stripped.contains("\r\n\r\n> first prompt"),
             "first user prompt should not have a leading blank line; got: {stripped:?}"
         );
+    }
+
+    #[test]
+    fn history_replaced_emits_gui_shell_history_event() {
+        use crate::shared_session::DisplayMessage;
+        let msgs = vec![
+            DisplayMessage {
+                role: "user".into(),
+                content: "research \x1b[1mGPUs\x1b[0m".into(),
+            },
+            DisplayMessage {
+                role: "assistant".into(),
+                content: "done".into(),
+            },
+        ];
+        let out = render_gui_shell_dispatch(&ViewEvent::HistoryReplaced(msgs))
+            .expect("HistoryReplaced should produce a gui_shell_event");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["type"], "gui_shell_event");
+        assert_eq!(v["event"], "history");
+        let m = &v["payload"]["messages"];
+        assert_eq!(m.as_array().unwrap().len(), 2);
+        assert_eq!(m[0]["role"], "user");
+        // ANSI stripped from restored content.
+        assert_eq!(m[0]["content"], "research GPUs");
+        assert_eq!(m[1]["role"], "assistant");
     }
 }

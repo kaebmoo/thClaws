@@ -2,8 +2,13 @@
 //! `/cloud push|pull` round-trip between the desktop app and a hosted cloud
 //! workspace.
 //!
-//! Reuses [`crate::cloud::pack::is_strippable`] for the exclude set (drops
-//! `.thclaws/sessions/`, usage, team, …) and adds the sync-specific pieces:
+//! Unlike catalog publish (`pack::is_strippable`), `/cloud push|pull` is a
+//! FULL directory teleport: the working tree AND all runtime state under
+//! `.thclaws/state/` (sessions, kms, browser profile, workflow run-state, …)
+//! ride along so work resumes on the other end mid-session. The ONLY things
+//! dropped are regenerable, machine/arch-specific build dirs that would
+//! corrupt the destination or waste the payload (`node_modules/`, `target/`,
+//! `.venv/`, …) — see [`SYNC_STRIP_DIRS`]. Sync-specific pieces:
 //!   - a 250 MB payload cap (`MAX_SYNC_BYTES`),
 //!   - `--delete` mirroring that moves removed files to `.sync-trash/<ts>/`
 //!     (recoverable, not a hard delete),
@@ -14,7 +19,6 @@
 //! v1 is whole-tarball (`.tar.gz`, matching `pack.rs`); the incremental
 //! manifest-diff path layers on top in P2.
 
-use crate::cloud::pack::is_strippable;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -30,6 +34,17 @@ const BINDING_REL: &str = ".thclaws/cloud-sync.json";
 const SETTINGS_REL: &str = ".thclaws/settings.json";
 const SYNCIGNORE_REL: &str = ".thclaws/syncignore";
 const TRASH_PREFIX: &str = ".sync-trash";
+/// Local-only divergence watermark: the content fingerprint of the last
+/// SUCCESSFUL sync. Excluded from the payload (never travels — each side keeps
+/// its own), so a peer's tarball can't clobber it. Used to warn before a
+/// push/pull overwrites work the other end did since that agreed state.
+const SYNC_BASE_REL: &str = ".thclaws/cloud-sync-base.json";
+
+/// Paths kept OUT of the divergence fingerprint: the sync plumbing itself
+/// differs per-end by design (binding carries per-folder timestamps; settings
+/// gets the gateway overlay injected on cloud), so hashing them would read as
+/// "always diverged". Real work (sources, sessions, state) still counts.
+const FINGERPRINT_SKIP: &[&str] = &[BINDING_REL, SETTINGS_REL, SYNCIGNORE_REL, SYNC_BASE_REL];
 
 /// Records which hosted workspace a folder is paired with. Lives at
 /// `.thclaws/cloud-sync.json` on both ends (dev-plan/51 decision #5).
@@ -64,11 +79,40 @@ fn norm(rel: &Path) -> String {
     rel.to_string_lossy().replace('\\', "/")
 }
 
-/// Inside the sync exclude set? Runtime artifacts (via `is_strippable`) plus the
-/// `.sync-trash/` tree itself (never sync the trash).
+/// Regenerable, machine/arch-specific dirs that must NEVER ride a workspace
+/// teleport: they're rebuilt on demand and are platform-bound, so shipping a
+/// macOS `target/` or a `.venv/` with absolute interpreter paths onto a Linux
+/// runner (or vice-versa) corrupts the destination — and they dwarf the real
+/// work in size. Matched as a path SEGMENT anywhere in the tree (not just at
+/// root), so a monorepo's `frontend/node_modules/` is dropped too. Everything
+/// NOT in this list teleports verbatim — sessions/state, `.git/`, secrets —
+/// which is the whole point of push|pull vs. a catalog publish.
+pub const SYNC_STRIP_DIRS: &[&str] = &[
+    "node_modules",
+    "target",
+    ".venv",
+    "__pycache__",
+    ".next",
+    "dist",
+    "build",
+];
+
+fn in_stripped_dir(rel: &Path) -> bool {
+    rel.components().any(|c| {
+        matches!(c, Component::Normal(seg)
+            if seg.to_str().is_some_and(|s| SYNC_STRIP_DIRS.contains(&s)))
+    })
+}
+
+/// Inside the sync exclude set? Only the regenerable build dirs
+/// ([`SYNC_STRIP_DIRS`]) plus the `.sync-trash/` tree itself (never sync the
+/// trash). NOT `pack::is_strippable` — push|pull keeps runtime state.
 fn excluded(rel: &Path) -> bool {
     let s = norm(rel);
-    s == TRASH_PREFIX || s.starts_with(&format!("{TRASH_PREFIX}/")) || is_strippable(rel)
+    s == SYNC_BASE_REL
+        || s == TRASH_PREFIX
+        || s.starts_with(&format!("{TRASH_PREFIX}/"))
+        || in_stripped_dir(rel)
 }
 
 /// Collect files relative to `root`. `keep` decides inclusion; symlinks are
@@ -405,6 +449,59 @@ pub fn diff(src: &[FileEntry], dst: &[FileEntry]) -> (Vec<String>, Vec<String>) 
     (transfer, extraneous)
 }
 
+/// Order-independent content fingerprint of a manifest, over the real work
+/// only (plumbing in [`FINGERPRINT_SKIP`] excluded). Two sides that hold the
+/// same content produce the same fingerprint regardless of their per-end
+/// binding/settings — the basis of the divergence check.
+pub fn manifest_fingerprint(entries: &[FileEntry]) -> String {
+    let mut parts: Vec<String> = entries
+        .iter()
+        .filter(|e| !FINGERPRINT_SKIP.contains(&e.path.as_str()))
+        .map(|e| format!("{}\0{}", e.path, e.sha256))
+        .collect();
+    parts.sort();
+    sha256_hex(parts.join("\n").as_bytes())
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct SyncBase {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    base: Option<String>,
+}
+
+/// The content fingerprint recorded at the last successful sync (the agreed
+/// state), or `None` if this folder has never completed one.
+pub fn read_sync_base(root: &Path) -> Option<String> {
+    std::fs::read(root.join(SYNC_BASE_REL))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<SyncBase>(&b).ok())
+        .and_then(|s| s.base)
+}
+
+/// Record the agreed-state fingerprint after a successful sync. Excluded from
+/// the payload, so it stays local to this end.
+pub fn write_sync_base(root: &Path, fingerprint: &str) -> Result<(), String> {
+    let path = root.join(SYNC_BASE_REL);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
+    }
+    let body = serde_json::to_vec(&SyncBase {
+        base: Some(fingerprint.to_string()),
+    })
+    .map_err(|e| format!("encode base: {}", e))?;
+    std::fs::write(&path, body).map_err(|e| format!("write base: {}", e))
+}
+
+/// Has `manifest` drifted from the recorded agreed state? `false` when there
+/// is no base yet (first sync — nothing to clobber). Content-only, so it never
+/// fires on the per-end plumbing differences and needs no clocks.
+pub fn diverged_from_base(root: &Path, manifest: &[FileEntry]) -> bool {
+    match read_sync_base(root) {
+        Some(base) => manifest_fingerprint(manifest) != base,
+        None => false,
+    }
+}
+
 /// Tar+gzip a specific list of relative paths (incremental push body / pull
 /// export). Skips missing or unsafe paths. Enforces `MAX_SYNC_BYTES`.
 pub fn tar_paths(root: &Path, paths: &[String]) -> Result<Vec<u8>, String> {
@@ -492,19 +589,25 @@ mod tests {
         write(&src, "a.txt", "hello");
         write(&src, "sub/b.md", "world");
         write(&src, ".thclaws/settings.json", "{}");
-        write(&src, ".thclaws/state/sessions/x.jsonl", "RUNTIME"); // stripped
+        write(&src, ".thclaws/state/sessions/x.jsonl", "SESSION"); // teleported now
+        write(&src, "node_modules/pkg/i.js", "js"); // stripped (regenerable)
         let bytes = tar_workspace(&src, false).unwrap();
         let dst = tmp("dst");
         let r = untar_workspace(&bytes, &dst, false).unwrap();
-        assert_eq!(r.written, 3); // a.txt, sub/b.md, settings.json
+        assert_eq!(r.written, 4); // a.txt, sub/b.md, settings.json, state/sessions/x.jsonl
         assert_eq!(std::fs::read_to_string(dst.join("a.txt")).unwrap(), "hello");
         assert_eq!(
             std::fs::read_to_string(dst.join("sub/b.md")).unwrap(),
             "world"
         );
+        assert_eq!(
+            std::fs::read_to_string(dst.join(".thclaws/state/sessions/x.jsonl")).unwrap(),
+            "SESSION",
+            "runtime state must teleport with push|pull"
+        );
         assert!(
-            !dst.join(".thclaws/state/sessions/x.jsonl").exists(),
-            "runtime must be stripped"
+            !dst.join("node_modules/pkg/i.js").exists(),
+            "regenerable build dirs must be stripped"
         );
     }
 
@@ -655,6 +758,68 @@ mod tests {
             .map(|r| norm(r))
             .collect();
         assert!(files.contains(&"bigdata2.txt".to_string()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn divergence_tracks_content_not_plumbing() {
+        let root = tmp("diverge");
+        write(&root, "src/main.rs", "fn main(){}");
+        write(&root, ".thclaws/state/sessions/s.jsonl", "turn1");
+        write(&root, ".thclaws/settings.json", "{}");
+        // No base yet → first sync, nothing to clobber.
+        let m0 = build_manifest(&root).unwrap();
+        assert!(!diverged_from_base(&root, &m0));
+        // Record the agreed state.
+        write_sync_base(&root, &manifest_fingerprint(&m0)).unwrap();
+        assert!(!diverged_from_base(&root, &build_manifest(&root).unwrap()));
+        // Plumbing churn (settings + the moving binding) must NOT read as drift.
+        write(&root, ".thclaws/settings.json", "{\"gatewayProxy\":true}");
+        write(&root, ".thclaws/cloud-sync.json", "{\"last_push\":\"999\"}");
+        assert!(
+            !diverged_from_base(&root, &build_manifest(&root).unwrap()),
+            "per-end plumbing must not count as divergence"
+        );
+        // Real work does.
+        write(&root, ".thclaws/state/sessions/s.jsonl", "turn2");
+        assert!(
+            diverged_from_base(&root, &build_manifest(&root).unwrap()),
+            "a changed session must read as divergence"
+        );
+        // The base file itself never travels.
+        assert!(excluded(Path::new(".thclaws/cloud-sync-base.json")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sync_teleports_state_and_sessions_but_not_build_dirs() {
+        let root = tmp("teleport");
+        write(&root, "src/main.rs", "fn main(){}");
+        write(&root, ".env", "SECRET=1");
+        // Runtime state — the reported bug: sessions moved under state/ and
+        // were being stripped. A teleport must carry all of it.
+        write(&root, ".thclaws/state/sessions/s1.json", "{}");
+        write(&root, ".thclaws/state/kms/key", "k");
+        // Regenerable / arch-specific — never ride, incl. a NESTED node_modules.
+        write(&root, "node_modules/pkg/index.js", "js");
+        write(&root, "frontend/node_modules/x.js", "js");
+        write(&root, "target/debug/app", "bin");
+        write(&root, "__pycache__/m.pyc", "x");
+        let files: Vec<String> = walk_synced(&root)
+            .unwrap()
+            .iter()
+            .map(|r| norm(r))
+            .collect();
+        assert!(files.contains(&".thclaws/state/sessions/s1.json".to_string()));
+        assert!(files.contains(&".thclaws/state/kms/key".to_string()));
+        assert!(files.contains(&".env".to_string()));
+        assert!(files.contains(&"src/main.rs".to_string()));
+        assert!(
+            !files.iter().any(|f| f.contains("node_modules")),
+            "nested/root node_modules dropped"
+        );
+        assert!(!files.iter().any(|f| f.starts_with("target/")));
+        assert!(!files.iter().any(|f| f.contains("__pycache__")));
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -834,6 +834,10 @@ pub struct SyncOpts {
     pub dry_run: bool,
     pub workspace: Option<String>,
     pub force_rebind: bool,
+    /// Skip the divergence guard — overwrite the other end even though it has
+    /// changed since the last sync (the clobbered files still land in
+    /// `.sync-trash/`).
+    pub force: bool,
 }
 
 /// Push, streaming each progress line to `emit` the moment it is produced.
@@ -969,7 +973,20 @@ async fn sync_inner(
             ));
         }
         // P2: incremental when the runner exposes a manifest; else full tarball.
-        match client.ws_sync_manifest(&ws.url, &jwt).await? {
+        let remote_manifest = client.ws_sync_manifest(&ws.url, &jwt).await?;
+        // Divergence guard: refuse to clobber work the cloud did since the last
+        // sync. Best-effort — only checkable when the runner exposes a manifest.
+        if !opts.force {
+            if let Some(remote) = &remote_manifest {
+                if wssync::diverged_from_base(cwd, remote) {
+                    return Err(format!(
+                        "'{}' has changes since your last sync — pushing would overwrite them (recoverable in .sync-trash). Pull first to reconcile, or re-run with --force.",
+                        ws.slug
+                    ));
+                }
+            }
+        }
+        match remote_manifest {
             Some(remote) => {
                 let local = wssync::build_manifest(cwd)?;
                 let (upload, extraneous) = wssync::diff(&local, &remote);
@@ -1056,9 +1073,18 @@ async fn sync_inner(
                 ws.slug, bound_note
             ));
         }
+        // Divergence guard: refuse to clobber local work done since the last
+        // sync. `local_manifest` is reused by the incremental branch below.
+        let local_manifest = wssync::build_manifest(cwd)?;
+        if !opts.force && wssync::diverged_from_base(cwd, &local_manifest) {
+            return Err(format!(
+                "this folder has changes since your last sync — pulling '{}' would overwrite them (recoverable in .sync-trash). Push first to reconcile, or re-run with --force.",
+                ws.slug
+            ));
+        }
         match client.ws_sync_manifest(&ws.url, &jwt).await? {
             Some(remote) => {
-                let local = wssync::build_manifest(cwd)?;
+                let local = local_manifest;
                 let (download, extraneous) = wssync::diff(&remote, &local);
                 if opts.dry_run {
                     emit(format!(
@@ -1130,6 +1156,12 @@ async fn sync_inner(
                 ));
             }
         }
+    }
+    // Record the now-agreed content state so the NEXT sync can tell whether
+    // either end drifted. Best-effort — a watermark failure must not fail the
+    // sync itself. (dry-run paths already returned above.)
+    if let Ok(m) = wssync::build_manifest(cwd) {
+        let _ = wssync::write_sync_base(cwd, &wssync::manifest_fingerprint(&m));
     }
     Ok(())
 }

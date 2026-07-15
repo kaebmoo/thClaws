@@ -248,6 +248,13 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
     // it would show blank (or, pre-fix, a wrong hardcoded default) until
     // the periodic 5 s config_poll fires. Ask for it immediately.
     send({ type: "config_poll" });
+    // And the KMS list: `initial_state.kmss` is a one-shot fired at WS
+    // connect, but the Sidebar unmounts in a fullscreen gui-shell tab
+    // (e.g. research-console pinned via guiShell.tabDefault) and remounts
+    // after it, missing that snapshot — the KMS section then rendered
+    // "None yet" even with an active KMS on disk. `kms_list` replies with
+    // a `kms_update` the subscriber above renders, so it self-heals.
+    send({ type: "kms_list" });
     return unsub;
   }, []);
 

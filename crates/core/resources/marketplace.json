@@ -46,6 +46,23 @@
       "install_url": "https://github.com/thClaws/marketplace.git#main:mcp/weather-mcp",
       "post_install_message": "Requires `uv` (one-time: `pip install uv` or `brew install uv`). First invocation downloads the package and dependencies into an isolated env automatically — no separate pip install needed.",
       "homepage": "https://github.com/thClaws/marketplace/tree/main/mcp/weather-mcp"
+    },
+    {
+      "name": "gmail",
+      "short_description": "Gmail — read, search, and send email via your Google account",
+      "description": "Gmail MCP server — read, search, label, and send email from a Google account. Community project (gongrzhe) with an automatic OAuth flow. Desktop-oriented: the one-time browser authorization does not run inside cloud workspace pods.",
+      "category": "productivity",
+      "license": "ISC",
+      "license_tier": "open",
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@gongrzhe/server-gmail-autoauth-mcp@1.1.11"
+      ],
+      "install_url": "https://www.npmjs.com/package/@gongrzhe/server-gmail-autoauth-mcp",
+      "post_install_message": "One-time Google OAuth setup: create a Desktop OAuth client in Google Cloud (enable the Gmail API), save it to ~/.gmail-mcp/gcp-oauth.keys.json, then run `npx @gongrzhe/server-gmail-autoauth-mcp auth` once to authorize. Desktop only — the browser auth flow does not work inside cloud workspace pods.",
+      "homepage": "https://github.com/gongrzhe/server-gmail-autoauth-mcp"
     }
   ],
   "plugins": [

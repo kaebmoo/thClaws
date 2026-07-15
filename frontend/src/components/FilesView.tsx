@@ -13,6 +13,8 @@ import {
   Download,
   Trash2,
   Library,
+  Languages,
+  FileText,
 } from "lucide-react";
 import { send, subscribe } from "../hooks/useIPC";
 import { assetUrl, workspacePrefix } from "../lib/assetUrl";
@@ -20,6 +22,25 @@ import { useTheme } from "../hooks/useTheme";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { CodeEditor } from "./CodeEditor";
 import { EpubViewer } from "./EpubViewer";
+
+// Target languages for the Files-tab "Translate" action. `code` becomes the
+// `<stem>-<code>.md` filename suffix; `label` is what the combobox shows.
+const TRANSLATE_LANGUAGES: ReadonlyArray<{ code: string; label: string }> = [
+  { code: "th", label: "Thai (ไทย)" },
+  { code: "en", label: "English" },
+  { code: "zh", label: "Chinese (中文)" },
+  { code: "ja", label: "Japanese (日本語)" },
+  { code: "ko", label: "Korean (한국어)" },
+  { code: "es", label: "Spanish (Español)" },
+  { code: "fr", label: "French (Français)" },
+  { code: "de", label: "German (Deutsch)" },
+  { code: "pt", label: "Portuguese (Português)" },
+  { code: "vi", label: "Vietnamese (Tiếng Việt)" },
+  { code: "id", label: "Indonesian (Bahasa)" },
+  { code: "hi", label: "Hindi (हिन्दी)" },
+  { code: "ar", label: "Arabic (العربية)" },
+  { code: "ru", label: "Russian (Русский)" },
+];
 
 // Confirmation dialog with two backends.
 //
@@ -254,6 +275,15 @@ export function FilesView({ active }: Props) {
   const [renameName, setRenameName] = useState("");
   const [renameError, setRenameError] = useState<string | null>(null);
   const [renaming, setRenaming] = useState(false);
+  // Language-action modal (markdown only): translate or summarize into a
+  // chosen language. null = closed; otherwise the .md file + which action.
+  // `langCode` is the selected target language code.
+  const [langAction, setLangAction] = useState<{
+    mode: "translate" | "summarize";
+    path: string;
+    name: string;
+  } | null>(null);
+  const [langCode, setLangCode] = useState("th");
   const { resolved: themeMode } = useTheme();
 
   // The file being displayed. `content` is what the backend returned —
@@ -508,6 +538,49 @@ export function FilesView({ active }: Props) {
       send({ type: "kms_ingest", id: reqId, path, kms: kmsName, force });
     },
     [],
+  );
+
+  // Translate OR summarize a .md file into the chosen language, saved beside
+  // the original as `<stem>-<code>.md` (translate) or `<stem>-<code>-sum.md`
+  // (summarize). Like "Add to KMS", we hand an explicit prompt to the main
+  // agent as a chat turn (it has Read + Write) rather than block the UI on a
+  // bespoke IPC. We route to the purpose-built `translator` / `summarizer`
+  // built-in subagents via `/agent <name>` (side channel): they carry
+  // Read+Write+Edit with permissionMode:auto, understand `--language=<code>`,
+  // and — crucially — run INDEPENDENT of the main session, so a translation
+  // doesn't bloat (or block behind) the main agent's conversation. We pass an
+  // explicit output path so the written file matches the modal's preview
+  // regardless of each subagent's own default suffix. Progress surfaces on the
+  // Chat tab's side-channel indicator; the new file lands in the tree.
+  const submitLangAction = useCallback(
+    (e: React.FormEvent) => {
+      e.preventDefault();
+      if (!langAction) return;
+      const { mode, path, name } = langAction;
+      const lang =
+        TRANSLATE_LANGUAGES.find((l) => l.code === langCode) ??
+        TRANSLATE_LANGUAGES[0];
+      const slash = path.lastIndexOf("/");
+      const dir = slash >= 0 ? path.slice(0, slash) : "";
+      const stem = name.replace(/\.(md|markdown)$/i, "");
+      const suffix = mode === "summarize" ? `-${lang.code}-sum` : `-${lang.code}`;
+      const outPath = `${dir ? `${dir}/` : ""}${stem}${suffix}.md`;
+      const prompt =
+        mode === "summarize"
+          ? `/agent summarizer --language=${lang.code} Summarize the file ` +
+            `\`${path}\` and write the ${lang.label} summary to \`${outPath}\`. ` +
+            `Do not modify the original.`
+          : `/agent translator --language=${lang.code} Translate the file ` +
+            `\`${path}\` into ${lang.label} and write the result to \`${outPath}\`. ` +
+            `Do not modify the original.`;
+      send({ type: "shell_input", text: prompt });
+      setSaveToast(
+        `${mode === "summarize" ? "summarizing" : "translating"} ${name} → ${lang.code}…`,
+      );
+      setTimeout(() => setSaveToast(null), 3500);
+      setLangAction(null);
+    },
+    [langAction, langCode],
   );
 
   // Delete a file or folder from the tree context menu. Confirms first
@@ -1388,6 +1461,32 @@ export function FilesView({ active }: Props) {
                   ))}
               </>
             )}
+            {/* Markdown-only: translate or summarize into a chosen language,
+                saved as a `<stem>-<code>.md` / `<stem>-<code>-sum.md` sibling. */}
+            {!entryMenu.isDir && /\.(md|markdown)$/i.test(entryMenu.name) && (
+              <>
+                <MenuItem
+                  icon={<Languages size={13} />}
+                  label="Translate…"
+                  onClick={() => {
+                    const m = entryMenu;
+                    setEntryMenu(null);
+                    setLangCode("th");
+                    setLangAction({ mode: "translate", path: m.path, name: m.name });
+                  }}
+                />
+                <MenuItem
+                  icon={<FileText size={13} />}
+                  label="Summarize…"
+                  onClick={() => {
+                    const m = entryMenu;
+                    setEntryMenu(null);
+                    setLangCode("th");
+                    setLangAction({ mode: "summarize", path: m.path, name: m.name });
+                  }}
+                />
+              </>
+            )}
             <MenuItem
               icon={<Pencil size={13} />}
               label="Rename"
@@ -1598,6 +1697,102 @@ export function FilesView({ active }: Props) {
                 }}
               >
                 {renaming ? "Renaming…" : "Rename"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {langAction && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center"
+          style={{ background: "var(--modal-backdrop, rgba(0,0,0,0.55))" }}
+          onClick={() => setLangAction(null)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setLangAction(null);
+          }}
+        >
+          <form
+            className="rounded-lg border shadow-xl w-[420px] max-w-[92vw]"
+            style={{
+              background: "var(--bg-primary)",
+              borderColor: "var(--border)",
+              color: "var(--text-primary)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={submitLangAction}
+          >
+            <div
+              className="px-4 py-2 border-b text-sm font-semibold flex items-center gap-2"
+              style={{ borderColor: "var(--border)" }}
+            >
+              {langAction.mode === "summarize" ? (
+                <FileText size={14} style={{ color: "var(--accent)" }} />
+              ) : (
+                <Languages size={14} style={{ color: "var(--accent)" }} />
+              )}
+              <span>
+                {langAction.mode === "summarize" ? "Summarize" : "Translate"} file
+              </span>
+            </div>
+            <div className="px-4 py-3 space-y-3 text-xs">
+              <div style={{ color: "var(--text-secondary)" }}>
+                {langAction.mode === "summarize" ? "Summarize" : "Translate"}{" "}
+                <span className="font-mono" style={{ color: "var(--text-primary)" }}>
+                  {langAction.name}
+                </span>{" "}
+                {langAction.mode === "summarize" ? "in:" : "into:"}
+              </div>
+              <select
+                autoFocus
+                value={langCode}
+                onChange={(e) => setLangCode(e.target.value)}
+                className="w-full px-2 py-1.5 rounded border text-xs"
+                style={{
+                  background: "var(--bg-secondary)",
+                  borderColor: "var(--border)",
+                  color: "var(--text-primary)",
+                }}
+              >
+                {TRANSLATE_LANGUAGES.map((l) => (
+                  <option key={l.code} value={l.code}>
+                    {l.label}
+                  </option>
+                ))}
+              </select>
+              <div style={{ color: "var(--text-secondary)" }}>
+                Saves to{" "}
+                <span className="font-mono" style={{ color: "var(--text-primary)" }}>
+                  {langAction.name.replace(/\.(md|markdown)$/i, "")}-{langCode}
+                  {langAction.mode === "summarize" ? "-sum" : ""}.md
+                </span>
+              </div>
+            </div>
+            <div
+              className="px-4 py-2.5 border-t flex justify-end gap-2"
+              style={{ borderColor: "var(--border)" }}
+            >
+              <button
+                type="button"
+                onClick={() => setLangAction(null)}
+                className="px-3 py-1.5 rounded border text-xs"
+                style={{
+                  background: "var(--bg-secondary)",
+                  borderColor: "var(--border)",
+                  color: "var(--text-secondary)",
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="px-3 py-1.5 rounded text-xs font-medium"
+                style={{
+                  background: "var(--accent)",
+                  color: "var(--accent-fg, #fff)",
+                }}
+              >
+                {langAction.mode === "summarize" ? "Summarize" : "Translate"}
               </button>
             </div>
           </form>

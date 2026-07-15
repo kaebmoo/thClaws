@@ -336,6 +336,23 @@
         const tail = path.startsWith("/") ? path : "/" + path;
         return `${prefix}/file-asset${tail}`;
       }
+      // Mode A. The desktop wry webview serves the `thclaws://` custom
+      // scheme (host `thclaws.localhost`, exposed as http on WebView2).
+      // A real browser — the cloud webapp embeds the shell in an iframe
+      // at `<workspace-root>/gui-shell/<id>/` — can't load that scheme
+      // (net::ERR_UNKNOWN_URL_SCHEME). There, build an http URL relative
+      // to the WORKSPACE ROOT so any reverse-proxy path prefix is kept
+      // and it hits the engine's cwd-relative `/file-asset/<rel>` route.
+      const wry =
+        location.protocol === "thclaws:" ||
+        location.hostname === "thclaws.localhost";
+      if (!wry && (location.protocol === "http:" || location.protocol === "https:")) {
+        const rel = path.replace(/^\/+/, "");
+        // Strip back from `…/gui-shell/<id>/…` to the workspace root.
+        const m = location.pathname.match(/^(.*?)\/gui-shell\/[^/]+\//);
+        const root = m ? m[1] + "/" : location.pathname.replace(/[^/]*$/, "");
+        return location.origin + root + "file-asset/" + rel;
+      }
       if (path.startsWith("/")) {
         return `thclaws://localhost/file-asset${path}`;
       }

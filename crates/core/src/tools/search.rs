@@ -573,7 +573,7 @@ mod tests {
             }),
         };
         let chain: Vec<&'static str> = tool.resolve_candidates().iter().map(|b| b.name()).collect();
-        assert_eq!(chain, vec!["tavily", "brave", "duckduckgo"]);
+        assert_eq!(chain, vec!["tavily", "brave", "serpapi", "duckduckgo"]);
     }
 
     #[test]

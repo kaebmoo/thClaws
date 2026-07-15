@@ -80,6 +80,11 @@ enum UserEvent {
     SessionLoaded(String),
     FileContent(String),
     QuitRequested,
+    /// GUI `/reload`: persist the current window size (so the re-exec
+    /// restores it, not the last size saved on a normal close) then
+    /// re-exec the binary. Routed through the loop because the size
+    /// lives here, not in the shell dispatcher that runs `/reload`.
+    ReloadRequested,
     /// Settings → Appearance changed `guiScale`. Carries the new
     /// (clamped) factor so the event loop can apply it via
     /// `webview.zoom()` without re-reading config. Issue #47.
@@ -115,6 +120,10 @@ fn spawn_event_translator(handle: &SharedSessionHandle, proxy: EventLoopProxy<Us
                         // (#52). No chat / terminal rendering needed.
                         if matches!(ev, ViewEvent::QuitRequested) {
                             let _ = proxy.send_event(UserEvent::QuitRequested);
+                            continue;
+                        }
+                        if matches!(ev, ViewEvent::ReloadRequested) {
+                            let _ = proxy.send_event(UserEvent::ReloadRequested);
                             continue;
                         }
                         for dispatch in render_chat_dispatches(&ev) {
@@ -547,14 +556,11 @@ fn is_macos_close_shortcut(event: &tao::event::KeyEvent, modifiers: ModifiersSta
 // the always-on dispatch table.
 // build_all_models_payload migrated; request_all_models removed in SERVE9k.
 
-fn request_gui_shutdown(
-    shared: &SharedSessionHandle,
-    control_flow: &mut ControlFlow,
-    latest_window_size: Option<(f64, f64)>,
-) {
-    // Persist the latest window size so the next launch restores it.
-    // Only writes when the size actually changed from what's on disk —
-    // avoids a no-op rewrite that would touch the file's mtime.
+// Persist the latest window size so the next launch restores it. Only
+// writes when the size actually changed from what's on disk — avoids a
+// no-op rewrite that would touch the file's mtime. Shared by the normal
+// close path and `/reload` (which re-execs and must save first).
+fn persist_window_size(latest_window_size: Option<(f64, f64)>) {
     if let Some((w, h)) = latest_window_size {
         let mut project = crate::config::ProjectConfig::load().unwrap_or_default();
         if project.window_width != Some(w) || project.window_height != Some(h) {
@@ -563,6 +569,14 @@ fn request_gui_shutdown(
             let _ = project.save();
         }
     }
+}
+
+fn request_gui_shutdown(
+    shared: &SharedSessionHandle,
+    control_flow: &mut ControlFlow,
+    latest_window_size: Option<(f64, f64)>,
+) {
+    persist_window_size(latest_window_size);
     let _ = shared.input_tx.send(ShellInput::SaveAndQuit);
     // Kill ONLY this session's teammate processes (scoped by absolute
     // --team-dir). The old broad `pkill -f team-agent` killed teammates of
@@ -1508,6 +1522,17 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
             }
             Event::UserEvent(UserEvent::QuitRequested) => {
                 request_gui_shutdown(&shared_for_events, control_flow, latest_window_size);
+            }
+            Event::UserEvent(UserEvent::ReloadRequested) => {
+                // Save the live window size first (the re-exec bypasses the
+                // close path), then re-exec off-thread after a beat so the
+                // "[reload]…" line paints before the process image is replaced.
+                persist_window_size(latest_window_size);
+                std::thread::spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                    let err = crate::util::reexec_self();
+                    eprintln!("[reload] re-exec failed: {err}");
+                });
             }
             Event::UserEvent(UserEvent::ZoomChanged(scale)) => {
                 let _ = webview.zoom(scale);

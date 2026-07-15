@@ -381,7 +381,20 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
             if !prompt.is_empty() {
-                let _ = ctx.shared.input_tx.send(ShellInput::Line(prompt));
+                // `isolated: true` (from `streamTurn(prompt, {isolated:true})`)
+                // runs the turn on a throwaway child agent with empty history
+                // that's discarded afterwards — so a GUI-shell agent firing
+                // many one-shot generations (e.g. one per slide) never grows
+                // the shared session's history or its per-turn input tokens.
+                let isolated = msg
+                    .get("isolated")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let _ = ctx.shared.input_tx.send(if isolated {
+                    ShellInput::IsolatedLine(prompt)
+                } else {
+                    ShellInput::Line(prompt)
+                });
             }
             // Reply so the bridge's Promise resolves. Tier 1 echoes the
             // request id as a placeholder runId — multi-run correlation

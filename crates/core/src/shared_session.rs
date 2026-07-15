@@ -78,6 +78,15 @@ pub enum ShellInput {
     /// Raw line submitted by the user. Slash-prefix → dispatched as
     /// command, anything else → fed to the agent as a prompt.
     Line(String),
+    /// Like `Line`, but run on a throwaway child agent whose history
+    /// starts empty and is discarded when the turn ends — the shared
+    /// session and its running context are never touched. Lets a
+    /// GUI-shell agent (e.g. tutorial-studio) fire many independent
+    /// one-shot generations without the shared history — and per-turn
+    /// input tokens — growing without bound. Streams the same
+    /// text/tool_call/tool_result/done events as `Line`. Slash commands
+    /// aren't supported here (there's no persistent session to act on).
+    IsolatedLine(String),
     /// Like `Line` but with one or more inline image attachments
     /// (paste / drag-drop into the chat composer). Each attachment is
     /// `(media_type, base64_data)`. Slash commands aren't expected
@@ -427,6 +436,10 @@ pub enum ViewEvent {
     /// `UserEvent::QuitRequested` so the tao loop runs the same
     /// save-and-exit path as the window-close button. Issue #52.
     QuitRequested,
+    /// Worker → event-loop signal: GUI `/reload`. The loop persists the
+    /// current window size (the re-exec otherwise restores the size from
+    /// the last normal close, not the live one) then re-execs.
+    ReloadRequested,
     /// Active plan changed. `Some(plan)` for submit / update_step,
     /// `None` for clear. The translator forwards this as a
     /// `chat_plan_update` IPC envelope to the right-side
@@ -1483,6 +1496,10 @@ async fn run_worker(
         crate::team::set_lead_team_dir(&td);
     }
     let skill_tool = crate::skills::SkillTool::new_from_handle(skill_store.clone());
+    // Capture the isolated-execution slot before the tool moves into the
+    // registry; wired to the factory once it's built (below) so `isolated:
+    // true` job skills run in a sub-agent.
+    let skill_factory_slot = skill_tool.factory_slot();
     tools.register(std::sync::Arc::new(skill_tool));
     // dev-plan/06 P2: SkillList + SkillSearch are always registered
     // (regardless of skills_listing_strategy) so any strategy can use
@@ -1725,6 +1742,12 @@ async fn run_worker(
         ));
         factory
     };
+    // Wire isolated ("job") skills to the factory just built: the main
+    // SkillTool gets a Weak handle so `isolated: true` skills spawn a
+    // sub-agent instead of pasting their body + steps inline. Weak keeps
+    // the factory → snapshot → registry → SkillTool → factory reference
+    // from leaking. Until now the slot was empty ⇒ job skills ran inline.
+    let _ = skill_factory_slot.set(std::sync::Arc::downgrade(&factory_state));
     // Apply `disallowed_tools` to the main agent's registry. Until
     // this was wired, the config field was parsed (config.rs maps
     // both flat `disallowedTools` and nested `permissions.deny`)
@@ -2046,10 +2069,16 @@ async fn run_worker(
         match input {
             ShellInput::Line(text) => {
                 cancel.reset();
+                maybe_reset_session_per_turn(&mut state, &events_tx, &plan_persist_path);
                 handle_line(text, &mut state, &events_tx, &cancel, &input_tx_self).await;
+            }
+            ShellInput::IsolatedLine(text) => {
+                cancel.reset();
+                handle_isolated_line(text, &mut state, &events_tx, &cancel, &input_tx_self).await;
             }
             ShellInput::LineWithImages { text, images } => {
                 cancel.reset();
+                maybe_reset_session_per_turn(&mut state, &events_tx, &plan_persist_path);
                 handle_line_with_images(
                     text,
                     images,
@@ -2098,6 +2127,9 @@ async fn run_worker(
                 )));
             }
             ShellInput::LoadSession(id) => {
+                // Capture the outgoing session id BEFORE the load so we can
+                // tell a real session switch from a same-id reload below.
+                let prev_session_id = state.session.id.clone();
                 let Some(ref store) = state.session_store else {
                     continue;
                 };
@@ -2232,9 +2264,21 @@ async fn run_worker(
                 // user's "allow for session" decision from session A
                 // continued to auto-approve in session B, and a Plan
                 // mode set in A leaked into B with no plan to submit.
-                state.approver.reset_session_flag();
-                let _ = crate::permissions::take_pre_plan_mode();
-                crate::permissions::set_current_mode_and_broadcast(state.agent.permission_mode);
+                //
+                // Guard on a REAL switch (id != prev): a same-id reload —
+                // e.g. the frontend's startup auto-load firing right after
+                // the user entered plan mode + submitted a plan — must NOT
+                // clobber the current session's ephemeral yolo / plan mode.
+                // That race reset the mode to Auto and dropped the sidebar
+                // Approve button the first time /plan was used in a fresh
+                // workspace (plan_state survives via restore_from_session
+                // above, so "type approve" still worked — mode was the only
+                // casualty).
+                if id != prev_session_id {
+                    state.approver.reset_session_flag();
+                    let _ = crate::permissions::take_pre_plan_mode();
+                    crate::permissions::set_current_mode_and_broadcast(state.agent.permission_mode);
+                }
                 let display = DisplayMessage::from_messages(&state.session.messages);
                 let _ = events_tx.send(ViewEvent::HistoryReplaced(display));
                 // Refresh so the sidebar's "current session" highlight
@@ -2280,12 +2324,23 @@ async fn run_worker(
                 // Rebuild so the agent actually sees the newly-registered
                 // MCP tools on its next turn.
                 if let Err(e) = state.rebuild_agent(true) {
+                    // The MCP server is fine — its tools are already in the
+                    // registry. rebuild_agent failed because the *current
+                    // model's* provider couldn't be built (usually a missing
+                    // key / unroutable model), which blocks normal turns too,
+                    // not just MCP. Attribute it to the model, not the server,
+                    // so the user fixes the right thing. Tools attach on the
+                    // next successful rebuild (/reload after resolving).
+                    let _ = events_tx.send(ViewEvent::SlashOutput(format!(
+                        "[mcp] '{server_name}' connected ({tool_count} tools)"
+                    )));
                     let _ = events_tx.send(ViewEvent::ErrorText(format!(
-                        "[mcp] '{server_name}' tools registered but rebuild failed: {e}"
+                        "Current model '{}' isn't ready — {e}. Set a key or switch model with /model, then /reload.",
+                        state.config.model
                     )));
                 } else {
                     let _ = events_tx.send(ViewEvent::SlashOutput(format!(
-                        "[mcp] '{server_name}' connected"
+                        "[mcp] '{server_name}' connected ({tool_count} tools)"
                     )));
                 }
                 // Update sidebar with real tool count now that the server is live.
@@ -3676,6 +3731,100 @@ async fn run_auto_learn_pipeline(
     crate::auto_learn::log_event(&format!(
         "reconcile ok: kms={kms_name} (next due in {hours}h)"
     ));
+}
+
+/// Job-runner mode (`config.session_reset_per_turn`): archive the current
+/// session and start a fresh one BEFORE a user turn so repeated runs don't
+/// accumulate (and re-send) each other's context. Archive-first ⇒ the old
+/// session stays on disk, so the audit trail is complete (this is a reset,
+/// not a delete). No-op when the mode is off or history is empty. Unlike
+/// `NewSession` it deliberately skips the auto-learn pipeline — this fires
+/// on every turn, so it must stay cheap.
+/// Run one turn on a fresh throwaway child agent (empty history), then
+/// discard it — the shared `state.agent`/`state.session` are set aside
+/// untouched for the duration, so nothing accumulates. The child is
+/// swapped in as the active agent so the shared `drive_turn_stream` path
+/// runs verbatim (multi-tenant working-dir scope, gateway member billing
+/// attribution, streaming, cancellation), then the real agent + session
+/// are restored and the throwaway session is deleted so it never shows up
+/// in `/sessions`.
+async fn handle_isolated_line(
+    text: String,
+    state: &mut WorkerState,
+    events_tx: &broadcast::Sender<ViewEvent>,
+    cancel: &crate::cancel::CancelToken,
+    input_tx: &mpsc::Sender<ShellInput>,
+) {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        let _ = events_tx.send(ViewEvent::TurnDone);
+        return;
+    }
+    // Fresh child from the live factory snapshot — same provider / model /
+    // tools / system prompt as the main agent, but no history.
+    let mut child = match state.agent_factory.build(&text, None, 1).await {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = events_tx.send(ViewEvent::ErrorText(format!(
+                "isolated turn could not start: {e}"
+            )));
+            let _ = events_tx.send(ViewEvent::TurnDone);
+            return;
+        }
+    };
+    child.permission_mode = state.agent.permission_mode;
+
+    let saved_agent = std::mem::replace(&mut state.agent, child);
+    let saved_session = std::mem::replace(
+        &mut state.session,
+        Session::new(&state.config.model, state.cwd.to_string_lossy()),
+    );
+    let throwaway_id = state.session.id.clone();
+
+    let stream = Box::pin(state.agent.run_turn(text));
+    let lead_mb = crate::team::Mailbox::new(crate::team::Mailbox::default_dir());
+    drive_turn_stream(
+        stream,
+        state,
+        events_tx,
+        cancel,
+        &lead_mb,
+        input_tx,
+        Some(throwaway_id.clone()),
+    )
+    .await;
+
+    // Restore the real agent + session; drop the throwaway.
+    state.agent = saved_agent;
+    state.session = saved_session;
+    if let Some(store) = state.session_store.as_ref() {
+        let _ = store.delete(&throwaway_id);
+    }
+    let _ = events_tx.send(ViewEvent::SessionListRefresh(build_session_list(
+        &state.session_store,
+        &state.session.id,
+    )));
+}
+
+fn maybe_reset_session_per_turn(
+    state: &mut WorkerState,
+    events_tx: &broadcast::Sender<ViewEvent>,
+    plan_persist_path: &std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
+) {
+    if !state.config.session_reset_per_turn || state.agent.history_snapshot().is_empty() {
+        return;
+    }
+    save_history(&state.agent, &mut state.session, &state.session_store);
+    state.agent.clear_history();
+    state.session = Session::new(&state.config.model, state.cwd.to_string_lossy());
+    if let (Some(store), Ok(mut g)) = (state.session_store.as_ref(), plan_persist_path.lock()) {
+        let path = store.path_for(&state.session.id);
+        let _ = state.session.write_header_if_missing(&path);
+        *g = Some(path);
+    }
+    crate::tools::plan_state::clear();
+    state.approver.reset_session_flag();
+    let _ = events_tx.send(ViewEvent::HistoryReplaced(Vec::new()));
 }
 
 pub(crate) fn save_history(agent: &Agent, session: &mut Session, store: &Option<SessionStore>) {

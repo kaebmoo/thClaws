@@ -210,7 +210,16 @@ pub async fn dispatch(
                 crate::usage::UsageTracker::new(crate::usage::UsageTracker::default_path());
             emit(events_tx, tracker.summary());
         }
-        SlashCommand::Doctor => emit(events_tx, doctor_report(state)),
+        SlashCommand::Doctor { fix } => {
+            let mut out = doctor_report(state);
+            let report = crate::doctor::diagnose();
+            out.push_str(&crate::doctor::render(&report));
+            if fix {
+                out.push_str("\n── installing missing agent dependencies ──\n");
+                out.push_str(&crate::doctor::apply(&report));
+            }
+            emit(events_tx, out);
+        }
 
         // ─── model / provider / catalogue ───────────────────────────
         SlashCommand::Providers => {
@@ -880,19 +889,12 @@ pub async fn dispatch(
                 events_tx,
                 "[reload] re-executing thclaws — in-memory state will be reset, on-disk sessions survive…".into(),
             );
-            let events_tx_clone = events_tx.clone();
-            // Hand off to a detached task so the slash dispatcher can
-            // return cleanly and the SlashOutput message reaches the
-            // user before the process image is replaced. exec() on
-            // Unix only returns on error; on success there's nothing
-            // to clean up because we've stopped existing.
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(400));
-                let err = crate::util::reexec_self();
-                let _ = events_tx_clone.send(ViewEvent::SlashOutput(format!(
-                    "[reload] re-exec failed: {err}"
-                )));
-            });
+            // Route through the tao event loop (ViewEvent::ReloadRequested →
+            // UserEvent::ReloadRequested) so it persists the LIVE window size
+            // before re-execing. The size lives in the loop, not here, so a
+            // direct exec() from this thread would restore the last size saved
+            // on a normal close instead of the current one.
+            let _ = events_tx.send(ViewEvent::ReloadRequested);
             return;
         }
         SlashCommand::Fork => {
@@ -3727,43 +3729,51 @@ pub async fn dispatch(
                         dry_run,
                         workspace,
                         force_rebind,
-                    } => {
-                        let cwd = std::env::current_dir().unwrap_or_default();
-                        crate::cloud::cmd::push_streaming(
-                            &cwd,
-                            None,
-                            cloud_cfg.as_ref(),
-                            crate::cloud::cmd::SyncOpts {
-                                delete,
-                                dry_run,
-                                workspace,
-                                force_rebind,
-                            },
-                            &mut emit,
-                        )
-                        .await;
-                    }
+                        force,
+                    } => match std::env::current_dir() {
+                        Ok(cwd) => {
+                            crate::cloud::cmd::push_streaming(
+                                &cwd,
+                                None,
+                                cloud_cfg.as_ref(),
+                                crate::cloud::cmd::SyncOpts {
+                                    delete,
+                                    dry_run,
+                                    workspace,
+                                    force_rebind,
+                                    force,
+                                },
+                                &mut emit,
+                            )
+                            .await;
+                        }
+                        Err(e) => emit(format!("push failed: can't read cwd: {e}")),
+                    },
                     CloudSlash::Pull {
                         delete,
                         dry_run,
                         workspace,
                         force_rebind,
-                    } => {
-                        let cwd = std::env::current_dir().unwrap_or_default();
-                        crate::cloud::cmd::pull_streaming(
-                            &cwd,
-                            None,
-                            cloud_cfg.as_ref(),
-                            crate::cloud::cmd::SyncOpts {
-                                delete,
-                                dry_run,
-                                workspace,
-                                force_rebind,
-                            },
-                            &mut emit,
-                        )
-                        .await;
-                    }
+                        force,
+                    } => match std::env::current_dir() {
+                        Ok(cwd) => {
+                            crate::cloud::cmd::pull_streaming(
+                                &cwd,
+                                None,
+                                cloud_cfg.as_ref(),
+                                crate::cloud::cmd::SyncOpts {
+                                    delete,
+                                    dry_run,
+                                    workspace,
+                                    force_rebind,
+                                    force,
+                                },
+                                &mut emit,
+                            )
+                            .await;
+                        }
+                        Err(e) => emit(format!("pull failed: can't read cwd: {e}")),
+                    },
                 }
             });
         }
