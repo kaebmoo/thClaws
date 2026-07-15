@@ -999,6 +999,7 @@ pub fn provider_kind_name(k: crate::providers::ProviderKind) -> &'static str {
     use crate::providers::ProviderKind;
     match k {
         ProviderKind::Anthropic => "anthropic",
+        ProviderKind::AtlasCloud => "atlascloud",
         // Must match `ProviderKind::name()` so a round-trip via
         // `detect_provider()` → `provider_kind_name(kind)` returns
         // the same key. Pre-fix this returned `"agent-sdk"` while
