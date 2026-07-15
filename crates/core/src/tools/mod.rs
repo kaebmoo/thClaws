@@ -340,7 +340,7 @@ impl ToolRegistry {
         r.register(Arc::new(EditTool));
         r.register(Arc::new(GlobTool));
         r.register(Arc::new(GrepTool));
-        r.register(Arc::new(BashTool));
+        r.register(Arc::new(BashTool::default()));
         r.register(Arc::new(DocxCreateTool));
         r.register(Arc::new(DocxEditTool));
         r.register(Arc::new(DocxReadTool));

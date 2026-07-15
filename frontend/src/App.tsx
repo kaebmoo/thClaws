@@ -804,7 +804,15 @@ export default function App() {
     // tab bar / bottom input get clipped behind the browser chrome. dvh
     // tracks the actual visible height as the bar shows/hides (issue #168;
     // Chrome 108+ / Safari 15.4+ — all current mobile devices).
-    <div className="flex flex-col h-[100dvh]">
+    //
+    // `fixed inset-x-0 top-0`: anchor to the viewport top so a stray document
+    // scroll can't push the root off-screen. `overflow-clip` (NOT hidden):
+    // an `overflow:hidden` box is still PROGRAMMATICALLY scrollable, so a
+    // descendant `scrollIntoView` (the chat auto-scroll after a gui-shell tab
+    // swap) could scroll this container down by the tab-bar height — the tab
+    // bar then rendered above the viewport with an equal empty gap below
+    // (navbar "gone"). `clip` makes the box unscrollable, so nothing can shift.
+    <div className="fixed inset-x-0 top-0 flex flex-col h-[100dvh] overflow-clip">
       <FrontendReadyBeacon />
       {fullscreen && (
         <FullscreenExitChrome

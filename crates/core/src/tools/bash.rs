@@ -17,7 +17,26 @@ use tokio::time::{timeout, Duration};
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
 
-pub struct BashTool;
+#[derive(Default)]
+pub struct BashTool {
+    /// When set, a session cancel (Stop / Esc / Cmd+. — all send
+    /// `shell_cancel`) kills the in-flight child process PROMPTLY instead of
+    /// letting it run to its own `timeout_ms`. The default `with_builtins`
+    /// registration carries `None`; `run_worker` re-registers a cancel-aware
+    /// instance over it (register overwrites by tool name) with the session's
+    /// token. Reported by @Mayth01 (issue #182).
+    cancel: Option<crate::cancel::CancelToken>,
+}
+
+impl BashTool {
+    /// Cancel-aware constructor: the returned tool races the given token
+    /// against the child's wait, so a mid-call cancel kills the process.
+    pub fn with_cancel(cancel: crate::cancel::CancelToken) -> Self {
+        Self {
+            cancel: Some(cancel),
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for BashTool {
@@ -122,7 +141,14 @@ impl Tool for BashTool {
                 setup_cmd.chars().take(80).collect::<String>(),
                 if setup_cmd.len() > 80 { "…" } else { "" }
             );
-            setup_output = run_shell_command(&setup_cmd, &resolved_cwd, timeout_ms, false).await?;
+            setup_output = run_shell_command(
+                &setup_cmd,
+                &resolved_cwd,
+                timeout_ms,
+                false,
+                self.cancel.as_ref(),
+            )
+            .await?;
             // If setup failed, return its output (includes exit code).
             if setup_output.contains("[exit code") {
                 return Ok(setup_output);
@@ -187,8 +213,14 @@ impl Tool for BashTool {
         }
 
         let effective_timeout = if is_server { 5000 } else { timeout_ms };
-        let mut server_output =
-            run_shell_command(&command, &resolved_cwd, effective_timeout, is_server).await?;
+        let mut server_output = run_shell_command(
+            &command,
+            &resolved_cwd,
+            effective_timeout,
+            is_server,
+            self.cancel.as_ref(),
+        )
+        .await?;
 
         // F30: concurrent team members sharing one git index collide on
         // `.git/index.lock` ("fatal: Unable to create '.../.git/index.lock':
@@ -204,9 +236,14 @@ impl Tool for BashTool {
             {
                 tries += 1;
                 tokio::time::sleep(std::time::Duration::from_millis(250 * tries as u64)).await;
-                server_output =
-                    run_shell_command(&command, &resolved_cwd, effective_timeout, is_server)
-                        .await?;
+                server_output = run_shell_command(
+                    &command,
+                    &resolved_cwd,
+                    effective_timeout,
+                    is_server,
+                    self.cancel.as_ref(),
+                )
+                .await?;
             }
         }
 
@@ -227,8 +264,9 @@ async fn run_shell_command(
     cwd: &std::path::Path,
     timeout_ms: u64,
     is_server: bool,
+    cancel: Option<&crate::cancel::CancelToken>,
 ) -> Result<String> {
-    let out = run_shell_command_inner(command, cwd, timeout_ms, is_server, true).await?;
+    let out = run_shell_command_inner(command, cwd, timeout_ms, is_server, true, cancel).await?;
     // If the OS confiner couldn't enforce, it bailed BEFORE running the
     // command (exiting with a no-enforce sentinel, NOT the command's output).
     // Re-run unconfined so the command actually executes — the workspace /
@@ -240,7 +278,7 @@ async fn run_shell_command(
     if crate::confine::output_shows_no_enforce(&out) {
         // Remember so later commands skip the doomed confined attempt.
         crate::confine::mark_no_enforce();
-        return run_shell_command_inner(command, cwd, timeout_ms, is_server, false).await;
+        return run_shell_command_inner(command, cwd, timeout_ms, is_server, false, cancel).await;
     }
     Ok(out)
 }
@@ -251,6 +289,7 @@ async fn run_shell_command_inner(
     timeout_ms: u64,
     is_server: bool,
     confined: bool,
+    cancel: Option<&crate::cancel::CancelToken>,
 ) -> Result<String> {
     // dev-plan/49: route through the OS confiner — returns a sandbox-exec /
     // bwrap-wrapped `sh -c` when bash.sandbox is on and a confiner is
@@ -301,7 +340,29 @@ async fn run_shell_command_inner(
         buf
     });
 
-    let wait_result = timeout(Duration::from_millis(timeout_ms), child.wait()).await;
+    // Race the session cancel against the child's wait so Stop / Esc / Cmd+.
+    // kills a long-running command (build, test, `sleep 45`) PROMPTLY instead
+    // of letting it run to `timeout_ms`. `cancelled()` returns immediately if
+    // the token is already set, but the worker resets it before each turn (the
+    // same discipline the main agent loop relies on), so this only fires on a
+    // genuine mid-call cancel. `None` (e.g. the `!` shell escape) keeps the
+    // old timeout-only behaviour. Server commands never race — a timeout there
+    // is the expected "left it running in the background" path. (issue #182)
+    let wait_result = match (cancel, is_server) {
+        (Some(tok), false) => {
+            tokio::select! {
+                biased;
+                _ = tok.cancelled() => {
+                    let _ = child.kill().await;
+                    return Err(Error::Tool(format!(
+                        "cancelled while running: {command}"
+                    )));
+                }
+                r = timeout(Duration::from_millis(timeout_ms), child.wait()) => r,
+            }
+        }
+        _ => timeout(Duration::from_millis(timeout_ms), child.wait()).await,
+    };
     match wait_result {
         Err(_) if is_server => {
             // Server command — timeout is expected. Server keeps running.
@@ -1368,7 +1429,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn echoes_stdout() {
-        let out = BashTool
+        let out = BashTool::default()
             .call(json!({"command": "echo hello-bash"}))
             .await
             .unwrap();
@@ -1627,7 +1688,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn captures_stderr() {
-        let out = BashTool
+        let out = BashTool::default()
             .call(json!({"command": "echo oops >&2"}))
             .await
             .unwrap();
@@ -1638,7 +1699,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn nonzero_exit_appended_to_output() {
-        let out = BashTool
+        let out = BashTool::default()
             .call(json!({"command": "echo done; exit 3"}))
             .await
             .unwrap();
@@ -1649,7 +1710,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn stdout_and_stderr_both_captured() {
-        let out = BashTool
+        let out = BashTool::default()
             .call(json!({"command": "echo out; echo err >&2"}))
             .await
             .unwrap();
@@ -1663,7 +1724,7 @@ mod tests {
     async fn honors_cwd_argument() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("marker.txt"), "").unwrap();
-        let out = BashTool
+        let out = BashTool::default()
             .call(json!({
                 "command": "ls",
                 "cwd": dir.path().to_string_lossy(),
@@ -1676,7 +1737,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn timeout_kills_long_running_commands() {
-        let out = BashTool
+        let out = BashTool::default()
             .call(json!({
                 "command": "sleep 5",
                 "timeout": 1000,
@@ -1691,10 +1752,41 @@ mod tests {
         }
     }
 
+    // issue #182: a mid-call session cancel must kill the child promptly,
+    // not wait out `timeout_ms`. Repro: a 30s sleep under a 60s timeout,
+    // cancelled after 200ms — should error in well under a second.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancel_kills_in_flight_bash() {
+        let cancel = crate::cancel::CancelToken::new();
+        let bash = BashTool::with_cancel(cancel.clone());
+        let firing = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            firing.cancel();
+        });
+        let start = std::time::Instant::now();
+        let out = bash
+            .call(json!({ "command": "sleep 30 && echo woke", "timeout": 60000 }))
+            .await;
+        let elapsed = start.elapsed();
+        match out {
+            Err(e) => assert!(
+                format!("{e}").contains("cancelled"),
+                "expected a cancelled error, got: {e}"
+            ),
+            Ok(o) => panic!("expected cancellation, got Ok: {o}"),
+        }
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "cancel should kill promptly; took {elapsed:?}"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn timeout_secs_legacy_alias_works() {
-        let out = BashTool
+        let out = BashTool::default()
             .call(json!({
                 "command": "sleep 5",
                 "timeout_secs": 1,
@@ -1712,13 +1804,13 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn missing_command_errors() {
-        let err = BashTool.call(json!({})).await.unwrap_err();
+        let err = BashTool::default().call(json!({})).await.unwrap_err();
         assert!(format!("{err}").contains("command"));
     }
 
     #[test]
     fn bash_requires_approval() {
-        let bash = BashTool;
+        let bash = BashTool::default();
         assert!(bash.requires_approval(&json!({"command": "ls"})));
     }
 
@@ -1944,7 +2036,7 @@ mod tests {
         // If this env var doesn't reach the child, all the other
         // workarounds in M6.8 B1 are also broken, so this acts as
         // the canary for the whole apply_noninteractive_env path.
-        let out = BashTool
+        let out = BashTool::default()
             .call(json!({"command": "echo \"CI=$CI\""}))
             .await
             .unwrap();
@@ -1961,7 +2053,7 @@ mod tests {
         // bars, no interactive prompts." Tools like `less` /
         // `git log` / `vim` use it to skip pager / fall back to
         // non-interactive behaviour.
-        let out = BashTool
+        let out = BashTool::default()
             .call(json!({"command": "echo \"TERM=$TERM\""}))
             .await
             .unwrap();
@@ -1977,7 +2069,7 @@ mod tests {
         // npm respects this for confirmation prompts. Sample test
         // ensures the env var array stays in sync with the code
         // (a future refactor that drops it should fail this test).
-        let out = BashTool
+        let out = BashTool::default()
             .call(json!({"command": "echo \"NPM_CONFIG_YES=$NPM_CONFIG_YES\""}))
             .await
             .unwrap();
@@ -2091,7 +2183,7 @@ mod tests {
         crate::sandbox::Sandbox::init().unwrap();
 
         // A) cwd outside the workspace root → sandbox denies.
-        let a = BashTool
+        let a = BashTool::default()
             .call(json!({"command": "echo hi", "cwd": outside.path().to_str().unwrap()}))
             .await;
         eprintln!("[A cwd-outside] {a:?}");
@@ -2104,7 +2196,7 @@ mod tests {
 
         // B) command runs with default root; the command STRING is not
         //    path-checked, so an in-workspace echo just works.
-        let b = BashTool
+        let b = BashTool::default()
             .call(json!({"command": "echo IN_WS_OK"}))
             .await
             .expect("default-root command should run");
@@ -2114,7 +2206,7 @@ mod tests {
         // C) absolute exe path in the command, no cwd → NOT a sandbox
         //    denial. It runs and fails as a plain shell error (exit
         //    code / not found) — never "access denied".
-        let c = BashTool
+        let c = BashTool::default()
             .call(json!({"command": "/no/such/python_zzz_119 --version"}))
             .await
             .expect("a failing command returns Ok(output-with-exit-code), not Err");
