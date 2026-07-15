@@ -1446,7 +1446,10 @@ fn render_markdown(r: &mut PdfRenderer, content: &str) {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
-    let parser = Parser::new_ext(content, opts);
+    // Repair LLM-miscounted table delimiter rows so GFM tables aren't silently
+    // demoted to paragraphs (see tools::md_tables).
+    let content = super::md_tables::repair_table_delimiters(content);
+    let parser = Parser::new_ext(&content, opts);
 
     let mut spans: Vec<Span> = Vec::new();
     let mut style = InlineStyle::default();

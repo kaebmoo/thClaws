@@ -247,7 +247,10 @@ fn render_epub(spec: EpubSpec) -> Result<(usize, usize)> {
     opts.insert(Options::ENABLE_TASKLISTS);
     opts.insert(Options::ENABLE_FOOTNOTES);
 
-    let events: Vec<Event> = Parser::new_ext(&spec.content, opts).collect();
+    // Repair LLM-miscounted table delimiter rows so GFM tables aren't silently
+    // demoted to paragraphs (see tools::md_tables).
+    let repaired = super::md_tables::repair_table_delimiters(&spec.content);
+    let events: Vec<Event> = Parser::new_ext(&repaired, opts).collect();
 
     let mut images: Vec<ImageAsset> = Vec::new();
     let mut seen: HashMap<String, String> = HashMap::new(); // src → epub_path

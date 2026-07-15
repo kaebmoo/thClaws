@@ -28,6 +28,7 @@ pub mod hal;
 pub mod image_gen;
 pub mod kms;
 pub mod ls;
+pub mod md_tables;
 pub mod memory;
 pub mod pdf_create;
 pub mod pdf_read;
