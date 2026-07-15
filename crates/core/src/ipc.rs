@@ -3203,6 +3203,21 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             (ctx.dispatch)(payload.to_string());
         }
 
+        // Read-only gate for the desktop SSO sign-in button. Defaults to false
+        // (hidden) until `ssoSignInEnabled` is set in .thclaws/settings.json —
+        // no `_set` on purpose, so an unready feature can't be toggled on from
+        // the GUI.
+        "sso_sign_in_enabled_get" => {
+            let enabled = crate::config::ProjectConfig::load()
+                .and_then(|c| c.sso_sign_in_enabled)
+                .unwrap_or(false);
+            let payload = serde_json::json!({
+                "type": "sso_sign_in_enabled",
+                "enabled": enabled,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
         "browser_enabled_set" => {
             // Default to ON (true) on a malformed payload — matches the
             // opt-out default so a bad message can't silently disable it.

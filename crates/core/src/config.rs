@@ -794,6 +794,11 @@ pub struct ProjectConfig {
     /// [`AppConfig::browser_headless`].
     #[serde(rename = "browserHeadless")]
     pub browser_headless: Option<bool>,
+    /// Show the desktop SSO sign-in button (Google / enterprise IdP). Off by
+    /// default — the sign-in flow isn't wired to a usable feature yet, so the
+    /// button stays hidden until this is set true in `.thclaws/settings.json`.
+    #[serde(rename = "ssoSignInEnabled")]
+    pub sso_sign_in_enabled: Option<bool>,
     /// Print the assistant's raw text to stderr after each turn (dim, fenced
     /// block). Same effect as `THCLAWS_SHOW_RAW=1`. The env var wins if set.
     /// Useful when debugging model output / formatting issues.
@@ -946,6 +951,7 @@ impl Default for ProjectConfig {
             hal_enabled: Some(false),
             browser_enabled: None,
             browser_headless: None,
+            sso_sign_in_enabled: None,
             show_raw_response: None,
             kms: None,
             bash: None,

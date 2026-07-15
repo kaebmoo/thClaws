@@ -39,12 +39,6 @@ import { ContextWarningBanner } from "./components/ContextWarningBanner";
 import { useEditingShortcuts } from "./hooks/useEditingShortcuts";
 import { send, subscribe } from "./hooks/useIPC";
 
-// SSO sign-in (Google / enterprise IdP) isn't wired to a usable feature yet,
-// so the desktop button is hidden until it does something — showing it now is
-// just noise. Flip to `true` to bring it back. (It stays hidden on cloud-hosted
-// workspaces regardless; the visitor is already authenticated upstream.)
-const SSO_SIGN_IN_ENABLED: boolean = false;
-
 type Tab = "terminal" | "chat" | "files" | "team" | "ui" | "shell" | "browser";
 
 // Fires `frontend_ready` once on mount. Mounted only after both
@@ -682,6 +676,21 @@ export default function App() {
     return unsub;
   }, []);
 
+  // Desktop SSO sign-in button is gated by `ssoSignInEnabled` in
+  // .thclaws/settings.json (default false → hidden). Read-only; there's no GUI
+  // toggle while the sign-in feature is unfinished. Stays false until the
+  // backend answers, so the button never flashes on before the gate is known.
+  const [ssoSignInEnabled, setSsoSignInEnabled] = useState(false);
+  useEffect(() => {
+    const unsub = subscribe((msg) => {
+      if (msg.type === "sso_sign_in_enabled") {
+        setSsoSignInEnabled(msg.enabled === true);
+      }
+    });
+    send({ type: "sso_sign_in_enabled_get" });
+    return unsub;
+  }, []);
+
   const [teamEnabled, setTeamEnabled] = useState(false);
   // Opt-in flag for the PTY-backed Shell tab. Default off — the tab
   // gives the user an unsandboxed live shell with no agent-side
@@ -893,14 +902,14 @@ export default function App() {
         >
           <Maximize2 size={14} />
         </button>
-        {/* Sign-in button gated off via SSO_SIGN_IN_ENABLED until the SSO
-            feature is usable. When re-enabled it also stays hidden on any
+        {/* Sign-in button gated by `ssoSignInEnabled` in settings.json (default
+            false) until the SSO feature is usable. Also stays hidden on any
             cloud-hosted workspace (gateway OR BYOK): the engine returns
             "hosted" from secrets_backend_get whenever THCLAWS_WORKSPACE_ID
             (or THCLAWS_GATEWAY_API_KEY) is set, so the visitor is already
             authenticated at the cloud-routing layer and a second SSO flow
             inside the workspace is just noise. */}
-        {SSO_SIGN_IN_ENABLED && secretsBackend !== "hosted" && <LoginButton />}
+        {ssoSignInEnabled && secretsBackend !== "hosted" && <LoginButton />}
       </div>
       )}
 
