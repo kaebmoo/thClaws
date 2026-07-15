@@ -1608,16 +1608,6 @@
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
           "verified_at": "2026-05-04"
         },
-        "nvidia/microsoft/phi-4-mini-instruct": {
-          "context": 131072,
-          "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
-          "verified_at": "2026-05-04"
-        },
-        "nvidia/microsoft/phi-4-multimodal-instruct": {
-          "context": 131072,
-          "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
-          "verified_at": "2026-05-04"
-        },
         "nvidia/minimaxai/minimax-m2.7": {
           "context": 131072,
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
@@ -1803,11 +1793,6 @@
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
           "verified_at": "2026-05-04"
         },
-        "nvidia/nvidia/nemotron-3-content-safety": {
-          "context": 131072,
-          "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
-          "verified_at": "2026-05-04"
-        },
         "nvidia/nvidia/nemotron-3-nano-30b-a3b": {
           "context": 131072,
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
@@ -1839,11 +1824,6 @@
           "verified_at": "2026-05-04"
         },
         "nvidia/nvidia/nemotron-4-340b-reward": {
-          "context": 131072,
-          "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
-          "verified_at": "2026-05-04"
-        },
-        "nvidia/nvidia/nemotron-content-safety-reasoning-4b": {
           "context": 131072,
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
           "verified_at": "2026-05-04"
@@ -1962,11 +1942,6 @@
           "context": 131072,
           "source": "https://integrate.api.nvidia.com/v1/models",
           "verified_at": "2026-06-02"
-        },
-        "nvidia/stockmark/stockmark-2-100b-instruct": {
-          "context": 131072,
-          "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
-          "verified_at": "2026-05-04"
         },
         "nvidia/upstage/solar-10.7b-instruct": {
           "context": 131072,
@@ -7822,17 +7797,571 @@
       "list_url": "https://api.atlascloud.ai/v1/models",
       "default_context": 1000000,
       "models": {
+        "atlascloud/Qwen/Qwen3-235B-A22B-Instruct-2507": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/anthropic/claude-haiku-4.5-20251001": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/anthropic/claude-haiku-4.5-20251001-coding": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/anthropic/claude-opus-4-20250514": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/anthropic/claude-opus-4-20250514-coding": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/anthropic/claude-opus-4.1-20250805": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/anthropic/claude-opus-4.1-20250805-coding": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/anthropic/claude-opus-4.5-20251101": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/anthropic/claude-opus-4.5-20251101-coding": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/anthropic/claude-opus-4.6": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/anthropic/claude-opus-4.6-coding": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/anthropic/claude-opus-4.7": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/anthropic/claude-opus-4.7-coding": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/anthropic/claude-opus-4.8": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/anthropic/claude-opus-4.8-coding": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/anthropic/claude-sonnet-4-20250514": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/anthropic/claude-sonnet-4-20250514-coding": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/anthropic/claude-sonnet-4.5-20250929": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/anthropic/claude-sonnet-4.5-20250929-coding": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/anthropic/claude-sonnet-4.6": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/anthropic/claude-sonnet-4.6-coding": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/bytedance/doubao-seed-1.6-251015": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/bytedance/doubao-seed-1.6-flash-250828": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/bytedance/doubao-seed-1.8-251228": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/bytedance/doubao-seed-2.0-code-preview-260215": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/bytedance/doubao-seed-2.0-lite-260428": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/bytedance/doubao-seed-2.0-mini-260428": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/bytedance/doubao-seed-2.0-pro-260215": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/bytedance/doubao-seed-2.1-pro-260628": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/bytedance/doubao-seed-2.1-turbo-260628": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/bytedance/doubao-seed-evolving": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/deepseek-ai/DeepSeek-V3.1": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/deepseek-ai/DeepSeek-V3.1-Terminus": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/deepseek-ai/DeepSeek-V3.2-Exp": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/deepseek-ai/deepseek-v3.2": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/deepseek-ai/deepseek-v4-flash": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
         "atlascloud/deepseek-ai/deepseek-v4-pro": {
           "context": 1048576,
           "max_output": 393216,
           "source": "https://api.atlascloud.ai/api/v1/models (display_console Text model, live verified 2026-07-13)",
           "verified_at": "2026-07-13"
         },
+        "atlascloud/google/gemini-2.0-flash": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/google/gemini-2.0-flash-lite": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/google/gemini-2.5-flash": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/google/gemini-2.5-flash-lite": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/google/gemini-2.5-pro": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/google/gemini-3-flash-preview": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/google/gemini-3.1-flash-lite": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/google/gemini-3.1-pro-preview": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/google/gemini-3.5-flash": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/kwaipilot/kat-coder-air-v2.5": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/kwaipilot/kat-coder-pro-v2": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/kwaipilot/kat-coder-pro-v2.5": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/meituan-longcat/longcat-2.0": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/minimaxai/minimax-m2.5": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/minimaxai/minimax-m2.7": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/minimaxai/minimax-m3": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/moonshotai/kimi-k2.5": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/moonshotai/kimi-k2.6": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/moonshotai/kimi-k2.7-code": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-4.1": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-4.1-mini": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-4.1-nano": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-4o": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-4o-mini": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-5": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-5-chat": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-5-codex": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-5-mini": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-5-nano": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-5-pro": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-5.1": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-5.1-chat": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-5.1-codex": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-5.1-codex-max": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-5.1-codex-mini": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-5.2": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-5.2-chat": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-5.2-codex": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-5.3-codex": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-5.4": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-5.4-mini": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-5.4-nano": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-5.5": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-5.6-luna": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-5.6-sol": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/gpt-5.6-terra": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/o1": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/o3": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/o3-mini": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/o3-pro": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/openai/o4-mini": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/qwen/qwen3-vl-235b-a22b-thinking": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/qwen/qwen3.5-122b-a10b": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/qwen/qwen3.5-27b": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/qwen/qwen3.5-35b-a3b": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/qwen/qwen3.5-397b-a17b": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
         "atlascloud/qwen/qwen3.5-flash": {
           "context": 1000000,
           "max_output": 67072,
           "source": "https://api.atlascloud.ai/api/v1/models (display_console Text model, live verified 2026-07-13)",
           "verified_at": "2026-07-13"
+        },
+        "atlascloud/qwen/qwen3.5-plus": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/qwen/qwen3.6-35b-a3b": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/qwen/qwen3.6-plus": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/qwen/qwen3.7-max": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/qwen/qwen3.7-plus": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/tencent/hy3": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/xai/grok-4.3": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models + litellm:xai/grok-4.3",
+          "verified_at": "2026-07-15",
+          "input_per_mtok": 1.25,
+          "output_per_mtok": 2.5
+        },
+        "atlascloud/xai/grok-4.5": {
+          "context": 500000,
+          "source": "https://api.atlascloud.ai/v1/models + litellm:xai/grok-4.5",
+          "verified_at": "2026-07-15",
+          "input_per_mtok": 2.0,
+          "output_per_mtok": 6.0
+        },
+        "atlascloud/xai/grok-build-0.1": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/xiaomi/mimo-v2.5": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/xiaomi/mimo-v2.5-pro": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/zai-org/GLM-4.6": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/zai-org/glm-4.7": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/zai-org/glm-5": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/zai-org/glm-5-turbo": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/zai-org/glm-5.1": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/zai-org/glm-5.2": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
+        },
+        "atlascloud/zai-org/glm-5v-turbo": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-15"
         }
       }
     }
