@@ -21,6 +21,11 @@ import { McpAppIframe } from "./McpAppIframe";
 type ChatMessage = {
   role: "user" | "assistant" | "tool" | "system" | "error" | "workflow_review";
   content: string;
+  /// `system` messages only — marks a bubble that accumulates a slash
+  /// command's streamed output (e.g. `/cloud push` progress). Consecutive
+  /// `chat_slash_output` lines fold into ONE such bubble instead of a balloon
+  /// per line, and progress lines (`… MB (N%)`) update its last line in place.
+  slashOutput?: boolean;
   /// `workflow_review` messages only — dev-plan/32 Tier 3 GUI
   /// approval. Carries the script + id the WorkflowReviewBubble
   /// posts back when the user clicks Approve / Cancel / Re-author.
@@ -702,12 +707,44 @@ export function ChatView({ active, modalOpen }: Props) {
           });
           break;
         }
-        case "chat_slash_output":
-          setMessages((prev) => [
-            ...prev,
-            { role: "system", content: msg.text as string },
-          ]);
+        case "chat_slash_output": {
+          // Fold a command's streamed output (e.g. /cloud push) into ONE
+          // system bubble instead of a balloon per line. A progress line
+          // (`… N/M MB (P%)`) replaces the previous progress line in place so
+          // the upload counter ticks in a single spot rather than stacking.
+          const line = msg.text as string;
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (last && last.role === "system" && last.slashOutput) {
+              const lines = last.content.split("\n");
+              const prevLast = lines[lines.length - 1] ?? "";
+              const isProgress = (s: string) =>
+                /\(\s*\d+\s*%\s*\)\s*$/.test(s) ||
+                /\d[\d.,]*\s*\/\s*\d[\d.,]*\s*[KMGT]?B/i.test(s);
+              // Text before the first number — same for consecutive ticks of
+              // the same operation ("uploading… "), so we can replace vs append.
+              const stem = (s: string) => s.replace(/[\d.,].*$/s, "");
+              if (
+                isProgress(line) &&
+                isProgress(prevLast) &&
+                stem(line) === stem(prevLast)
+              ) {
+                lines[lines.length - 1] = line;
+              } else {
+                lines.push(line);
+              }
+              return [
+                ...prev.slice(0, -1),
+                { ...last, content: lines.join("\n") },
+              ];
+            }
+            return [
+              ...prev,
+              { role: "system", content: line, slashOutput: true },
+            ];
+          });
           break;
+        }
         case "chat_workflow_review": {
           // dev-plan/32 Tier 3: spawn a review bubble. We replace any
           // earlier review bubble for the same id (re-author cycle
