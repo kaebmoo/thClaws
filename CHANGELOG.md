@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.97.0] — 2026-07-15
+
+New BYOK provider, prompt history in Chat, global copy selection, and a GFM table rendering fix.
+
+### Added
+- **9router: a self-hosted BYOK provider with an OpenAI-compatible API.**
+- **Chat: bash-style prompt history, now shared with Terminal.**
+- **Copy: Ctrl/Cmd+C copies a selection everywhere — Chat, Terminal, and agent shells.**
+- **GUI Shell: GFM tables now render in the shared chat component.**
+
+### Fixed
+- **Doc tools: miscounted GFM table delimiter rows are repaired before rendering.**
+
 ## [0.96.0] — 2026-07-15
 
 New BYOK provider, catalogue additions, and fixes for bash cancellation and app layout.

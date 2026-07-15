@@ -1993,16 +1993,6 @@
       "list_url": "https://ollama.com/v1/models",
       "default_context": 262144,
       "models": {
-        "ollama-cloud/deepseek-v3.1:671b": {
-          "context": 262144,
-          "source": "https://ollama.com/v1/models (context unverified)",
-          "verified_at": "2026-04-26"
-        },
-        "ollama-cloud/deepseek-v3.2": {
-          "context": 262144,
-          "source": "https://ollama.com/v1/models (context unverified)",
-          "verified_at": "2026-04-26"
-        },
         "ollama-cloud/deepseek-v4-flash": {
           "context": 262144,
           "source": "https://ollama.com/v1/models (context unverified) + litellm:deepseek-v4-flash",
@@ -2017,50 +2007,7 @@
           "input_per_mtok": 0.435,
           "output_per_mtok": 0.87
         },
-        "ollama-cloud/devstral-2:123b": {
-          "context": 262144,
-          "source": "https://ollama.com/v1/models (context unverified)",
-          "verified_at": "2026-04-26"
-        },
-        "ollama-cloud/devstral-small-2:24b": {
-          "context": 262144,
-          "source": "https://ollama.com/v1/models (context unverified)",
-          "verified_at": "2026-04-26"
-        },
-        "ollama-cloud/gemini-3-flash-preview": {
-          "context": 262144,
-          "source": "https://ollama.com/v1/models (context unverified) + litellm:gemini-3-flash-preview",
-          "verified_at": "2026-06-10",
-          "input_per_mtok": 0.5,
-          "output_per_mtok": 3.0,
-          "cached_input_per_mtok": 0.05
-        },
-        "ollama-cloud/gemma3:12b": {
-          "context": 262144,
-          "source": "https://ollama.com/v1/models (context unverified)",
-          "verified_at": "2026-04-26"
-        },
-        "ollama-cloud/gemma3:27b": {
-          "context": 262144,
-          "source": "https://ollama.com/v1/models (context unverified)",
-          "verified_at": "2026-04-26"
-        },
-        "ollama-cloud/gemma3:4b": {
-          "context": 262144,
-          "source": "https://ollama.com/v1/models (context unverified)",
-          "verified_at": "2026-04-26"
-        },
         "ollama-cloud/gemma4:31b": {
-          "context": 262144,
-          "source": "https://ollama.com/v1/models (context unverified)",
-          "verified_at": "2026-04-26"
-        },
-        "ollama-cloud/glm-4.7": {
-          "context": 262144,
-          "source": "https://ollama.com/v1/models (context unverified)",
-          "verified_at": "2026-04-26"
-        },
-        "ollama-cloud/glm-5": {
           "context": 262144,
           "source": "https://ollama.com/v1/models (context unverified)",
           "verified_at": "2026-04-26"
@@ -2100,11 +2047,6 @@
           "source": "https://ollama.com/v1/models",
           "verified_at": "2026-06-13"
         },
-        "ollama-cloud/minimax-m2.1": {
-          "context": 262144,
-          "source": "https://ollama.com/v1/models (context unverified)",
-          "verified_at": "2026-04-26"
-        },
         "ollama-cloud/minimax-m2.5": {
           "context": 262144,
           "source": "https://ollama.com/v1/models (context unverified)",
@@ -2119,21 +2061,6 @@
           "context": 262144,
           "source": "https://ollama.com/v1/models",
           "verified_at": "2026-06-02"
-        },
-        "ollama-cloud/ministral-3:14b": {
-          "context": 262144,
-          "source": "https://ollama.com/v1/models (context unverified)",
-          "verified_at": "2026-04-26"
-        },
-        "ollama-cloud/ministral-3:3b": {
-          "context": 262144,
-          "source": "https://ollama.com/v1/models (context unverified)",
-          "verified_at": "2026-04-26"
-        },
-        "ollama-cloud/ministral-3:8b": {
-          "context": 262144,
-          "source": "https://ollama.com/v1/models (context unverified)",
-          "verified_at": "2026-04-26"
         },
         "ollama-cloud/mistral-large-3:675b": {
           "context": 262144,
@@ -2154,16 +2081,6 @@
           "context": 262144,
           "source": "https://ollama.com/v1/models",
           "verified_at": "2026-06-06"
-        },
-        "ollama-cloud/qwen3-coder-next": {
-          "context": 262144,
-          "source": "https://ollama.com/v1/models (context unverified)",
-          "verified_at": "2026-04-26"
-        },
-        "ollama-cloud/qwen3-coder:480b": {
-          "context": 262144,
-          "source": "https://ollama.com/v1/models (context unverified)",
-          "verified_at": "2026-04-26"
         },
         "ollama-cloud/qwen3.5:397b": {
           "context": 262144,
