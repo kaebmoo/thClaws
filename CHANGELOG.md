@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.100.0] — 2026-07-17
+
+Windows GUI Shell bridge inline and python3 PATH fix.
+
+### Fixed
+- **Windows: the GUI Shell bridge script is inlined so custom tabs load without a fetch round-trip, and a python3 PATH shim is injected at startup so bundled tools resolve correctly.**
+
 ## [0.99.0] — 2026-07-17
 
 Tutorial Studio chapter context menus and tab reattach, background-job health reporting, and cloud sync timeout fixes.

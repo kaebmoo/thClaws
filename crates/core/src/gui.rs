@@ -467,7 +467,14 @@ fn serve_gui_shell_asset(
     };
 
     let body: Cow<'static, [u8]> = if mime.starts_with("text/html") {
-        Cow::Owned(inject_bridge_script(&bytes))
+        // Inline the bridge (don't `<script src="thclaws://…">` it): on Windows
+        // the WebView runs from http://thclaws.localhost/, where the `thclaws://`
+        // scheme doesn't resolve, so an external bridge script fails to load and
+        // `window.thclaws` is undefined — breaking every shell (empty model
+        // dropdowns, dead tabs; #184). Inlining works on macOS + Windows alike.
+        Cow::Owned(crate::gui_shell::serve::inject_inline_bridge_with_id(
+            &bytes, shell_id,
+        ))
     } else {
         Cow::Owned(bytes)
     };
@@ -480,9 +487,11 @@ fn serve_gui_shell_asset(
 }
 
 /// Inject `<script src="thclaws://localhost/gui-shell-bridge.js"></script>`
-/// at the start of `<head>` so shell authors don't have to include it
-/// manually. If no `<head>` is present (rare — shells are encouraged to
-/// declare one), prepend a minimal head wrapper at the top of the body.
+/// at the start of `<head>`. Superseded by the inlining path
+/// (`gui_shell::serve::inject_inline_bridge_with_id`) which also works on the
+/// Windows http://thclaws.localhost/ WebView where `thclaws://` can't load
+/// (#184); kept for reference.
+#[allow(dead_code)]
 fn inject_bridge_script(html: &[u8]) -> Vec<u8> {
     // Bridge (external, custom-protocol asset) + the shared theme/chrome
     // runtime inlined right after it — same head injection in every serve
