@@ -1,7 +1,7 @@
 {
   "schema": 4,
   "source": "baseline 2026-06-10 — pricing synced from LiteLLM (github.com/BerriAI/litellm)",
-  "fetched_at": "2026-07-15T00:00:00Z",
+  "fetched_at": "2026-07-17T00:00:00Z",
   "providers": {
     "anthropic": {
       "list_url": "https://api.anthropic.com/v1/models",
@@ -1908,6 +1908,11 @@
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
           "verified_at": "2026-05-04"
         },
+        "nvidia/poolside/laguna-xs-2.1": {
+          "context": 131072,
+          "source": "https://integrate.api.nvidia.com/v1/models",
+          "verified_at": "2026-07-17"
+        },
         "nvidia/qwen/qwen3-next-80b-a3b-instruct": {
           "context": 131072,
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
@@ -1942,6 +1947,11 @@
           "context": 131072,
           "source": "https://integrate.api.nvidia.com/v1/models",
           "verified_at": "2026-06-02"
+        },
+        "nvidia/thinkingmachines/inkling": {
+          "context": 131072,
+          "source": "https://integrate.api.nvidia.com/v1/models",
+          "verified_at": "2026-07-17"
         },
         "nvidia/upstage/solar-10.7b-instruct": {
           "context": 131072,
@@ -2830,6 +2840,11 @@
           "source": "https://opencode.ai/zen/go/v1/models",
           "verified_at": "2026-06-20"
         },
+        "opencode-go/grok-4.5": {
+          "context": 131072,
+          "source": "https://opencode.ai/zen/go/v1/models",
+          "verified_at": "2026-07-17"
+        },
         "opencode-go/hy3-preview": {
           "context": 131072,
           "source": "https://opencode.ai/zen/go/v1/models (context unverified)",
@@ -2849,6 +2864,11 @@
           "context": 131072,
           "source": "https://opencode.ai/zen/go/v1/models",
           "verified_at": "2026-06-13"
+        },
+        "opencode-go/kimi-k3": {
+          "context": 131072,
+          "source": "https://opencode.ai/zen/go/v1/models",
+          "verified_at": "2026-07-17"
         },
         "opencode-go/mimo-v2-omni": {
           "context": 131072,
@@ -3170,15 +3190,6 @@
           "output_per_mtok": 15.0,
           "cached_input_per_mtok": 0.3,
           "cache_creation_per_mtok": 3.75
-        },
-        "arcee-ai/coder-large": {
-          "context": 32768,
-          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-06-10",
-          "free": false,
-          "chat": true,
-          "input_per_mtok": 0.5,
-          "output_per_mtok": 0.8
         },
         "arcee-ai/trinity-large-thinking": {
           "context": 262144,
@@ -6946,6 +6957,13 @@
           "input_per_mtok": 1.9,
           "output_per_mtok": 8.0
         },
+        "moonshot/kimi-k3": {
+          "context": 262144,
+          "source": "https://api.moonshot.ai/v1/models + manual:kimi-k3",
+          "verified_at": "2026-07-17",
+          "input_per_mtok": 3.0,
+          "output_per_mtok": 15.0
+        },
         "moonshot/moonshot-v1-128k": {
           "context": 131072,
           "source": "https://api.moonshot.ai/v1/models + litellm:moonshot-v1-128k",
@@ -7243,6 +7261,11 @@
           "context": 128000,
           "source": "https://api.tokenrouter.com/v1/models",
           "verified_at": "2026-06-14"
+        },
+        "tokenrouter/moonshotai/kimi-k3": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-07-17"
         },
         "tokenrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": {
           "context": 128000,

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.98.0] — 2026-07-17
+
+Tutorial Studio batch workflows, Book Author drafting improvements, Moonshot Kimi K3 pricing, and a tier-s memory bump.
+
+### Added
+- **Tutorial Studio: a book-to-tutorial flow — per-slide layout picker, GUI buttons for book and prose imports.**
+- **Tutorial Studio: batch voice-over picker and a Build-all button for chapter videos.**
+- **Tutorial Studio: drafting now gives each chapter whole-course context, and prose files sort by name.**
+- **Book Author: the Idea form auto-fills when re-entering an existing book.**
+- **Pricing: Moonshot Kimi K3 model ($3 input / $15 output per million tokens).**
+- **Runner: tier-s memory limit raised from 1 GiB to 2 GiB.**
+- **Cloud sync: push and pull stream through temp files, sync cap raised to 10 GiB.**
+
+### Fixed
+- **GUI Shell: an empty asset path now defaults to `index.html` instead of failing. [#183](https://github.com/thClaws/thClaws/issues/183)**
+- **UI: streamed slash-command output is folded into a single chat bubble instead of splitting across several.**
+- **Cloud sync: `--force-rebind` now implies `--force` on push and pull.**
+- **Book Author: fails gracefully when draft staging is missing, and stale staging is cleared on startup.**
+
 ## [0.97.0] — 2026-07-15
 
 New BYOK provider, prompt history in Chat, global copy selection, and a GFM table rendering fix.

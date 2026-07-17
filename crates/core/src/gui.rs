@@ -434,15 +434,20 @@ fn serve_gui_shell_asset(
     registry: &crate::gui_shell::ShellRegistry,
     rest: &str,
 ) -> Response<Cow<'static, [u8]>> {
-    // rest = "<id>/<path>" or "<id>" (latter → treat as "<id>/index.html"
-    // wouldn't apply here because the loader always specifies index.html
-    // in the iframe src, so a bare id is a 404).
+    // rest = "<id>/<path>", "<id>/" or "<id>". A bare id or trailing slash
+    // (empty asset path) defaults to index.html — mirrors the cloud `--serve`
+    // route, and is what the Windows desktop hits: the WebView runs from
+    // http://thclaws.localhost/, so UIView takes the http branch and emits
+    // `gui-shell/<id>/?session=…` with no explicit index.html (#183).
     let decoded = urlencoding::decode(rest)
         .map(|c| c.into_owned())
         .unwrap_or_else(|_| rest.to_string());
     let mut parts = decoded.splitn(2, '/');
     let shell_id = parts.next().unwrap_or("");
-    let rel = parts.next().unwrap_or("");
+    let rel = match parts.next().unwrap_or("") {
+        "" => "index.html",
+        r => r,
+    };
 
     let Some(shell) = registry.resolve(shell_id) else {
         return Response::builder()
@@ -1568,6 +1573,42 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
             _ => {}
         }
     });
+}
+
+#[cfg(test)]
+mod gui_shell_asset_tests {
+    use super::*;
+
+    // #183: on Windows the WebView runs from http://thclaws.localhost/, so
+    // UIView takes the http branch and emits `gui-shell/<id>/` with no
+    // explicit index.html. An empty asset path (bare id or trailing slash)
+    // must resolve to index.html, not 404 "asset not found".
+    #[test]
+    fn empty_asset_path_defaults_to_index_html() {
+        let reg = crate::gui_shell::ShellRegistry::builtin_only();
+        for rest in ["media-studio", "media-studio/"] {
+            let res = serve_gui_shell_asset(&reg, rest);
+            assert_eq!(res.status(), 200, "rest {rest:?} should serve index.html");
+            assert!(
+                String::from_utf8_lossy(res.body()).contains("gui-shell-bridge.js"),
+                "rest {rest:?} should be the bridge-injected index.html",
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_asset_served_and_missing_or_unknown_still_404() {
+        let reg = crate::gui_shell::ShellRegistry::builtin_only();
+        assert_eq!(
+            serve_gui_shell_asset(&reg, "media-studio/index.html").status(),
+            200,
+        );
+        assert_eq!(
+            serve_gui_shell_asset(&reg, "media-studio/nope.html").status(),
+            404,
+        );
+        assert_eq!(serve_gui_shell_asset(&reg, "unknown-shell/").status(), 404);
+    }
 }
 
 #[cfg(test)]
