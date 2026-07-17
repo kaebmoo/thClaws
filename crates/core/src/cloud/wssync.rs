@@ -8,8 +8,10 @@
 //! ride along so work resumes on the other end mid-session. The ONLY things
 //! dropped are regenerable, machine/arch-specific build dirs that would
 //! corrupt the destination or waste the payload (`node_modules/`, `target/`,
-//! `.venv/`, …) — see [`SYNC_STRIP_DIRS`]. Sync-specific pieces:
-//!   - a 250 MB payload cap (`MAX_SYNC_BYTES`),
+//! `.venv/`, …) — see [`SYNC_STRIP_DIRS`]. Both ends stream the tarball
+//! through a temp file (tar→disk on pack, disk→untar on apply) so memory
+//! stays flat regardless of payload size. Sync-specific pieces:
+//!   - a 10 GiB payload cap (`MAX_SYNC_BYTES`, the PVC quota),
 //!   - `--delete` mirroring that moves removed files to `.sync-trash/<ts>/`
 //!     (recoverable, not a hard delete),
 //!   - traversal-safe extraction (rejects `..` / absolute, skips symlinks),
@@ -24,11 +26,14 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Hard cap on a single sync payload (uncompressed sum of synced files).
-pub const MAX_SYNC_BYTES: u64 = 250 * 1024 * 1024;
+/// Matches the hosted workspace PVC quota; sync streams via temp files so the
+/// cap tracks disk, not memory.
+pub const MAX_SYNC_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 const BINDING_REL: &str = ".thclaws/cloud-sync.json";
 const SETTINGS_REL: &str = ".thclaws/settings.json";
@@ -244,9 +249,26 @@ pub fn write_binding(root: &Path, b: &Binding) -> Result<(), String> {
     std::fs::write(&p, data).map_err(|e| format!("write binding: {}", e))
 }
 
-/// Tar+gzip the synced files under `root`. `include_runtime` bypasses the strip
-/// set (still skips `.sync-trash/`). Enforces `MAX_SYNC_BYTES`.
-pub fn tar_workspace(root: &Path, include_runtime: bool) -> Result<Vec<u8>, String> {
+/// Tar+gzip a list of rel paths under `root` into `w`.
+fn write_tar<W: Write>(root: &Path, files: &[PathBuf], w: W) -> Result<(), String> {
+    let enc = GzEncoder::new(w, Compression::default());
+    let mut tar = tar::Builder::new(enc);
+    for rel in files {
+        let abs = root.join(rel);
+        let mut f =
+            std::fs::File::open(&abs).map_err(|e| format!("open {}: {}", abs.display(), e))?;
+        tar.append_file(rel, &mut f)
+            .map_err(|e| format!("tar append {}: {}", rel.display(), e))?;
+    }
+    let enc = tar.into_inner().map_err(|e| format!("tar finish: {}", e))?;
+    enc.finish().map_err(|e| format!("gz finish: {}", e))?;
+    Ok(())
+}
+
+/// Tar+gzip the synced files under `root` into `w`. `include_runtime` bypasses
+/// the strip set (still skips `.sync-trash/`). Enforces `MAX_SYNC_BYTES`.
+/// Returns the uncompressed byte total.
+pub fn tar_workspace_to<W: Write>(root: &Path, include_runtime: bool, w: W) -> Result<u64, String> {
     let files = if include_runtime {
         walk(root, &|rel| {
             let s = norm(rel);
@@ -270,17 +292,15 @@ pub fn tar_workspace(root: &Path, include_runtime: bool) -> Result<Vec<u8>, Stri
             MAX_SYNC_BYTES / 1_048_576
         ));
     }
-    let enc = GzEncoder::new(Vec::new(), Compression::default());
-    let mut tar = tar::Builder::new(enc);
-    for rel in &files {
-        let abs = root.join(rel);
-        let mut f =
-            std::fs::File::open(&abs).map_err(|e| format!("open {}: {}", abs.display(), e))?;
-        tar.append_file(rel, &mut f)
-            .map_err(|e| format!("tar append {}: {}", rel.display(), e))?;
-    }
-    let enc = tar.into_inner().map_err(|e| format!("tar finish: {}", e))?;
-    enc.finish().map_err(|e| format!("gz finish: {}", e))
+    write_tar(root, &files, w)?;
+    Ok(total)
+}
+
+/// In-memory wrapper over [`tar_workspace_to`] (back-compat / tests).
+pub fn tar_workspace(root: &Path, include_runtime: bool) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    tar_workspace_to(root, include_runtime, &mut buf)?;
+    Ok(buf)
 }
 
 fn unix_secs() -> u64 {
@@ -299,10 +319,10 @@ fn canonical_root(root: &Path) -> Result<PathBuf, String> {
 
 /// Extract a `.tar.gz` into the (canonical) `root`, overwriting in place.
 /// Traversal-safe. Returns (files written, set of incoming relative paths).
-fn extract_tarball(bytes: &[u8], root: &Path) -> Result<(usize, BTreeSet<PathBuf>), String> {
+fn extract_tarball<R: Read>(reader: R, root: &Path) -> Result<(usize, BTreeSet<PathBuf>), String> {
     let mut written = 0usize;
     let mut incoming: BTreeSet<PathBuf> = BTreeSet::new();
-    let mut archive = tar::Archive::new(GzDecoder::new(bytes));
+    let mut archive = tar::Archive::new(GzDecoder::new(reader));
     for entry in archive
         .entries()
         .map_err(|e| format!("read archive: {}", e))?
@@ -332,12 +352,16 @@ fn extract_tarball(bytes: &[u8], root: &Path) -> Result<(usize, BTreeSet<PathBuf
     Ok((written, incoming))
 }
 
-/// Extract a full `.tar.gz` into `root`, overwriting in place. When `delete` is
-/// set, synced files not present in the tarball are moved to `.sync-trash/<ts>/`
-/// (recoverable mirror).
-pub fn untar_workspace(bytes: &[u8], root: &Path, delete: bool) -> Result<UntarResult, String> {
+/// Extract a full `.tar.gz` (streamed from `reader`) into `root`, overwriting in
+/// place. When `delete` is set, synced files not present in the tarball are
+/// moved to `.sync-trash/<ts>/` (recoverable mirror).
+pub fn untar_workspace_from<R: Read>(
+    reader: R,
+    root: &Path,
+    delete: bool,
+) -> Result<UntarResult, String> {
     let root = canonical_root(root)?;
-    let (written, incoming) = extract_tarball(bytes, &root)?;
+    let (written, incoming) = extract_tarball(reader, &root)?;
     let trash = root.join(TRASH_PREFIX).join(unix_secs().to_string());
     let mut trash_used = false;
     let mut deleted = 0usize;
@@ -354,6 +378,11 @@ pub fn untar_workspace(bytes: &[u8], root: &Path, delete: bool) -> Result<UntarR
         deleted,
         trash_dir: trash_used.then_some(trash),
     })
+}
+
+/// In-memory wrapper over [`untar_workspace_from`] (back-compat / tests).
+pub fn untar_workspace(bytes: &[u8], root: &Path, delete: bool) -> Result<UntarResult, String> {
+    untar_workspace_from(std::io::Cursor::new(bytes), root, delete)
 }
 
 /// Reject archive entries that would escape the extraction root.
@@ -502,11 +531,12 @@ pub fn diverged_from_base(root: &Path, manifest: &[FileEntry]) -> bool {
     }
 }
 
-/// Tar+gzip a specific list of relative paths (incremental push body / pull
-/// export). Skips missing or unsafe paths. Enforces `MAX_SYNC_BYTES`.
-pub fn tar_paths(root: &Path, paths: &[String]) -> Result<Vec<u8>, String> {
+/// Tar+gzip a specific list of relative paths into `w` (incremental push body /
+/// pull export). Skips missing or unsafe paths. Enforces `MAX_SYNC_BYTES`.
+/// Returns the uncompressed byte total.
+pub fn tar_paths_to<W: Write>(root: &Path, paths: &[String], w: W) -> Result<u64, String> {
     let mut total = 0u64;
-    let mut valid: Vec<&str> = Vec::new();
+    let mut valid: Vec<PathBuf> = Vec::new();
     for p in paths {
         let rel = Path::new(p);
         if is_unsafe_entry(rel) {
@@ -515,7 +545,7 @@ pub fn tar_paths(root: &Path, paths: &[String]) -> Result<Vec<u8>, String> {
         if let Ok(m) = std::fs::metadata(root.join(rel)) {
             if m.is_file() {
                 total += m.len();
-                valid.push(p);
+                valid.push(rel.to_path_buf());
             }
         }
     }
@@ -526,17 +556,15 @@ pub fn tar_paths(root: &Path, paths: &[String]) -> Result<Vec<u8>, String> {
             MAX_SYNC_BYTES / 1_048_576
         ));
     }
-    let enc = GzEncoder::new(Vec::new(), Compression::default());
-    let mut tar = tar::Builder::new(enc);
-    for p in valid {
-        let abs = root.join(p);
-        let mut f =
-            std::fs::File::open(&abs).map_err(|e| format!("open {}: {}", abs.display(), e))?;
-        tar.append_file(p, &mut f)
-            .map_err(|e| format!("tar append {}: {}", p, e))?;
-    }
-    let enc = tar.into_inner().map_err(|e| format!("tar finish: {}", e))?;
-    enc.finish().map_err(|e| format!("gz finish: {}", e))
+    write_tar(root, &valid, w)?;
+    Ok(total)
+}
+
+/// In-memory wrapper over [`tar_paths_to`] (back-compat / tests).
+pub fn tar_paths(root: &Path, paths: &[String]) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    tar_paths_to(root, paths, &mut buf)?;
+    Ok(buf)
 }
 
 /// Move a list of relative paths to `.sync-trash/<ts>/` (incremental `--delete`:
