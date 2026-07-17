@@ -434,6 +434,7 @@ pub async fn run_with_engine(
         }
     });
     let ws_connections = Arc::new(AtomicUsize::new(0));
+    let _ = SERVE_WORKSPACE.set(workspace.clone()); // for /healthz background-job probe
     let state = ServeState {
         shared,
         approver,
@@ -1179,10 +1180,124 @@ async fn sync_bearer_gate(
     next.run(req).await
 }
 
+/// Workspace root, captured at serve startup so `serve_health` (no `State`) can
+/// probe for detached background jobs. Set once in `run_with_engine`.
+static SERVE_WORKSPACE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// True if a detached background job is still running in the workspace. Any
+/// agent that spawns one drops a `<dir>/.jobs/<id>.json` carrying a live `pid`
+/// (course.py's `job start` does this); while any such pid is alive the cloud
+/// idle-reaper must NOT pause the pod — `/healthz` reports it as busy.
+fn background_jobs_alive() -> bool {
+    let Some(root) = SERVE_WORKSPACE.get() else {
+        return false;
+    };
+    fn scan(dir: &std::path::Path, depth: u8) -> bool {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for e in rd.flatten() {
+            if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let name = e.file_name();
+            let p = e.path();
+            if name == ".jobs" {
+                if jobs_dir_has_live_pid(&p) {
+                    return true;
+                }
+            } else if depth > 0
+                && !matches!(
+                    name.to_str(),
+                    Some("node_modules" | "target" | ".git" | ".venv" | ".sync-trash")
+                )
+                && scan(&p, depth - 1)
+            {
+                return true;
+            }
+        }
+        false
+    }
+    scan(root, 4)
+}
+
+fn jobs_dir_has_live_pid(dir: &std::path::Path) -> bool {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let pid = std::fs::read_to_string(&p)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| v.get("pid").and_then(|x| x.as_i64()));
+        if let Some(pid) = pid {
+            if pid_alive(pid as i32) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(unix)]
+fn pid_alive(pid: i32) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    // kill(pid, 0): 0 → alive; EPERM → alive (not ours); ESRCH → dead.
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+#[cfg(not(unix))]
+fn pid_alive(_pid: i32) -> bool {
+    false
+}
+
+#[cfg(all(test, unix))]
+mod background_job_probe_tests {
+    use super::*;
+
+    #[test]
+    fn pid_alive_self_true_bogus_false() {
+        assert!(pid_alive(std::process::id() as i32));
+        assert!(!pid_alive(2_147_480_000)); // a pid that won't exist
+        assert!(!pid_alive(0));
+    }
+
+    #[test]
+    fn jobs_dir_busy_only_when_a_pid_is_live() {
+        let d = tempfile::tempdir().unwrap();
+        let live = d.path().join("store/.jobs");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(
+            live.join("import-book.json"),
+            format!(
+                r#"{{"pid": {}, "argv": ["import-book"]}}"#,
+                std::process::id()
+            ),
+        )
+        .unwrap();
+        assert!(jobs_dir_has_live_pid(&live), "own pid should read as live");
+
+        let dead = d.path().join("other/.jobs");
+        std::fs::create_dir_all(&dead).unwrap();
+        std::fs::write(dead.join("old.json"), r#"{"pid": 2147480000, "argv": []}"#).unwrap();
+        assert!(
+            !jobs_dir_has_live_pid(&dead),
+            "dead pid must not read as busy"
+        );
+    }
+}
+
 async fn serve_health() -> impl IntoResponse {
+    let busy = crate::agent_activity::is_agent_busy() || background_jobs_alive();
     axum::Json(serde_json::json!({
         "ok": true,
-        "busy": crate::agent_activity::is_agent_busy(),
+        "busy": busy,
         "busy_count": crate::agent_activity::busy_count(),
     }))
 }

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.99.0] — 2026-07-17
+
+Tutorial Studio chapter context menus and tab reattach, background-job health reporting, and cloud sync timeout fixes.
+
+### Added
+- **Tutorial Studio: right-click a chapter to rename or delete via a context menu.**
+- **Tutorial Studio: reopening a closed tab re-attaches to its running background job instead of starting fresh.**
+- **Serve: the `/healthz` endpoint reports busy while a detached background job is running.**
+
+### Fixed
+- **Tutorial Studio: the job runner strips `--` separators before re-spawning a background job.**
+- **Cloud sync: push and pull switch to a no-total-timeout client so long-running transfers don't fail spuriously.**
+
 ## [0.98.0] — 2026-07-17
 
 Tutorial Studio batch workflows, Book Author drafting improvements, Moonshot Kimi K3 pricing, and a tier-s memory bump.

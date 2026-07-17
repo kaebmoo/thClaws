@@ -24,18 +24,30 @@ async fn stream_to_temp(res: reqwest::Response) -> Result<tempfile::NamedTempFil
 pub struct Client {
     base_url: String,
     http: reqwest::Client,
+    /// No total-request timeout — for multi-hundred-MB / multi-GB workspace
+    /// push/pull/export, where the 120 s cap on `http` would abort the transfer
+    /// mid-stream (the client closes the upload and the edge returns a spurious
+    /// 499). Keeps a connect timeout + TCP keepalive so a dead peer still fails.
+    http_bulk: reqwest::Client,
     token: Option<String>,
 }
 
 impl Client {
     pub fn new(base_url: impl Into<String>, token: Option<String>) -> Self {
+        let ua = concat!("thclaws-cli/", env!("CARGO_PKG_VERSION"));
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             http: reqwest::Client::builder()
-                .user_agent(concat!("thclaws-cli/", env!("CARGO_PKG_VERSION")))
+                .user_agent(ua)
                 .timeout(std::time::Duration::from_secs(120))
                 .build()
                 .expect("reqwest client"),
+            http_bulk: reqwest::Client::builder()
+                .user_agent(ua)
+                .connect_timeout(std::time::Duration::from_secs(30))
+                .tcp_keepalive(std::time::Duration::from_secs(60))
+                .build()
+                .expect("reqwest bulk client"),
             token,
         }
     }
@@ -248,7 +260,7 @@ impl Client {
             url.push_str("?include_runtime=true");
         }
         let res = self
-            .http
+            .http_bulk
             .get(&url)
             .header("Authorization", format!("Bearer {}", jwt))
             .send()
@@ -305,7 +317,7 @@ impl Client {
             None => reqwest::Body::wrap_stream(reader),
         };
         let res = self
-            .http
+            .http_bulk
             .post(&url)
             .header("Authorization", format!("Bearer {}", jwt))
             .header("Content-Type", "application/gzip")
@@ -374,7 +386,7 @@ impl Client {
         paths: &[String],
     ) -> Result<tempfile::NamedTempFile, String> {
         let res = self
-            .http
+            .http_bulk
             .post(format!(
                 "{}/workspace/sync/export",
                 ws_url.trim_end_matches('/')
