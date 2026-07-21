@@ -2028,12 +2028,15 @@ pub async fn dispatch(
             }
         }
         SlashCommand::KmsNew { name, project } => {
-            let scope = if project {
-                crate::kms::KmsScope::Project
+            // Default (project) reuses any existing same-named KMS across
+            // scopes via `ensure_default` so `/kms new foo` can't duplicate a
+            // base that already lives in user scope. `--user` stays explicit.
+            let res = if project {
+                crate::kms::ensure_default(&name)
             } else {
-                crate::kms::KmsScope::User
+                crate::kms::create(&name, crate::kms::KmsScope::User)
             };
-            match crate::kms::create(&name, scope) {
+            match res {
                 Ok(k) => {
                     emit(
                         events_tx,
@@ -2829,10 +2832,38 @@ pub async fn dispatch(
         }
 
         // ─── MCP servers ────────────────────────────────────────────
+        SlashCommand::Tools => {
+            // Ground truth: what the model actually sees this turn (gate/env
+            // filtered, sorted) — not an LLM prose enumeration.
+            let defs = state.tool_registry.tool_defs();
+            let mut out = format!("{} tools available:\n", defs.len());
+            for d in &defs {
+                let desc = d.description.lines().next().unwrap_or("").trim();
+                let desc: String = if desc.chars().count() > 90 {
+                    format!("{}…", desc.chars().take(89).collect::<String>())
+                } else {
+                    desc.to_string()
+                };
+                out.push_str(&format!("  {} — {}\n", d.name, desc));
+            }
+            emit(events_tx, out);
+        }
         SlashCommand::Mcp => {
-            let servers = crate::config::AppConfig::load()
+            let mut servers = crate::config::AppConfig::load()
                 .map(|c| c.mcp_servers)
                 .unwrap_or_default();
+            // Fold in plugin-contributed servers — the same merge the
+            // runtime does at spawn (agent_runtime.rs) — so the list
+            // reflects what actually loads. Without this a plugin's MCP
+            // is invisible here even though its tools are live. Config
+            // wins on a name clash.
+            let mut plugin_names = std::collections::HashSet::new();
+            for p_mcp in crate::plugins::plugin_mcp_servers() {
+                if !servers.iter().any(|s| s.name == p_mcp.name) {
+                    plugin_names.insert(p_mcp.name.clone());
+                    servers.push(p_mcp);
+                }
+            }
             if servers.is_empty() {
                 emit(events_tx, "no MCP servers configured".into());
             } else {
@@ -2843,7 +2874,12 @@ pub async fn dispatch(
                     } else {
                         "stdio"
                     };
-                    out.push_str(&format!("  {} ({kind})\n", s.name));
+                    let origin = if plugin_names.contains(&s.name) {
+                        " [plugin]"
+                    } else {
+                        ""
+                    };
+                    out.push_str(&format!("  {} ({kind}){origin}\n", s.name));
                 }
                 emit(events_tx, out);
             }
@@ -2999,14 +3035,14 @@ pub async fn dispatch(
                 emit(events_tx, out);
             }
         }
-        SlashCommand::PluginInstall { url, user } => {
+        SlashCommand::PluginInstall { url, user, force } => {
             // Resolve marketplace slug → install_url (no-op for URLs).
             let (effective_url, abort_msg) = crate::repl::resolve_plugin_install_target(&url);
             if let Some(msg) = abort_msg {
                 emit(events_tx, msg);
                 return;
             }
-            match crate::plugins::install(&effective_url, user).await {
+            match crate::plugins::install(&effective_url, user, force).await {
                 Ok(plugin) => {
                     // Refresh the SkillTool store so plugin-contributed
                     // skills are callable in this session. Plugin-

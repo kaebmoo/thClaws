@@ -1598,9 +1598,11 @@ mod gui_shell_asset_tests {
         for rest in ["media-studio", "media-studio/"] {
             let res = serve_gui_shell_asset(&reg, rest);
             assert_eq!(res.status(), 200, "rest {rest:?} should serve index.html");
+            // #184: the html branch now inlines the bridge (Windows can't load
+            // the thclaws:// external script), so assert on the inline marker.
             assert!(
-                String::from_utf8_lossy(res.body()).contains("gui-shell-bridge.js"),
-                "rest {rest:?} should be the bridge-injected index.html",
+                String::from_utf8_lossy(res.body()).contains("__thclaws_shell_id"),
+                "rest {rest:?} should be the inline-bridge-injected index.html",
             );
         }
     }

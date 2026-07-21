@@ -7,7 +7,7 @@ pub mod qwen;
 pub mod veo;
 
 pub use dashscope_video::DashScopeVideoProvider;
-pub use gemini::GeminiImageProvider;
+pub use gemini::{GeminiImageProvider, GeminiSpeechProvider};
 pub use openai::OpenAiImageProvider;
 pub use qwen::QwenImageProvider;
 pub use veo::VeoVideoProvider;

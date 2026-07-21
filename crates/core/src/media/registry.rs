@@ -6,10 +6,10 @@
 //! with the pre-Tier-1 Gemini-only tools).
 
 use crate::error::{Error, Result};
-use crate::media::provider::{ImageModelInfo, ImageProvider, VideoProvider};
+use crate::media::provider::{ImageModelInfo, ImageProvider, SpeechProvider, VideoProvider};
 use crate::media::providers::{
-    DashScopeVideoProvider, GeminiImageProvider, OpenAiImageProvider, QwenImageProvider,
-    VeoVideoProvider,
+    DashScopeVideoProvider, GeminiImageProvider, GeminiSpeechProvider, OpenAiImageProvider,
+    QwenImageProvider, VeoVideoProvider,
 };
 use std::sync::Arc;
 
@@ -25,6 +25,69 @@ pub fn all() -> Vec<Arc<dyn ImageProvider>> {
 /// All registered video providers, in resolution priority order.
 pub fn video_all() -> Vec<Arc<dyn VideoProvider>> {
     vec![Arc::new(VeoVideoProvider), Arc::new(DashScopeVideoProvider)]
+}
+
+/// All registered speech (text→speech) providers, in resolution priority
+/// order. Gemini only for now (default: gemini-3.1-flash-tts-preview).
+pub fn speech_all() -> Vec<Arc<dyn SpeechProvider>> {
+    vec![Arc::new(GeminiSpeechProvider)]
+}
+
+/// Resolve a speech `provider`/`model` pair to a concrete provider + its
+/// native model id. Same semantics as [`resolve`] but over speech
+/// providers (default: Gemini).
+pub fn resolve_speech(provider: &str, model: &str) -> Result<(Arc<dyn SpeechProvider>, String)> {
+    let provider = provider.trim();
+    let model = model.trim();
+
+    if !provider.is_empty() {
+        let p = speech_all()
+            .into_iter()
+            .find(|p| p.id().eq_ignore_ascii_case(provider))
+            .ok_or_else(|| {
+                Error::Tool(format!(
+                    "unknown speech provider {provider:?} — known: {}",
+                    speech_all()
+                        .iter()
+                        .map(|p| p.id())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            })?;
+        let resolved = if model.is_empty() {
+            p.models()
+                .first()
+                .map(|m| m.id.to_string())
+                .ok_or_else(|| Error::Tool(format!("provider {:?} exposes no models", p.id())))?
+        } else {
+            p.resolve_model(model).ok_or_else(|| {
+                Error::Tool(format!(
+                    "provider {:?} doesn't have speech model {model:?} — try one of: {}",
+                    p.id(),
+                    p.models()
+                        .iter()
+                        .map(|m| m.id)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            })?
+        };
+        return Ok((p, resolved));
+    }
+
+    for p in speech_all() {
+        if let Some(resolved) = p.resolve_model(model) {
+            return Ok((p, resolved));
+        }
+    }
+    Err(Error::Tool(format!(
+        "unknown speech model {model:?} — known: {}",
+        speech_all()
+            .iter()
+            .flat_map(|p| p.models().iter().map(|m| format!("{}:{}", p.id(), m.id)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
 }
 
 /// Resolve a video `provider`/`model` pair to a concrete provider + its

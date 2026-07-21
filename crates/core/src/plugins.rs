@@ -3,7 +3,8 @@
 //!
 //! ## Layout
 //!
-//! A plugin is a directory (git repo or zip) containing a manifest:
+//! A plugin is a directory (git repo, zip, or a plain local folder)
+//! containing a manifest:
 //!
 //! - `.thclaws-plugin/plugin.json` (thClaws-native) — preferred
 //! - `.claude-plugin/plugin.json` (Claude Code compat) — fallback
@@ -294,7 +295,7 @@ pub fn read_manifest(root: &Path) -> Result<PluginManifest> {
 
 /// Install a plugin from a git URL or a `.zip` URL into the given scope.
 /// Returns the installed [`Plugin`] record.
-pub async fn install(url: &str, user: bool) -> Result<Plugin> {
+pub async fn install(url: &str, user: bool, force: bool) -> Result<Plugin> {
     // Org-policy gate: when `policies.plugins.enabled: true`, the URL
     // must match `allowed_hosts`. Open-core builds with no policy hit
     // `AllowDecision::NoPolicy` and pass through unchanged.
@@ -343,16 +344,35 @@ pub async fn install(url: &str, user: bool) -> Result<Plugin> {
         )));
     }
 
-    // Move to final location. Refuse to overwrite an existing plugin —
-    // remove first.
+    // Move to final location. A *registered* plugin is a real conflict —
+    // refuse unless `force`, telling the user to remove it first. But a
+    // directory can linger with no registry entry (a prior install whose
+    // plugins.json write was lost — deleted by a workspace sync, or a
+    // failed rollback). That orphan is unreachable by `/plugin remove`
+    // (registry-keyed) yet blocks reinstall, so always adopt it: clear
+    // the stale dir and continue.
     let final_dir = dest_parent.join(&manifest.name);
     if final_dir.exists() {
-        let _ = std::fs::remove_dir_all(&staging);
-        return Err(Error::Config(format!(
-            "plugin '{}' already installed at {} — run /plugin remove first",
-            manifest.name,
-            final_dir.display()
-        )));
+        let registered = PluginRegistry::load(user)
+            .ok()
+            .and_then(|r| r.find(&manifest.name).cloned())
+            .is_some();
+        if registered && !force {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(Error::Config(format!(
+                "plugin '{}' already installed at {} — run /plugin remove first, \
+                 or reinstall with --force",
+                manifest.name,
+                final_dir.display()
+            )));
+        }
+        if let Err(e) = std::fs::remove_dir_all(&final_dir) {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(Error::Config(format!(
+                "clear existing plugin dir {}: {e}",
+                final_dir.display()
+            )));
+        }
     }
     std::fs::rename(&plugin_root, &final_dir).map_err(|e| {
         Error::Config(format!(
@@ -450,15 +470,27 @@ pub fn find_installed_with_scope(name: &str) -> Option<(Plugin, bool)> {
 /// Returns whether anything was actually removed.
 pub fn remove(name: &str, user: bool) -> Result<bool> {
     let mut registry = PluginRegistry::load(user)?;
-    let Some(plugin) = registry.remove(name) else {
-        return Ok(false);
-    };
-    if plugin.path.exists() {
-        std::fs::remove_dir_all(&plugin.path)
-            .map_err(|e| Error::Config(format!("delete {}: {e}", plugin.path.display())))?;
+    if let Some(plugin) = registry.remove(name) {
+        if plugin.path.exists() {
+            std::fs::remove_dir_all(&plugin.path)
+                .map_err(|e| Error::Config(format!("delete {}: {e}", plugin.path.display())))?;
+        }
+        registry.save(user)?;
+        return Ok(true);
     }
-    registry.save(user)?;
-    Ok(true)
+    // No registry entry — but a stale dir can linger on disk when a prior
+    // registry write was lost. Clear it too, so `/plugin remove` unsticks
+    // the orphan that blocks reinstall instead of only touching the
+    // registry. Name is validated first: it's joined onto the plugins dir.
+    if is_valid_plugin_name(name) {
+        let stale = plugins_dir(user)?.join(name);
+        if stale.is_dir() {
+            std::fs::remove_dir_all(&stale)
+                .map_err(|e| Error::Config(format!("delete {}: {e}", stale.display())))?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Garbage-collect zombie registry entries: those whose `path` no
@@ -612,6 +644,12 @@ async fn fetch_into(url: &str, dest: &Path) -> Result<()> {
     if is_zip_url(url) {
         let bytes = download_zip(url).await?;
         extract_zip(&bytes, dest)
+    } else if let Some(src) = local_source_dir(url) {
+        // Install from a plain on-disk folder — no `git init` required.
+        // Copies the working tree as-is (excluding `.git`), so uncommitted
+        // edits ship too. A `#branch` request falls through to git_clone
+        // below (explicit branch ⇒ the caller wants committed git state).
+        copy_dir_all(&src, dest)
     } else {
         git_clone(url, dest).await
     }
@@ -620,6 +658,51 @@ async fn fetch_into(url: &str, dest: &Path) -> Result<()> {
 fn is_zip_url(url: &str) -> bool {
     let without_query = url.split(['?', '#']).next().unwrap_or(url);
     without_query.to_ascii_lowercase().ends_with(".zip")
+}
+
+/// If `url` points at an existing local directory, resolve it to the folder
+/// to copy — otherwise `None` (so remote git URLs, scp-style `git@…`, and
+/// `https://…` all fall through to `git_clone`). Honors a `#:subpath`
+/// fragment for installing one plugin out of a local monorepo, but declines
+/// (returns `None`) when a `#branch` is given so that explicit-branch
+/// installs keep git semantics.
+fn local_source_dir(url: &str) -> Option<PathBuf> {
+    let raw = url.strip_prefix("file://").unwrap_or(url);
+    let (base, branch, subpath) = crate::skills::parse_git_subpath(raw);
+    if branch.is_some() {
+        return None;
+    }
+    let base_dir = PathBuf::from(&base);
+    if !base_dir.is_dir() {
+        return None;
+    }
+    let resolved = match &subpath {
+        Some(sub) => base_dir.join(sub),
+        None => base_dir,
+    };
+    resolved.is_dir().then_some(resolved)
+}
+
+/// Recursively copy `src` into `dest`, skipping any `.git` metadata. Real
+/// subdirectories recurse; files (and symlinks, which are followed) are
+/// copied with their permissions. Symlinked directories are skipped to
+/// avoid cycles.
+fn copy_dir_all(src: &Path, dest: &Path) -> Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src)?.flatten() {
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        let path = entry.path();
+        let target = dest.join(entry.file_name());
+        let ft = entry.file_type()?;
+        if ft.is_dir() {
+            copy_dir_all(&path, &target)?;
+        } else if ft.is_file() || (ft.is_symlink() && path.is_file()) {
+            std::fs::copy(&path, &target)?;
+        }
+    }
+    Ok(())
 }
 
 async fn download_zip(url: &str) -> Result<Vec<u8>> {
@@ -834,6 +917,55 @@ mod tests {
         let m = read_manifest(dir.path()).unwrap();
         assert_eq!(m.name, "from-thclaws");
         assert_eq!(m.skills, vec!["skills".to_string()]);
+    }
+
+    #[test]
+    fn local_source_dir_resolves_folder_and_subpath() {
+        let dir = tempdir().unwrap();
+        // Bare folder path → itself.
+        assert_eq!(
+            local_source_dir(dir.path().to_str().unwrap()),
+            Some(dir.path().to_path_buf())
+        );
+        // `file://` prefix is stripped.
+        assert_eq!(
+            local_source_dir(&format!("file://{}", dir.path().display())),
+            Some(dir.path().to_path_buf())
+        );
+        // `#:subpath` selects a child dir.
+        let sub = dir.path().join("plugin-a");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert_eq!(
+            local_source_dir(&format!("{}#:plugin-a", dir.path().display())),
+            Some(sub)
+        );
+        // Explicit branch declines (keeps git semantics).
+        assert_eq!(
+            local_source_dir(&format!("{}#main", dir.path().display())),
+            None
+        );
+        // Non-existent path and remote URLs are not local dirs.
+        assert_eq!(local_source_dir("/no/such/plugin/dir"), None);
+        assert_eq!(local_source_dir("https://github.com/x/y.git"), None);
+    }
+
+    #[test]
+    fn copy_dir_all_copies_tree_and_skips_git() {
+        let src = tempdir().unwrap();
+        write_manifest(src.path(), r#"{"name": "folder-plugin"}"#);
+        std::fs::create_dir_all(src.path().join("skills/a")).unwrap();
+        std::fs::write(src.path().join("skills/a/SKILL.md"), "# a").unwrap();
+        // .git must NOT be copied.
+        std::fs::create_dir_all(src.path().join(".git")).unwrap();
+        std::fs::write(src.path().join(".git/config"), "x").unwrap();
+
+        let dest = tempdir().unwrap();
+        let out = dest.path().join("folder-plugin");
+        copy_dir_all(src.path(), &out).unwrap();
+
+        assert_eq!(read_manifest(&out).unwrap().name, "folder-plugin");
+        assert!(out.join("skills/a/SKILL.md").is_file());
+        assert!(!out.join(".git").exists());
     }
 
     #[test]

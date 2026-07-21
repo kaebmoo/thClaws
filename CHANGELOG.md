@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.101.0] — 2026-07-21
+
+New built-in TextToSpeech tool, MCP plugin-contributed server fixes, plugin install improvements, and catalogue refresh.
+
+### Added
+- **TextToSpeech: new built-in tool powered by Gemini `gemini-3.1-flash-tts-preview`.**
+- **REPL: `/tools` prints a deterministic list of all registered tools.**
+- **Plugins: install from a local folder path, `--force` reinstall, and self-heal orphaned plugin directories.**
+
+### Fixed
+- **Media: TextToSpeech tool now registers correctly in GUI, session, and headless paths.**
+- **MCP: `/mcp reauth` resolves plugin-contributed servers, and `/mcp list` includes them on GUI and server.**
+
+### Changed
+- **Catalogue: kimi-k3 updated to 1M-context window, AtlasCloud added as a kimi-k3 provider, dead and free-tier models pruned.**
+
+## [0.100.1] — 2026-07-19
+
+KMS project-scoping fix — unqualified create calls default to project scope and the research tool passes scope explicitly.
+
+### Fixed
+- **KMS: unqualified create calls now default to project scope, preventing cross-scope duplicate knowledge entries, and the research tool passes `scope:"project"` explicitly.**
+
 ## [0.100.0] — 2026-07-17
 
 Windows GUI Shell bridge inline and python3 PATH fix.

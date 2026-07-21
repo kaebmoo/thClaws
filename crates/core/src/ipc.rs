@@ -506,6 +506,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                     if media_enabled {
                         registry.register(Arc::new(crate::tools::TextToImageTool));
                         registry.register(Arc::new(crate::tools::ImageToImageTool));
+                        registry.register(Arc::new(crate::tools::TextToSpeechTool));
                         registry.register(Arc::new(crate::tools::TextToVideoTool));
                         registry.register(Arc::new(crate::tools::ImageToVideoTool));
                         registry.register(Arc::new(crate::tools::MediaJobStatusTool));
@@ -3493,15 +3494,24 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .trim();
-            let scope_str = msg.get("scope").and_then(|v| v.as_str()).unwrap_or("user");
-            let scope = match scope_str {
-                "project" => crate::kms::KmsScope::Project,
-                _ => crate::kms::KmsScope::User,
-            };
+            // Scope optional. Absent/blank → project default via
+            // `ensure_default` (reuse existing same-named KMS in any scope,
+            // else create project-scoped) so a "New KMS" without an explicit
+            // scope can't mint a user-scope duplicate of the project base.
+            let scope_opt = msg
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let scope_str = scope_opt.unwrap_or("project");
             let (ok, error) = if name.is_empty() {
                 (false, "name required".to_string())
             } else {
-                match crate::kms::create(name, scope) {
+                let res = match scope_opt {
+                    Some("user") => crate::kms::create(name, crate::kms::KmsScope::User),
+                    _ => crate::kms::ensure_default(name),
+                };
+                match res {
                     Ok(_) => (true, String::new()),
                     Err(e) => (false, e.to_string()),
                 }

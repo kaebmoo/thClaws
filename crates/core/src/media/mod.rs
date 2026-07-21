@@ -18,7 +18,8 @@ pub mod providers;
 pub mod registry;
 
 pub use provider::{
-    ImageProvider, ImageRequest, ImageResult, InputImage, JobState, VideoProvider, VideoRequest,
+    ImageProvider, ImageRequest, ImageResult, InputImage, JobState, SpeechProvider, SpeechRequest,
+    SpeechResult, VideoProvider, VideoRequest,
 };
 
 use crate::error::{Error, Result};
@@ -90,5 +91,15 @@ pub fn save_video(bytes: &[u8], ext: &str) -> Result<PathBuf> {
     let sha_hex = format!("{:02x}{:02x}{:02x}{:02x}", sha[0], sha[1], sha[2], sha[3]);
     let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
     let name = format!("vid-{ts}-{sha_hex}.{ext}");
+    save_under_output(&name, bytes)
+}
+
+/// Save audio bytes under `output/tts-<ts>-<sha8>.<ext>` and return the
+/// relative path. Same convention as [`save_image`].
+pub fn save_audio(bytes: &[u8], ext: &str) -> Result<PathBuf> {
+    let sha = Sha256::digest(bytes);
+    let sha_hex = format!("{:02x}{:02x}{:02x}{:02x}", sha[0], sha[1], sha[2], sha[3]);
+    let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+    let name = format!("tts-{ts}-{sha_hex}.{ext}");
     save_under_output(&name, bytes)
 }

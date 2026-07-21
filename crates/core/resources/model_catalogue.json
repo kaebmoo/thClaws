@@ -1,7 +1,7 @@
 {
   "schema": 4,
   "source": "baseline 2026-06-10 — pricing synced from LiteLLM (github.com/BerriAI/litellm)",
-  "fetched_at": "2026-07-17T00:00:00Z",
+  "fetched_at": "2026-07-21T00:00:00Z",
   "providers": {
     "anthropic": {
       "list_url": "https://api.anthropic.com/v1/models",
@@ -1918,11 +1918,6 @@
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
           "verified_at": "2026-05-04"
         },
-        "nvidia/qwen/qwen3.5-122b-a10b": {
-          "context": 131072,
-          "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
-          "verified_at": "2026-05-04"
-        },
         "nvidia/qwen/qwen3.5-397b-a17b": {
           "context": 131072,
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
@@ -3271,15 +3266,6 @@
           "input_per_mtok": 0.1,
           "output_per_mtok": 0.2
         },
-        "cognitivecomputations/dolphin-mistral-24b-venice-edition:free": {
-          "context": 32768,
-          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-06-10",
-          "free": true,
-          "chat": true,
-          "input_per_mtok": 0.0,
-          "output_per_mtok": 0.0
-        },
         "cohere/command-a": {
           "context": 256000,
           "max_output": 8192,
@@ -3836,15 +3822,6 @@
           "input_per_mtok": 0.0509,
           "output_per_mtok": 0.335
         },
-        "meta-llama/llama-3.2-3b-instruct:free": {
-          "context": 131072,
-          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-06-10",
-          "free": true,
-          "chat": true,
-          "input_per_mtok": 0.0,
-          "output_per_mtok": 0.0
-        },
         "meta-llama/llama-3.3-70b-instruct": {
           "context": 131072,
           "max_output": 16384,
@@ -3854,15 +3831,6 @@
           "chat": true,
           "input_per_mtok": 0.1,
           "output_per_mtok": 0.32
-        },
-        "meta-llama/llama-3.3-70b-instruct:free": {
-          "context": 65536,
-          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-06-10",
-          "free": true,
-          "chat": true,
-          "input_per_mtok": 0.0,
-          "output_per_mtok": 0.0
         },
         "meta-llama/llama-4-maverick": {
           "context": 1048576,
@@ -4246,15 +4214,6 @@
           "chat": true,
           "input_per_mtok": 1.0,
           "output_per_mtok": 1.0
-        },
-        "nousresearch/hermes-3-llama-3.1-405b:free": {
-          "context": 131072,
-          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-06-10",
-          "free": true,
-          "chat": true,
-          "input_per_mtok": 0.0,
-          "output_per_mtok": 0.0
         },
         "nousresearch/hermes-3-llama-3.1-70b": {
           "context": 131072,
@@ -5344,16 +5303,6 @@
           "input_per_mtok": 0.65,
           "output_per_mtok": 3.25
         },
-        "qwen/qwen3-coder:free": {
-          "context": 262000,
-          "max_output": 262000,
-          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-06-10",
-          "free": true,
-          "chat": true,
-          "input_per_mtok": 0.0,
-          "output_per_mtok": 0.0
-        },
         "qwen/qwen3-max": {
           "context": 262144,
           "max_output": 32768,
@@ -5382,15 +5331,6 @@
           "chat": true,
           "input_per_mtok": 0.09,
           "output_per_mtok": 1.1
-        },
-        "qwen/qwen3-next-80b-a3b-instruct:free": {
-          "context": 262144,
-          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-06-10",
-          "free": true,
-          "chat": true,
-          "input_per_mtok": 0.0,
-          "output_per_mtok": 0.0
         },
         "qwen/qwen3-next-80b-a3b-thinking": {
           "context": 131072,
@@ -6939,9 +6879,9 @@
           "output_per_mtok": 8.0
         },
         "moonshot/kimi-k3": {
-          "context": 262144,
-          "source": "https://api.moonshot.ai/v1/models + manual:kimi-k3",
-          "verified_at": "2026-07-17",
+          "context": 1048576,
+          "source": "https://api.moonshot.ai/v1/models + manual:kimi-k3 (released 2026-07-16, 1M ctx, $3/$15 per Mtok)",
+          "verified_at": "2026-07-21",
           "input_per_mtok": 3.0,
           "output_per_mtok": 15.0
         },
@@ -7538,13 +7478,6 @@
           "input_per_mtok": 0.59,
           "output_per_mtok": 0.79
         },
-        "groq/meta-llama/llama-4-scout-17b-16e-instruct": {
-          "context": 131072,
-          "source": "https://api.groq.com/openai/v1/models + litellm:meta-llama/llama-4-scout-17b-16e-instruct",
-          "verified_at": "2026-07-04",
-          "input_per_mtok": 0.11,
-          "output_per_mtok": 0.34
-        },
         "groq/openai/gpt-oss-120b": {
           "context": 131072,
           "source": "https://api.groq.com/openai/v1/models + litellm:openai/gpt-oss-120b",
@@ -7558,13 +7491,6 @@
           "verified_at": "2026-07-04",
           "input_per_mtok": 0.075,
           "output_per_mtok": 0.3
-        },
-        "groq/qwen/qwen3-32b": {
-          "context": 131000,
-          "source": "https://api.groq.com/openai/v1/models + litellm:qwen/qwen3-32b",
-          "verified_at": "2026-07-04",
-          "input_per_mtok": 0.29,
-          "output_per_mtok": 0.59
         },
         "groq/qwen/qwen3.6-27b": {
           "context": 131072,
@@ -7999,6 +7925,11 @@
           "context": 1000000,
           "source": "https://api.atlascloud.ai/v1/models",
           "verified_at": "2026-07-15"
+        },
+        "atlascloud/moonshotai/kimi-k3": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models",
+          "verified_at": "2026-07-21"
         },
         "atlascloud/openai/gpt-4.1": {
           "context": 1000000,

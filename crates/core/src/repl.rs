@@ -353,6 +353,10 @@ pub enum SlashCommand {
         id: String,
     },
     Mcp,
+    /// `/tools` — deterministic dump of the actually-registered tools
+    /// (ground truth from the ToolRegistry, gate/env filtered), so users
+    /// don't rely on the model's prose enumeration.
+    Tools,
     McpAdd {
         name: String,
         url: String,
@@ -387,6 +391,7 @@ pub enum SlashCommand {
     PluginInstall {
         url: String,
         user: bool,
+        force: bool,
     },
     PluginRemove {
         name: String,
@@ -921,19 +926,24 @@ fn parse_plugin_subcommand(cmd: &str, args: &str) -> SlashCommand {
         "install" => {
             let mut parts: Vec<&str> = rest.split_whitespace().collect();
             let mut user = false;
-            if parts.first().copied() == Some("--user") {
-                user = true;
-                parts.remove(0);
-            } else if parts.first().copied() == Some("--project") {
+            let mut force = false;
+            loop {
+                match parts.first().copied() {
+                    Some("--user") => user = true,
+                    Some("--project") => {}
+                    Some("--force") | Some("-f") => force = true,
+                    _ => break,
+                }
                 parts.remove(0);
             }
             match parts.as_slice() {
                 [url] => SlashCommand::PluginInstall {
                     url: (*url).to_string(),
                     user,
+                    force,
                 },
                 _ => SlashCommand::Unknown(
-                    "usage: /plugin install [--user] <name-or-git-url-or-.zip>".into(),
+                    "usage: /plugin install [--user] [--force] <name-or-git-url-or-.zip>".into(),
                 ),
             }
         }
@@ -1677,6 +1687,7 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
         "rename" => SlashCommand::Rename(args.to_string()),
         "research" => parse_research_subcommand(args),
         "mcp" => parse_mcp_subcommand(args),
+        "tools" | "tool" => SlashCommand::Tools,
         "plugin" | "plugins" => parse_plugin_subcommand(cmd, args),
         "tasks" | "todo" => SlashCommand::Tasks,
         "context" => SlashCommand::Context,
@@ -3960,6 +3971,7 @@ pub fn render_help() -> &'static str {
      /rename [NAME]    Rename the current session (no arg clears the title)\n  \
      /memory           List memory entries\n  \
      /memory read NAME Show a memory entry by name\n  \
+     /tools            List the tools actually registered this session\n  \
      /mcp              List active MCP servers and their tools\n  \
      /mcp add [--user] <name> <url> [--header \"K: V\"]\n  \
                        Register a remote (HTTP) MCP server. Writes to\n  \
@@ -4901,6 +4913,7 @@ pub async fn run_print_mode_with(
     if config.image_tools_enabled {
         tool_registry.register(Arc::new(crate::tools::TextToImageTool));
         tool_registry.register(Arc::new(crate::tools::ImageToImageTool));
+        tool_registry.register(Arc::new(crate::tools::TextToSpeechTool));
         tool_registry.register(Arc::new(crate::tools::TextToVideoTool));
         tool_registry.register(Arc::new(crate::tools::ImageToVideoTool));
         tool_registry.register(Arc::new(crate::tools::MediaJobStatusTool));
@@ -5308,6 +5321,7 @@ pub async fn run_agent_workflow(
     if config.image_tools_enabled && !dry_tools {
         tool_registry.register(Arc::new(crate::tools::TextToImageTool));
         tool_registry.register(Arc::new(crate::tools::ImageToImageTool));
+        tool_registry.register(Arc::new(crate::tools::TextToSpeechTool));
         tool_registry.register(Arc::new(crate::tools::TextToVideoTool));
         tool_registry.register(Arc::new(crate::tools::ImageToVideoTool));
         tool_registry.register(Arc::new(crate::tools::MediaJobStatusTool));
@@ -5516,6 +5530,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     if config.image_tools_enabled {
         tool_registry.register(Arc::new(crate::tools::TextToImageTool));
         tool_registry.register(Arc::new(crate::tools::ImageToImageTool));
+        tool_registry.register(Arc::new(crate::tools::TextToSpeechTool));
         tool_registry.register(Arc::new(crate::tools::TextToVideoTool));
         tool_registry.register(Arc::new(crate::tools::ImageToVideoTool));
         tool_registry.register(Arc::new(crate::tools::MediaJobStatusTool));
@@ -8022,7 +8037,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         }
                     }
                 }
-                SlashCommand::PluginInstall { url, user } => {
+                SlashCommand::PluginInstall { url, user, force } => {
                     // Allow `/plugin install <name>` to resolve a
                     // marketplace slug to its install_url. If `url`
                     // already looks like a URL, this is a no-op.
@@ -8031,7 +8046,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         println!("{COLOR_YELLOW}{msg}{COLOR_RESET}");
                         continue;
                     }
-                    match crate::plugins::install(&effective_url, user).await {
+                    match crate::plugins::install(&effective_url, user, force).await {
                         Ok(plugin) => {
                             let manifest = plugin.manifest().ok();
                             let scope = if user { "user" } else { "project" };
@@ -8571,6 +8586,19 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         Err(e) => {
                             println!("{COLOR_YELLOW}[mcp] reauth failed: {e}{COLOR_RESET}");
                         }
+                    }
+                }
+                SlashCommand::Tools => {
+                    let defs = agent.tool_defs();
+                    println!("{COLOR_DIM}{} tools available:{COLOR_RESET}", defs.len());
+                    for d in &defs {
+                        let desc = d.description.lines().next().unwrap_or("").trim();
+                        let desc: String = if desc.chars().count() > 90 {
+                            format!("{}…", desc.chars().take(89).collect::<String>())
+                        } else {
+                            desc.to_string()
+                        };
+                        println!("{COLOR_DIM}  {} — {}{COLOR_RESET}", d.name, desc);
                     }
                 }
                 SlashCommand::Mcp => {
@@ -9682,12 +9710,14 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     }
                 }
                 SlashCommand::KmsNew { name, project } => {
-                    let scope = if project {
-                        crate::kms::KmsScope::Project
+                    // Default (project) reuses an existing same-named KMS in
+                    // any scope; `--user` stays an explicit global opt-in.
+                    let res = if project {
+                        crate::kms::ensure_default(&name)
                     } else {
-                        crate::kms::KmsScope::User
+                        crate::kms::create(&name, crate::kms::KmsScope::User)
                     };
-                    match crate::kms::create(&name, scope) {
+                    match res {
                         Ok(k) => println!(
                             "{COLOR_DIM}created KMS '{}' ({}) → {}{COLOR_RESET}",
                             k.name,

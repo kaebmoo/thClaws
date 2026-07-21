@@ -865,6 +865,8 @@ impl WorkerState {
             self.tool_registry
                 .register(std::sync::Arc::new(crate::tools::ImageToImageTool));
             self.tool_registry
+                .register(std::sync::Arc::new(crate::tools::TextToSpeechTool));
+            self.tool_registry
                 .register(std::sync::Arc::new(crate::tools::TextToVideoTool));
             self.tool_registry
                 .register(std::sync::Arc::new(crate::tools::ImageToVideoTool));
@@ -1450,6 +1452,7 @@ async fn run_worker(
     if config.image_tools_enabled {
         tools.register(std::sync::Arc::new(crate::tools::TextToImageTool));
         tools.register(std::sync::Arc::new(crate::tools::ImageToImageTool));
+        tools.register(std::sync::Arc::new(crate::tools::TextToSpeechTool));
         tools.register(std::sync::Arc::new(crate::tools::TextToVideoTool));
         tools.register(std::sync::Arc::new(crate::tools::ImageToVideoTool));
         tools.register(std::sync::Arc::new(crate::tools::MediaJobStatusTool));

@@ -85,6 +85,54 @@ pub trait ImageProvider: Send + Sync {
     async fn generate(&self, req: &ImageRequest) -> Result<ImageResult>;
 }
 
+// ── Speech (text→speech) ─────────────────────────────────────────
+//
+// Synchronous like images (a single POST returns the audio), so it
+// reuses the same shape: a `SpeechProvider` trait resolved through
+// `media::registry::resolve_speech`, driven by the `TextToSpeech` tool.
+// Gemini TTS runs over the same `generateContent` endpoint (and gateway
+// `google` segment) as images, so it bills the same metered way.
+
+/// A text→speech request, provider-agnostic. `voice` is a provider voice
+/// name (empty ⇒ the provider's default). `style` is an optional
+/// natural-language delivery hint (Gemini honours a leading `Say …:`
+/// instruction) prepended to the spoken text by the provider.
+#[derive(Debug, Clone)]
+pub struct SpeechRequest {
+    pub model: String,
+    pub text: String,
+    pub voice: String,
+    pub style: Option<String>,
+}
+
+/// Result of a successful synthesis — a self-contained audio file's bytes
+/// plus its extension (`wav`). Providers return a ready-to-play container
+/// (Gemini's raw PCM is wrapped into a WAV before it leaves the provider).
+#[derive(Debug, Clone)]
+pub struct SpeechResult {
+    pub bytes: Vec<u8>,
+    pub ext: &'static str,
+}
+
+#[async_trait]
+pub trait SpeechProvider: Send + Sync {
+    fn id(&self) -> &'static str;
+    fn models(&self) -> &'static [ImageModelInfo];
+    fn resolve_model(&self, raw: &str) -> Option<String> {
+        let raw = raw.trim();
+        for m in self.models() {
+            if raw == m.id || m.aliases.contains(&raw) {
+                return Some(m.id.to_string());
+            }
+        }
+        None
+    }
+
+    /// Synthesise speech. Validates its own credentials and returns a
+    /// clear `Error::Tool` if they're missing.
+    async fn synthesize(&self, req: &SpeechRequest) -> Result<SpeechResult>;
+}
+
 // ── Video (Tier 2, dev-plan/40) ──────────────────────────────────
 //
 // Video generation is asynchronous: providers submit a long-running
