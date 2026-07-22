@@ -676,6 +676,21 @@ export default function App() {
     return unsub;
   }, []);
 
+  // Desktop SSO sign-in button is gated by `ssoSignInEnabled` in
+  // .thclaws/settings.json (default false → hidden). Read-only; there's no GUI
+  // toggle while the sign-in feature is unfinished. Stays false until the
+  // backend answers, so the button never flashes on before the gate is known.
+  const [ssoSignInEnabled, setSsoSignInEnabled] = useState(false);
+  useEffect(() => {
+    const unsub = subscribe((msg) => {
+      if (msg.type === "sso_sign_in_enabled") {
+        setSsoSignInEnabled(msg.enabled === true);
+      }
+    });
+    send({ type: "sso_sign_in_enabled_get" });
+    return unsub;
+  }, []);
+
   const [teamEnabled, setTeamEnabled] = useState(false);
   // Opt-in flag for the PTY-backed Shell tab. Default off — the tab
   // gives the user an unsandboxed live shell with no agent-side
@@ -804,7 +819,15 @@ export default function App() {
     // tab bar / bottom input get clipped behind the browser chrome. dvh
     // tracks the actual visible height as the bar shows/hides (issue #168;
     // Chrome 108+ / Safari 15.4+ — all current mobile devices).
-    <div className="flex flex-col h-[100dvh]">
+    //
+    // `fixed inset-x-0 top-0`: anchor to the viewport top so a stray document
+    // scroll can't push the root off-screen. `overflow-clip` (NOT hidden):
+    // an `overflow:hidden` box is still PROGRAMMATICALLY scrollable, so a
+    // descendant `scrollIntoView` (the chat auto-scroll after a gui-shell tab
+    // swap) could scroll this container down by the tab-bar height — the tab
+    // bar then rendered above the viewport with an equal empty gap below
+    // (navbar "gone"). `clip` makes the box unscrollable, so nothing can shift.
+    <div className="fixed inset-x-0 top-0 flex flex-col h-[100dvh] overflow-clip">
       <FrontendReadyBeacon />
       {fullscreen && (
         <FullscreenExitChrome
@@ -879,14 +902,14 @@ export default function App() {
         >
           <Maximize2 size={14} />
         </button>
-        {/* Hide the SSO Sign-in button on any cloud-hosted workspace
-            (gateway OR BYOK). The engine returns "hosted" from
-            secrets_backend_get whenever THCLAWS_WORKSPACE_ID (or
-            THCLAWS_GATEWAY_API_KEY) is set — the visitor is already
-            authenticated at the cloud-routing layer, so a second SSO
-            flow inside the workspace is just noise. Local desktop
-            installs keep the button. */}
-        {secretsBackend !== "hosted" && <LoginButton />}
+        {/* Sign-in button gated by `ssoSignInEnabled` in settings.json (default
+            false) until the SSO feature is usable. Also stays hidden on any
+            cloud-hosted workspace (gateway OR BYOK): the engine returns
+            "hosted" from secrets_backend_get whenever THCLAWS_WORKSPACE_ID
+            (or THCLAWS_GATEWAY_API_KEY) is set, so the visitor is already
+            authenticated at the cloud-routing layer and a second SSO flow
+            inside the workspace is just noise. */}
+        {ssoSignInEnabled && secretsBackend !== "hosted" && <LoginButton />}
       </div>
       )}
 

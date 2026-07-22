@@ -283,6 +283,22 @@ pub fn resolve(name: &str) -> Option<KmsRef> {
     None
 }
 
+/// Ensure a KMS exists when the caller did NOT pin a scope. Reuses an
+/// existing same-named KMS in any scope (project > user > shared, per
+/// `resolve`); otherwise creates it **project-scoped**. Knowledge bases
+/// are per-workspace by design, so an unqualified create must never
+/// silently land in user scope and shadow the project one as a
+/// duplicate — that's the bug behind "two identical KMS entries". Paths
+/// that DO pin a scope (`create(name, scope)`, `/kms new --user`) keep
+/// their explicit behavior, so an intentional cross-scope same-name KMS
+/// is still possible.
+pub fn ensure_default(name: &str) -> Result<KmsRef> {
+    if let Some(k) = resolve(name) {
+        return Ok(k);
+    }
+    create(name, KmsScope::Project)
+}
+
 /// Create a new KMS. Seeds `index.md`, `log.md`, and `SCHEMA.md` with
 /// minimal starter content so the model has something to read on day
 /// one. No-op and returns `Ok(existing)` if a KMS by that name already
@@ -4673,6 +4689,35 @@ mod tests {
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].scope, KmsScope::Project);
         assert_eq!(all[1].scope, KmsScope::User);
+    }
+
+    #[test]
+    fn ensure_default_creates_project_when_absent() {
+        let _home = scoped_home();
+        let k = ensure_default("fresh").unwrap();
+        assert_eq!(k.scope, KmsScope::Project);
+    }
+
+    #[test]
+    fn ensure_default_reuses_existing_user_scope_no_duplicate() {
+        let _home = scoped_home();
+        // A same-named KMS already lives in user scope (e.g. created long
+        // ago). An unqualified ensure must reuse it, NOT mint a project
+        // duplicate — the two-identical-entries bug.
+        create("kb", KmsScope::User).unwrap();
+        let k = ensure_default("kb").unwrap();
+        assert_eq!(k.scope, KmsScope::User);
+        // exactly one KMS named "kb" exists across all scopes
+        assert_eq!(list_all().iter().filter(|r| r.name == "kb").count(), 1);
+    }
+
+    #[test]
+    fn ensure_default_reuses_existing_project_scope() {
+        let _home = scoped_home();
+        create("kb", KmsScope::Project).unwrap();
+        let k = ensure_default("kb").unwrap();
+        assert_eq!(k.scope, KmsScope::Project);
+        assert_eq!(list_all().iter().filter(|r| r.name == "kb").count(), 1);
     }
 
     #[test]

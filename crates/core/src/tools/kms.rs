@@ -837,10 +837,10 @@ impl Tool for KmsCreateTool {
                 "scope": {
                     "type": "string",
                     "enum": ["project", "user"],
-                    "description": "'project' = ./.thclaws/kms/<name> (per-workspace); 'user' = ~/.config/thclaws/kms/<name> (global). /dream uses 'project'."
+                    "description": "Optional. 'project' = ./.thclaws/kms/<name> (per-workspace, the default and correct choice for almost everything — research, /dream, ingest); 'user' = ~/.config/thclaws/kms/<name> (global, opt-in only). OMIT to get the project default: an unqualified create reuses any same-named KMS that already exists, else creates it project-scoped. Only pass 'user' when the user explicitly wants a cross-project global base."
                 }
             },
-            "required": ["name", "scope"]
+            "required": ["name"]
         })
     }
 
@@ -854,17 +854,35 @@ impl Tool for KmsCreateTool {
         // subagent call requires the new name to be in the granted
         // write list — same gate as Write/Append/Delete.
         crate::workflow::check_kms_write_capability(name)?;
-        let scope_str = req_str(&input, "scope")?;
-        let scope = match scope_str {
-            "project" => crate::kms::KmsScope::Project,
-            "user" => crate::kms::KmsScope::User,
-            other => {
+        // Scope is optional. Omitted → project default via `ensure_default`
+        // (reuse any existing same-named KMS, else create project-scoped) so
+        // an agent that doesn't pin a scope can't spawn a user-scope duplicate
+        // shadowing the project KMS. Only an explicit "user" opts into global.
+        let scope_opt = input
+            .get("scope")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let (kref, scope) = match scope_opt {
+            None => {
+                let k = crate::kms::ensure_default(name)?;
+                let s = k.scope;
+                (k, s)
+            }
+            Some("project") => {
+                let s = crate::kms::KmsScope::Project;
+                (crate::kms::create(name, s)?, s)
+            }
+            Some("user") => {
+                let s = crate::kms::KmsScope::User;
+                (crate::kms::create(name, s)?, s)
+            }
+            Some(other) => {
                 return Err(Error::Tool(format!(
                     "invalid scope '{other}' — must be 'project' or 'user'"
                 )))
             }
         };
-        let kref = crate::kms::create(name, scope)?;
         // Auto-attach a freshly-created PROJECT KMS to the active set
         // (idempotent, best-effort) so the new base is grounded into future
         // turns without a manual `/kms use` — e.g. after a research run persists
@@ -1285,6 +1303,33 @@ mod tests {
             crate::kms::resolve("dreams").expect("KmsCreate should have made dreams resolvable");
         assert!(kref.pages_dir().is_dir());
         assert!(kref.index_path().is_file());
+    }
+
+    #[tokio::test]
+    async fn create_tool_defaults_to_project_when_scope_omitted() {
+        let _home = scoped_home();
+        // No "scope" field — an agent that forgets it must NOT land in user
+        // scope. Ships project-scoped (the two-identical-KMS-entries fix).
+        let out = KmsCreateTool.call(json!({ "name": "kb" })).await.unwrap();
+        assert!(out.contains("project"), "got: {out}");
+        let kref = crate::kms::resolve("kb").expect("kb should resolve");
+        assert_eq!(kref.scope, crate::kms::KmsScope::Project);
+    }
+
+    #[tokio::test]
+    async fn create_tool_omitted_scope_reuses_existing_user_kms() {
+        let _home = scoped_home();
+        // A user-scope "kb" already exists; an unqualified create reuses it
+        // instead of minting a project duplicate.
+        crate::kms::create("kb", crate::kms::KmsScope::User).unwrap();
+        KmsCreateTool.call(json!({ "name": "kb" })).await.unwrap();
+        assert_eq!(
+            crate::kms::list_all()
+                .iter()
+                .filter(|r| r.name == "kb")
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]

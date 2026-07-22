@@ -5,6 +5,7 @@ import rehypeHighlight from "rehype-highlight";
 import { resolveAssetSrc } from "../lib/fileAsset";
 import { Check, Copy, Paperclip } from "lucide-react";
 import { basePath, send, subscribe } from "../hooks/useIPC";
+import { promptHistory, recordPrompt } from "../hooks/promptHistory";
 import { useTheme } from "../hooks/useTheme";
 import { useVersion } from "../hooks/useVersion";
 import logoDark from "../assets/thClaws-logo-dark.png";
@@ -20,6 +21,11 @@ import { McpAppIframe } from "./McpAppIframe";
 type ChatMessage = {
   role: "user" | "assistant" | "tool" | "system" | "error" | "workflow_review";
   content: string;
+  /// `system` messages only — marks a bubble that accumulates a slash
+  /// command's streamed output (e.g. `/cloud push` progress). Consecutive
+  /// `chat_slash_output` lines fold into ONE such bubble instead of a balloon
+  /// per line, and progress lines (`… MB (N%)`) update its last line in place.
+  slashOutput?: boolean;
   /// `workflow_review` messages only — dev-plan/32 Tier 3 GUI
   /// approval. Carries the script + id the WorkflowReviewBubble
   /// posts back when the user clicks Approve / Cancel / Re-author.
@@ -290,6 +296,11 @@ export function ChatView({ active, modalOpen }: Props) {
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  // Bash-style prompt-history recall (shared with the Terminal tab). -1 = not
+  // navigating (the textarea holds the user's own draft); otherwise an index
+  // into promptHistory(). savedDraft restores the draft on Down past the newest.
+  const histIndexRef = useRef(-1);
+  const savedDraftRef = useRef("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
   // IDs of drag-drop `file_upload` requests in flight, so the shared
@@ -696,12 +707,44 @@ export function ChatView({ active, modalOpen }: Props) {
           });
           break;
         }
-        case "chat_slash_output":
-          setMessages((prev) => [
-            ...prev,
-            { role: "system", content: msg.text as string },
-          ]);
+        case "chat_slash_output": {
+          // Fold a command's streamed output (e.g. /cloud push) into ONE
+          // system bubble instead of a balloon per line. A progress line
+          // (`… N/M MB (P%)`) replaces the previous progress line in place so
+          // the upload counter ticks in a single spot rather than stacking.
+          const line = msg.text as string;
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (last && last.role === "system" && last.slashOutput) {
+              const lines = last.content.split("\n");
+              const prevLast = lines[lines.length - 1] ?? "";
+              const isProgress = (s: string) =>
+                /\(\s*\d+\s*%\s*\)\s*$/.test(s) ||
+                /\d[\d.,]*\s*\/\s*\d[\d.,]*\s*[KMGT]?B/i.test(s);
+              // Text before the first number — same for consecutive ticks of
+              // the same operation ("uploading… "), so we can replace vs append.
+              const stem = (s: string) => s.replace(/[\d.,].*$/s, "");
+              if (
+                isProgress(line) &&
+                isProgress(prevLast) &&
+                stem(line) === stem(prevLast)
+              ) {
+                lines[lines.length - 1] = line;
+              } else {
+                lines.push(line);
+              }
+              return [
+                ...prev.slice(0, -1),
+                { ...last, content: lines.join("\n") },
+              ];
+            }
+            return [
+              ...prev,
+              { role: "system", content: line, slashOutput: true },
+            ];
+          });
           break;
+        }
         case "chat_workflow_review": {
           // dev-plan/32 Tier 3: spawn a review bubble. We replace any
           // earlier review bubble for the same id (re-author cycle
@@ -905,6 +948,31 @@ export function ChatView({ active, modalOpen }: Props) {
     if (active && !modalOpen) inputRef.current?.focus();
   }, [active, modalOpen]);
 
+  // Copy any selected page text (message bubbles, tool output, code, …) on
+  // Cmd/Ctrl+C. The desktop webview blocks navigator.clipboard, so route the
+  // selection through the IPC bridge (browser --serve mode uses the native
+  // clipboard). Textarea/input selections report empty via window.getSelection,
+  // so this never shadows normal input-field copy — only DOM text selections
+  // are intercepted. Scoped to the active tab so it doesn't fire over Terminal.
+  useEffect(() => {
+    if (!active) return;
+    const onCopyKey = (e: KeyboardEvent) => {
+      const isMac = navigator.platform.startsWith("Mac");
+      const mod = isMac ? e.metaKey : e.ctrlKey;
+      if (!mod || e.altKey || (e.key !== "c" && e.key !== "C")) return;
+      const sel = window.getSelection()?.toString() ?? "";
+      if (!sel) return; // no page selection → let the input / browser handle it
+      e.preventDefault();
+      if (typeof window !== "undefined" && !window.ipc && navigator.clipboard) {
+        navigator.clipboard.writeText(sel).catch(() => {});
+      } else {
+        send({ type: "clipboard_write", text: sel });
+      }
+    };
+    document.addEventListener("keydown", onCopyKey, true);
+    return () => document.removeEventListener("keydown", onCopyKey, true);
+  }, [active]);
+
   useEffect(() => {
     // Only follow new content if the user hasn't scrolled up to read.
     if (isAtBottomRef.current) {
@@ -941,6 +1009,13 @@ export function ChatView({ active, modalOpen }: Props) {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const text = input.trim();
+    // Record every non-empty submission in the shared recall ring and reset
+    // navigation so the next Up starts from the newest entry.
+    if (text) {
+      recordPrompt(text);
+      histIndexRef.current = -1;
+      savedDraftRef.current = "";
+    }
     if (askPrompt) {
       if (!text) return;
       setInput("");
@@ -1074,6 +1149,49 @@ export function ChatView({ active, modalOpen }: Props) {
           if (cmd) acceptSlashCommand(cmd);
           return;
         }
+      }
+    }
+    // Prompt-history recall (bash-style Up/Down), shared with the Terminal tab.
+    // The slash popup owns the arrows when open (handled above, returns first).
+    // Entering history from a fresh draft needs the caret on the edge line so
+    // multi-line editing keeps working; once navigating, Up/Down always cycle.
+    if ((e.key === "ArrowUp" || e.key === "ArrowDown") && !e.nativeEvent.isComposing) {
+      const el = e.currentTarget;
+      const caret = el.selectionStart ?? input.length;
+      const navigating = histIndexRef.current !== -1;
+      const hist = promptHistory();
+      const caretToEnd = () =>
+        requestAnimationFrame(() => {
+          const t = inputRef.current;
+          if (t) t.selectionStart = t.selectionEnd = t.value.length;
+        });
+      if (e.key === "ArrowUp") {
+        const atFirstLine = !input.slice(0, caret).includes("\n");
+        if ((navigating || atFirstLine) && hist.length > 0) {
+          e.preventDefault();
+          if (histIndexRef.current === -1) {
+            savedDraftRef.current = input;
+            histIndexRef.current = hist.length - 1;
+          } else if (histIndexRef.current > 0) {
+            histIndexRef.current -= 1;
+          }
+          setInput(hist[histIndexRef.current]);
+          caretToEnd();
+          return;
+        }
+      } else if (navigating) {
+        // ArrowDown while navigating → newer entry, or restore the draft.
+        e.preventDefault();
+        if (histIndexRef.current < hist.length - 1) {
+          histIndexRef.current += 1;
+          setInput(hist[histIndexRef.current]);
+        } else {
+          histIndexRef.current = -1;
+          setInput(savedDraftRef.current);
+          savedDraftRef.current = "";
+        }
+        caretToEnd();
+        return;
       }
     }
     // Multi-line textarea behaviour:
@@ -1717,7 +1835,12 @@ export function ChatView({ active, modalOpen }: Props) {
           <textarea
             ref={inputRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value);
+              // User edited the line → leave history navigation (their text is
+              // the live draft again). Recall itself uses setInput, not onChange.
+              histIndexRef.current = -1;
+            }}
             onKeyDown={handleInputKeyDown}
             onPaste={onPaste}
             placeholder={inputPlaceholder}

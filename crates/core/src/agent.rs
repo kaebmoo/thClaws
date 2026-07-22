@@ -1065,6 +1065,13 @@ impl Agent {
         self.history.lock().expect("history lock").clear();
     }
 
+    /// The tools this agent actually exposes to the model this turn
+    /// (gate/env filtered, sorted). Backs the `/tools` command so users get
+    /// registry ground truth instead of a model's prose enumeration.
+    pub fn tool_defs(&self) -> Vec<crate::types::ToolDef> {
+        self.tools.tool_defs()
+    }
+
     /// Replace the agent's history wholesale — used when loading a saved session.
     pub fn set_history(&self, messages: Vec<Message>) {
         let mut h = self.history.lock().expect("history lock");

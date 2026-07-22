@@ -36,7 +36,7 @@ use crate::uploads::{
     ensure_target_dir, ensure_uploads_dir, render_upload_message, unique_path, UploadedFile,
     UPLOADS_DIRNAME, UPLOAD_MAX_BYTES, UPLOAD_MAX_FILES,
 };
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, Multipart, Query, Request, State};
 use axum::http::{header, StatusCode};
@@ -434,6 +434,7 @@ pub async fn run_with_engine(
         }
     });
     let ws_connections = Arc::new(AtomicUsize::new(0));
+    let _ = SERVE_WORKSPACE.set(workspace.clone()); // for /healthz background-job probe
     let state = ServeState {
         shared,
         approver,
@@ -519,7 +520,9 @@ pub async fn run_with_engine(
                     .route("/workspace/sync/pull", get(sync_pull))
                     .route(
                         "/workspace/sync/push",
-                        post(sync_push).layer(DefaultBodyLimit::max(300 * 1024 * 1024)),
+                        post(sync_push).layer(DefaultBodyLimit::max(
+                            crate::cloud::wssync::MAX_SYNC_BYTES as usize,
+                        )),
                     )
                     // P2 incremental: manifest diff + per-subset transfer/trash.
                     .route("/workspace/sync/manifest", get(sync_manifest))
@@ -603,13 +606,59 @@ struct PullQuery {
     include_runtime: bool,
 }
 
+/// Streams a temp file as an `application/gzip` body, deleting it once the
+/// response finishes sending (the `TempPath` rides along and drops with the
+/// stream).
+struct TempFileStream {
+    inner: tokio_util::io::ReaderStream<tokio::fs::File>,
+    _path: tempfile::TempPath,
+}
+
+impl futures::Stream for TempFileStream {
+    type Item = std::io::Result<Bytes>;
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_next(cx)
+    }
+}
+
+async fn stream_tar_temp(tmp: tempfile::NamedTempFile) -> Response {
+    let path = tmp.into_temp_path();
+    let file = match tokio::fs::File::open(&path).await {
+        Ok(f) => f,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("open temp: {e}")).into_response()
+        }
+    };
+    let stream = TempFileStream {
+        inner: tokio_util::io::ReaderStream::new(file),
+        _path: path,
+    };
+    (
+        [(header::CONTENT_TYPE, "application/gzip")],
+        Body::from_stream(stream),
+    )
+        .into_response()
+}
+
 async fn sync_pull(State(state): State<ServeState>, Query(q): Query<PullQuery>) -> Response {
     if crate::agent_activity::busy_count() > 0 {
         return (StatusCode::CONFLICT, "workspace busy (active turn)").into_response();
     }
-    match crate::cloud::wssync::tar_workspace(state.workspace.as_path(), q.include_runtime) {
-        Ok(bytes) => ([(header::CONTENT_TYPE, "application/gzip")], bytes).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    let root = state.workspace.as_path().to_path_buf();
+    let include_runtime = q.include_runtime;
+    let tmp = tokio::task::spawn_blocking(move || {
+        let tmp = tempfile::NamedTempFile::new().map_err(|e| format!("temp: {e}"))?;
+        crate::cloud::wssync::tar_workspace_to(&root, include_runtime, tmp.as_file())?;
+        Ok::<_, String>(tmp)
+    })
+    .await;
+    match tmp {
+        Ok(Ok(tmp)) => stream_tar_temp(tmp).await,
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")).into_response(),
     }
 }
 
@@ -630,14 +679,57 @@ struct PushResp {
 async fn sync_push(
     State(state): State<ServeState>,
     Query(q): Query<PushQuery>,
-    body: Bytes,
+    body: Body,
 ) -> Response {
     if crate::agent_activity::busy_count() > 0 {
         return (StatusCode::CONFLICT, "workspace busy (active turn)").into_response();
     }
-    let root = state.workspace.as_path();
-    match crate::cloud::wssync::untar_workspace(&body, root, q.delete) {
-        Ok(r) => {
+    // Stream the upload to a temp file so a large tarball never rides in memory.
+    let tmp = match tempfile::NamedTempFile::new() {
+        Ok(t) => t,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("temp: {e}")).into_response(),
+    };
+    let write_handle = match tmp.reopen() {
+        Ok(f) => f,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("temp: {e}")).into_response(),
+    };
+    let mut afile = tokio::fs::File::from_std(write_handle);
+    let mut stream = body.into_data_stream();
+    use futures::StreamExt;
+    use tokio::io::AsyncWriteExt;
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => return (StatusCode::BAD_REQUEST, format!("body: {e}")).into_response(),
+        };
+        if let Err(e) = afile.write_all(&chunk).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("write temp: {e}"),
+            )
+                .into_response();
+        }
+    }
+    if let Err(e) = afile.flush().await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("flush temp: {e}"),
+        )
+            .into_response();
+    }
+    drop(afile);
+
+    let root = state.workspace.as_path().to_path_buf();
+    let delete = q.delete;
+    let path = tmp.into_temp_path();
+    let res = tokio::task::spawn_blocking(move || {
+        let f = std::fs::File::open(&path).map_err(|e| format!("open temp: {e}"))?;
+        crate::cloud::wssync::untar_workspace_from(f, &root, delete)
+    })
+    .await;
+    match res {
+        Ok(Ok(r)) => {
+            let root = state.workspace.as_path();
             let mut b = crate::cloud::wssync::read_binding(root);
             if let Some(id) = q.workspace_id {
                 b.workspace_id = Some(id);
@@ -651,7 +743,8 @@ async fn sync_push(
             })
             .into_response()
         }
-        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")).into_response(),
     }
 }
 
@@ -678,9 +771,17 @@ async fn sync_export(State(state): State<ServeState>, Json(paths): Json<Vec<Stri
     if crate::agent_activity::busy_count() > 0 {
         return (StatusCode::CONFLICT, "workspace busy (active turn)").into_response();
     }
-    match crate::cloud::wssync::tar_paths(state.workspace.as_path(), &paths) {
-        Ok(bytes) => ([(header::CONTENT_TYPE, "application/gzip")], bytes).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    let root = state.workspace.as_path().to_path_buf();
+    let tmp = tokio::task::spawn_blocking(move || {
+        let tmp = tempfile::NamedTempFile::new().map_err(|e| format!("temp: {e}"))?;
+        crate::cloud::wssync::tar_paths_to(&root, &paths, tmp.as_file())?;
+        Ok::<_, String>(tmp)
+    })
+    .await;
+    match tmp {
+        Ok(Ok(tmp)) => stream_tar_temp(tmp).await,
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")).into_response(),
     }
 }
 
@@ -1079,10 +1180,124 @@ async fn sync_bearer_gate(
     next.run(req).await
 }
 
+/// Workspace root, captured at serve startup so `serve_health` (no `State`) can
+/// probe for detached background jobs. Set once in `run_with_engine`.
+static SERVE_WORKSPACE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// True if a detached background job is still running in the workspace. Any
+/// agent that spawns one drops a `<dir>/.jobs/<id>.json` carrying a live `pid`
+/// (course.py's `job start` does this); while any such pid is alive the cloud
+/// idle-reaper must NOT pause the pod — `/healthz` reports it as busy.
+fn background_jobs_alive() -> bool {
+    let Some(root) = SERVE_WORKSPACE.get() else {
+        return false;
+    };
+    fn scan(dir: &std::path::Path, depth: u8) -> bool {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for e in rd.flatten() {
+            if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let name = e.file_name();
+            let p = e.path();
+            if name == ".jobs" {
+                if jobs_dir_has_live_pid(&p) {
+                    return true;
+                }
+            } else if depth > 0
+                && !matches!(
+                    name.to_str(),
+                    Some("node_modules" | "target" | ".git" | ".venv" | ".sync-trash")
+                )
+                && scan(&p, depth - 1)
+            {
+                return true;
+            }
+        }
+        false
+    }
+    scan(root, 4)
+}
+
+fn jobs_dir_has_live_pid(dir: &std::path::Path) -> bool {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let pid = std::fs::read_to_string(&p)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| v.get("pid").and_then(|x| x.as_i64()));
+        if let Some(pid) = pid {
+            if pid_alive(pid as i32) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(unix)]
+fn pid_alive(pid: i32) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    // kill(pid, 0): 0 → alive; EPERM → alive (not ours); ESRCH → dead.
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+#[cfg(not(unix))]
+fn pid_alive(_pid: i32) -> bool {
+    false
+}
+
+#[cfg(all(test, unix))]
+mod background_job_probe_tests {
+    use super::*;
+
+    #[test]
+    fn pid_alive_self_true_bogus_false() {
+        assert!(pid_alive(std::process::id() as i32));
+        assert!(!pid_alive(2_147_480_000)); // a pid that won't exist
+        assert!(!pid_alive(0));
+    }
+
+    #[test]
+    fn jobs_dir_busy_only_when_a_pid_is_live() {
+        let d = tempfile::tempdir().unwrap();
+        let live = d.path().join("store/.jobs");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(
+            live.join("import-book.json"),
+            format!(
+                r#"{{"pid": {}, "argv": ["import-book"]}}"#,
+                std::process::id()
+            ),
+        )
+        .unwrap();
+        assert!(jobs_dir_has_live_pid(&live), "own pid should read as live");
+
+        let dead = d.path().join("other/.jobs");
+        std::fs::create_dir_all(&dead).unwrap();
+        std::fs::write(dead.join("old.json"), r#"{"pid": 2147480000, "argv": []}"#).unwrap();
+        assert!(
+            !jobs_dir_has_live_pid(&dead),
+            "dead pid must not read as busy"
+        );
+    }
+}
+
 async fn serve_health() -> impl IntoResponse {
+    let busy = crate::agent_activity::is_agent_busy() || background_jobs_alive();
     axum::Json(serde_json::json!({
         "ok": true,
-        "busy": crate::agent_activity::is_agent_busy(),
+        "busy": busy,
         "busy_count": crate::agent_activity::busy_count(),
     }))
 }

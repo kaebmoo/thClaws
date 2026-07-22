@@ -85,6 +85,14 @@ export function UIView({ active, shellId, fullscreen = false }: UIViewProps) {
         sendTheme(theme);
         return;
       }
+      // Copy request from the shell (Cmd/Ctrl+C over a selection): write the
+      // text via the native clipboard IPC. wry blocks navigator.clipboard
+      // inside the shell iframe, so the bridge routes selection copy here.
+      if (data.type === "clipboard-write") {
+        const text = typeof data.text === "string" ? data.text : "";
+        if (text) send({ type: "clipboard_write", text });
+        return;
+      }
       // Parent-only signals (hotkey / ui) are handled by App.tsx on the
       // window — never a backend arm.
       if (PARENT_ONLY_TYPES.has(data.type)) return;

@@ -870,4 +870,48 @@
       { capture: true },
     );
   }
+
+  // Copy selected text on Cmd/Ctrl+C from anywhere in the shell. The wry
+  // desktop webview blocks navigator.clipboard inside a shell, so in Mode A
+  // route the selection to the host (which writes it via the native clipboard
+  // IPC); in Mode B (standalone browser) the native clipboard works directly.
+  // A selection inside a native input/textarea reports empty via getSelection,
+  // so a shell composer's own copy is left untouched. Runs in both modes.
+  const copySelection = (text) => {
+    if (!text) return;
+    if (isModeB) {
+      try {
+        if (navigator.clipboard) navigator.clipboard.writeText(text);
+      } catch (err) {
+        /* clipboard unavailable */
+      }
+      return;
+    }
+    parent.postMessage(
+      { ns: "thclaws-shell", type: "clipboard-write", text: text },
+      "*",
+    );
+  };
+  if (window.thclaws) window.thclaws.copy = copySelection;
+  window.addEventListener(
+    "keydown",
+    (e) => {
+      const isMac =
+        typeof navigator !== "undefined" &&
+        navigator.platform.startsWith("Mac");
+      const mod = isMac ? e.metaKey : e.ctrlKey;
+      if (!mod || e.altKey) return;
+      if ((e.key || "").toLowerCase() !== "c") return;
+      let sel = "";
+      try {
+        sel = (window.getSelection() || "").toString();
+      } catch (err) {
+        sel = "";
+      }
+      if (!sel) return;
+      e.preventDefault();
+      copySelection(sel);
+    },
+    { capture: true },
+  );
 })();

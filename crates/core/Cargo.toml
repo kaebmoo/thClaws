@@ -1,6 +1,6 @@
 [package]
 name = "thclaws-core"
-version = "0.95.0"
+version = "0.101.0"
 edition = "2021"
 description = "thClaws — native Rust AI agent workspace with CLI and desktop GUI."
 license = "MIT OR Apache-2.0"
@@ -59,6 +59,9 @@ include_dir = "0.7"
 # Adapter for piping tokio broadcast channels into a Stream (for SSE
 # in `thclaws shell preview`). dev-plan/39 Tier 2.
 tokio-stream = { version = "0.1", features = ["sync"] }
+# ReaderStream: stream a temp file as an HTTP body (runner sync/pull|export
+# response, desktop sync/push upload) so a large tarball never rides in memory.
+tokio-util = { version = "0.7", features = ["io"] }
 walkdir = "2"
 getrandom = "0.2"
 shell-words = "1"

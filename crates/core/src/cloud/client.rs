@@ -2,21 +2,52 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Stream a response body to a temp file so a large `.tar.gz` never rides in
+/// memory. Returns the temp file (auto-deleted on drop).
+async fn stream_to_temp(res: reqwest::Response) -> Result<tempfile::NamedTempFile, String> {
+    use futures::StreamExt;
+    use std::io::Write;
+    let mut tmp = tempfile::NamedTempFile::new().map_err(|e| format!("temp: {}", e))?;
+    let mut stream = res.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("body: {}", e))?;
+        tmp.as_file_mut()
+            .write_all(&chunk)
+            .map_err(|e| format!("write temp: {}", e))?;
+    }
+    tmp.as_file_mut()
+        .flush()
+        .map_err(|e| format!("flush temp: {}", e))?;
+    Ok(tmp)
+}
+
 pub struct Client {
     base_url: String,
     http: reqwest::Client,
+    /// No total-request timeout — for multi-hundred-MB / multi-GB workspace
+    /// push/pull/export, where the 120 s cap on `http` would abort the transfer
+    /// mid-stream (the client closes the upload and the edge returns a spurious
+    /// 499). Keeps a connect timeout + TCP keepalive so a dead peer still fails.
+    http_bulk: reqwest::Client,
     token: Option<String>,
 }
 
 impl Client {
     pub fn new(base_url: impl Into<String>, token: Option<String>) -> Self {
+        let ua = concat!("thclaws-cli/", env!("CARGO_PKG_VERSION"));
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             http: reqwest::Client::builder()
-                .user_agent(concat!("thclaws-cli/", env!("CARGO_PKG_VERSION")))
+                .user_agent(ua)
                 .timeout(std::time::Duration::from_secs(120))
                 .build()
                 .expect("reqwest client"),
+            http_bulk: reqwest::Client::builder()
+                .user_agent(ua)
+                .connect_timeout(std::time::Duration::from_secs(30))
+                .tcp_keepalive(std::time::Duration::from_secs(60))
+                .build()
+                .expect("reqwest bulk client"),
             token,
         }
     }
@@ -216,19 +247,20 @@ impl Client {
         res.json().await.map_err(|e| format!("decode stat: {}", e))
     }
 
-    /// Download the cloud workspace as a `.tar.gz`.
+    /// Download the cloud workspace as a `.tar.gz`, streamed to a temp file so a
+    /// large payload never rides in memory. Caller untars from the temp path.
     pub async fn ws_sync_pull(
         &self,
         ws_url: &str,
         jwt: &str,
         include_runtime: bool,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<tempfile::NamedTempFile, String> {
         let mut url = format!("{}/workspace/sync/pull", ws_url.trim_end_matches('/'));
         if include_runtime {
             url.push_str("?include_runtime=true");
         }
         let res = self
-            .http
+            .http_bulk
             .get(&url)
             .header("Authorization", format!("Bearer {}", jwt))
             .send()
@@ -244,22 +276,19 @@ impl Client {
                 res.text().await.unwrap_or_default()
             ));
         }
-        Ok(res
-            .bytes()
-            .await
-            .map_err(|e| format!("body: {}", e))?
-            .to_vec())
+        stream_to_temp(res).await
     }
 
-    /// Upload a `.tar.gz` to the cloud workspace. `workspace_id` records the
-    /// binding on the runner. When `progress` is set, the body is streamed in
-    /// chunks and the counter is bumped as each is handed to the socket, so the
+    /// Upload a `.tar.gz` (from `tarball_path`) to the cloud workspace,
+    /// streamed off disk so a large tarball never rides in memory.
+    /// `workspace_id` records the binding on the runner. When `progress` is set,
+    /// the counter is bumped as each chunk is handed to the socket, so the
     /// caller can render a live byte/percentage readout.
     pub async fn ws_sync_push(
         &self,
         ws_url: &str,
         jwt: &str,
-        tarball: Vec<u8>,
+        tarball_path: &std::path::Path,
         delete: bool,
         workspace_id: &str,
         progress: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
@@ -270,29 +299,25 @@ impl Client {
             delete,
             urlencoding::encode(workspace_id)
         );
+        let file = tokio::fs::File::open(tarball_path)
+            .await
+            .map_err(|e| format!("open tarball: {}", e))?;
+        let reader = tokio_util::io::ReaderStream::new(file);
         let body = match progress {
             Some(counter) => {
-                use bytes::Bytes;
+                use futures::StreamExt;
                 use std::sync::atomic::Ordering;
-                let full = Bytes::from(tarball);
-                let total = full.len();
-                let mut offset = 0usize;
-                let stream = futures::stream::iter(std::iter::from_fn(move || {
-                    if offset >= total {
-                        return None;
+                let stream = reader.inspect(move |chunk| {
+                    if let Ok(c) = chunk {
+                        counter.fetch_add(c.len() as u64, Ordering::Relaxed);
                     }
-                    let end = (offset + 64 * 1024).min(total);
-                    let chunk = full.slice(offset..end);
-                    offset = end;
-                    counter.fetch_add(chunk.len() as u64, Ordering::Relaxed);
-                    Some(Ok::<Bytes, std::io::Error>(chunk))
-                }));
+                });
                 reqwest::Body::wrap_stream(stream)
             }
-            None => reqwest::Body::from(tarball),
+            None => reqwest::Body::wrap_stream(reader),
         };
         let res = self
-            .http
+            .http_bulk
             .post(&url)
             .header("Authorization", format!("Bearer {}", jwt))
             .header("Content-Type", "application/gzip")
@@ -352,15 +377,16 @@ impl Client {
         ))
     }
 
-    /// POST a path list; download a partial `.tar.gz` of just those files.
+    /// POST a path list; download a partial `.tar.gz` of just those files,
+    /// streamed to a temp file. Caller untars from the temp path.
     pub async fn ws_sync_export(
         &self,
         ws_url: &str,
         jwt: &str,
         paths: &[String],
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<tempfile::NamedTempFile, String> {
         let res = self
-            .http
+            .http_bulk
             .post(format!(
                 "{}/workspace/sync/export",
                 ws_url.trim_end_matches('/')
@@ -377,11 +403,7 @@ impl Client {
                 res.text().await.unwrap_or_default()
             ));
         }
-        Ok(res
-            .bytes()
-            .await
-            .map_err(|e| format!("body: {}", e))?
-            .to_vec())
+        stream_to_temp(res).await
     }
 
     /// POST a path list to move to `.sync-trash/` on the runner.

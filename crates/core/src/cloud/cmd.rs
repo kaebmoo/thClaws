@@ -1004,8 +1004,8 @@ async fn sync_inner(
                     return Ok(());
                 }
                 emit(format!("Pushing {} changed file(s)…", upload.len()));
-                let tarball = wssync::tar_paths(cwd, &upload)?;
-                let r = push_with_progress(&client, &ws.url, &jwt, tarball, false, &ws.id, emit)
+                let tmp = pack_paths_temp(cwd, &upload)?;
+                let r = push_with_progress(&client, &ws.url, &jwt, tmp.path(), false, &ws.id, emit)
                     .await?;
                 let deleted = if opts.delete && !extraneous.is_empty() {
                     client
@@ -1048,10 +1048,17 @@ async fn sync_inner(
                     local.file_count,
                     local.bytes as f64 / 1024.0
                 ));
-                let tarball = wssync::tar_workspace(cwd, false)?;
-                let r =
-                    push_with_progress(&client, &ws.url, &jwt, tarball, opts.delete, &ws.id, emit)
-                        .await?;
+                let tmp = pack_workspace_temp(cwd, false)?;
+                let r = push_with_progress(
+                    &client,
+                    &ws.url,
+                    &jwt,
+                    tmp.path(),
+                    opts.delete,
+                    &ws.id,
+                    emit,
+                )
+                .await?;
                 write_push_binding(cwd, &ws, &url, &local_binding)?;
                 emit(format!(
                     "✓ pushed {} file(s){} to '{}'",
@@ -1101,8 +1108,10 @@ async fn sync_inner(
                 }
                 emit(format!("Pulling {} changed file(s)…", download.len()));
                 if !download.is_empty() {
-                    let bytes = client.ws_sync_export(&ws.url, &jwt, &download).await?;
-                    wssync::untar_workspace(&bytes, cwd, false)?;
+                    let tmp = client.ws_sync_export(&ws.url, &jwt, &download).await?;
+                    let f =
+                        std::fs::File::open(tmp.path()).map_err(|e| format!("open temp: {}", e))?;
+                    wssync::untar_workspace_from(f, cwd, false)?;
                 }
                 let deleted = if opts.delete && !extraneous.is_empty() {
                     wssync::trash_paths(cwd, &extraneous)?.deleted
@@ -1141,8 +1150,9 @@ async fn sync_inner(
                     "Pulling cloud '{}' ({} file(s))…",
                     ws.slug, stat.file_count
                 ));
-                let bytes = client.ws_sync_pull(&ws.url, &jwt, false).await?;
-                let r = wssync::untar_workspace(&bytes, cwd, opts.delete)?;
+                let tmp = client.ws_sync_pull(&ws.url, &jwt, false).await?;
+                let f = std::fs::File::open(tmp.path()).map_err(|e| format!("open temp: {}", e))?;
+                let r = wssync::untar_workspace_from(f, cwd, opts.delete)?;
                 write_pull_binding(cwd, &ws, &url, &local_binding)?;
                 emit(format!(
                     "✓ pulled {} file(s){} into {}",
@@ -1169,11 +1179,28 @@ async fn sync_inner(
 /// Upload the tarball, emitting a live percentage readout for uploads large
 /// enough that the transfer is the slow part. Small tarballs skip the ticker
 /// (the surrounding "Pushing…"/"✓ pushed" lines already bracket them).
+/// Pack the synced workspace to a temp `.tar.gz` (streamed to disk).
+fn pack_workspace_temp(
+    cwd: &Path,
+    include_runtime: bool,
+) -> Result<tempfile::NamedTempFile, String> {
+    let tmp = tempfile::NamedTempFile::new().map_err(|e| format!("temp: {}", e))?;
+    wssync::tar_workspace_to(cwd, include_runtime, tmp.as_file())?;
+    Ok(tmp)
+}
+
+/// Pack a specific path list to a temp `.tar.gz` (streamed to disk).
+fn pack_paths_temp(cwd: &Path, paths: &[String]) -> Result<tempfile::NamedTempFile, String> {
+    let tmp = tempfile::NamedTempFile::new().map_err(|e| format!("temp: {}", e))?;
+    wssync::tar_paths_to(cwd, paths, tmp.as_file())?;
+    Ok(tmp)
+}
+
 async fn push_with_progress(
     client: &Client,
     ws_url: &str,
     jwt: &str,
-    tarball: Vec<u8>,
+    tarball_path: &Path,
     delete: bool,
     workspace_id: &str,
     emit: &mut (dyn FnMut(String) + Send),
@@ -1181,17 +1208,19 @@ async fn push_with_progress(
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     const TICKER_THRESHOLD: u64 = 256 * 1024;
-    let total = tarball.len() as u64;
+    let total = std::fs::metadata(tarball_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
     if total < TICKER_THRESHOLD {
         return client
-            .ws_sync_push(ws_url, jwt, tarball, delete, workspace_id, None)
+            .ws_sync_push(ws_url, jwt, tarball_path, delete, workspace_id, None)
             .await;
     }
     let sent = Arc::new(AtomicU64::new(0));
     let fut = client.ws_sync_push(
         ws_url,
         jwt,
-        tarball,
+        tarball_path,
         delete,
         workspace_id,
         Some(sent.clone()),

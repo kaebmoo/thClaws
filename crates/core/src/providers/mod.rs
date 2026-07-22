@@ -59,6 +59,8 @@ pub mod thclaws_gateway;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProviderKind {
     Anthropic,
+    AtlasCloud,
+    NineRouter,
     AgentSdk,
     OpenAI,
     OpenAIResponses,
@@ -205,6 +207,8 @@ impl ProviderKind {
 impl ProviderKind {
     pub const ALL: &'static [Self] = &[
         Self::Anthropic,
+        Self::AtlasCloud,
+        Self::NineRouter,
         Self::AgentSdk,
         Self::OpenAI,
         Self::OpenAIResponses,
@@ -234,6 +238,8 @@ impl ProviderKind {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Anthropic => "anthropic",
+            Self::AtlasCloud => "atlascloud",
+            Self::NineRouter => "9router",
             Self::AgentSdk => "anthropic-agent",
             Self::OpenAI => "openai",
             Self::OpenAIResponses => "openai-responses",
@@ -264,6 +270,10 @@ impl ProviderKind {
     pub fn default_model(&self) -> &'static str {
         match self {
             Self::Anthropic => "claude-sonnet-4-6",
+            Self::AtlasCloud => "atlascloud/qwen/qwen3.5-flash",
+            // 9router routes by `<alias>/<model>`; `anthropic` is a standard
+            // registry alias. Users normally pick from the live /models list.
+            Self::NineRouter => "9router/anthropic/claude-sonnet-4.5",
             Self::AgentSdk => "agent/claude-sonnet-4-6",
             Self::OpenAI => "gpt-4.1",
             Self::OpenAIResponses => "codex/gpt-5.2-codex",
@@ -358,6 +368,8 @@ impl ProviderKind {
     pub fn endpoint_env(&self) -> Option<&'static str> {
         match self {
             Self::TokenRouter => Some("TOKENROUTER_BASE_URL"),
+            Self::AtlasCloud => Some("ATLASCLOUD_BASE_URL"),
+            Self::NineRouter => Some("NINEROUTER_BASE_URL"),
             Self::DashScope => Some("DASHSCOPE_BASE_URL"),
             Self::QwenCloud => Some("QWENCLOUD_BASE_URL"),
             Self::Ollama => Some("OLLAMA_BASE_URL"),
@@ -390,7 +402,10 @@ impl ProviderKind {
                 | Self::OllamaAnthropic
                 | Self::LMStudio
                 | Self::AzureAIFoundry
-                | Self::OpenAICompat,
+                | Self::OpenAICompat
+                // Self-hosted router: base URL / port varies per user, so the
+                // Settings base-URL field must be editable (not a fixed default).
+                | Self::NineRouter,
         )
     }
 
@@ -400,6 +415,10 @@ impl ProviderKind {
     pub fn default_endpoint(&self) -> Option<&'static str> {
         match self {
             Self::TokenRouter => Some("https://api.tokenrouter.com/v1"),
+            Self::AtlasCloud => Some("https://api.atlascloud.ai/v1"),
+            // Self-hosted router; localhost default. Override per user via
+            // NINEROUTER_BASE_URL for a remote / non-default-port instance.
+            Self::NineRouter => Some("http://localhost:20128/v1"),
             Self::DashScope => Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
             // International / Singapore region of DashScope.
             Self::QwenCloud => Some("https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),
@@ -471,6 +490,8 @@ impl ProviderKind {
             Self::ChatGptCodex => None,
             Self::OpenRouter => Some("OPENROUTER_API_KEY"),
             Self::TokenRouter => Some("TOKENROUTER_API_KEY"),
+            Self::AtlasCloud => Some("ATLASCLOUD_API_KEY"),
+            Self::NineRouter => Some("NINEROUTER_API_KEY"),
             Self::Gemini => Some("GEMINI_API_KEY"),
             Self::Ollama => None,
             Self::OllamaAnthropic => None,
@@ -567,6 +588,10 @@ impl ProviderKind {
             // surprise-switching to a different provider.
             Self::OpenAI
             | Self::OpenAIResponses
+            | Self::AtlasCloud
+            // 9router uses full `9router/<alias>/<model>` ids; no short-alias
+            // table (the alias segment is 9router's own, typed explicitly).
+            | Self::NineRouter
             | Self::ChatGptCodex
             | Self::AgentSdk
             | Self::Ollama
@@ -599,6 +624,13 @@ impl ProviderKind {
             // Check openrouter/ first — it's the most specific prefix.
             // Models look like openrouter/anthropic/claude-sonnet-4-6.
             Some(Self::OpenRouter)
+        } else if model.starts_with("atlascloud/") {
+            Some(Self::AtlasCloud)
+        } else if model.starts_with("9router/") {
+            // Self-hosted 9router gateway. Ids look like
+            // `9router/kr/claude-sonnet-4.5`; the `9router/` prefix is stripped
+            // before the request so 9router sees `kr/claude-sonnet-4.5`.
+            Some(Self::NineRouter)
         } else if model.starts_with("tokenrouter/") {
             // TokenRouter (tokenrouter.com) — OpenAI-compatible unified
             // gateway. Models look like tokenrouter/anthropic/claude-sonnet-4.5;
@@ -1708,6 +1740,8 @@ mod tests {
             ProviderKind::OpenAIResponses,
             ProviderKind::ChatGptCodex,
             ProviderKind::AgentSdk,
+            ProviderKind::AtlasCloud,
+            ProviderKind::NineRouter,
             ProviderKind::QwenCloud,
             ProviderKind::ThaiLLM,
             ProviderKind::Nvidia,
@@ -1862,6 +1896,60 @@ mod tests {
         );
         assert_eq!(ProviderKind::Minimax.name(), "minimax");
         assert_eq!(ProviderKind::Minimax.default_model(), "minimax/MiniMax-M3");
+    }
+
+    #[test]
+    fn detect_atlascloud_prefix_routes_to_atlascloud_provider() {
+        assert_eq!(
+            ProviderKind::detect("atlascloud/qwen/qwen3.5-flash"),
+            Some(ProviderKind::AtlasCloud)
+        );
+        assert_eq!(
+            ProviderKind::detect("atlascloud/deepseek-ai/deepseek-v4-pro"),
+            Some(ProviderKind::AtlasCloud)
+        );
+        assert_eq!(
+            ProviderKind::AtlasCloud.api_key_env(),
+            Some("ATLASCLOUD_API_KEY")
+        );
+        assert_eq!(
+            ProviderKind::AtlasCloud.endpoint_env(),
+            Some("ATLASCLOUD_BASE_URL")
+        );
+        assert_eq!(
+            ProviderKind::AtlasCloud.default_endpoint(),
+            Some("https://api.atlascloud.ai/v1")
+        );
+        assert_eq!(ProviderKind::AtlasCloud.name(), "atlascloud");
+        assert_eq!(
+            ProviderKind::AtlasCloud.default_model(),
+            "atlascloud/qwen/qwen3.5-flash"
+        );
+    }
+
+    #[test]
+    fn detect_9router_prefix_routes_to_ninerouter_provider() {
+        assert_eq!(
+            ProviderKind::detect("9router/kr/claude-sonnet-4.5"),
+            Some(ProviderKind::NineRouter)
+        );
+        assert_eq!(
+            ProviderKind::detect("9router/openai/gpt-4o-mini"),
+            Some(ProviderKind::NineRouter)
+        );
+        assert_eq!(
+            ProviderKind::NineRouter.api_key_env(),
+            Some("NINEROUTER_API_KEY")
+        );
+        assert_eq!(
+            ProviderKind::NineRouter.endpoint_env(),
+            Some("NINEROUTER_BASE_URL")
+        );
+        assert_eq!(
+            ProviderKind::NineRouter.default_endpoint(),
+            Some("http://localhost:20128/v1")
+        );
+        assert_eq!(ProviderKind::NineRouter.name(), "9router");
     }
 
     #[test]

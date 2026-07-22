@@ -353,6 +353,10 @@ pub enum SlashCommand {
         id: String,
     },
     Mcp,
+    /// `/tools` — deterministic dump of the actually-registered tools
+    /// (ground truth from the ToolRegistry, gate/env filtered), so users
+    /// don't rely on the model's prose enumeration.
+    Tools,
     McpAdd {
         name: String,
         url: String,
@@ -387,6 +391,7 @@ pub enum SlashCommand {
     PluginInstall {
         url: String,
         user: bool,
+        force: bool,
     },
     PluginRemove {
         name: String,
@@ -921,19 +926,24 @@ fn parse_plugin_subcommand(cmd: &str, args: &str) -> SlashCommand {
         "install" => {
             let mut parts: Vec<&str> = rest.split_whitespace().collect();
             let mut user = false;
-            if parts.first().copied() == Some("--user") {
-                user = true;
-                parts.remove(0);
-            } else if parts.first().copied() == Some("--project") {
+            let mut force = false;
+            loop {
+                match parts.first().copied() {
+                    Some("--user") => user = true,
+                    Some("--project") => {}
+                    Some("--force") | Some("-f") => force = true,
+                    _ => break,
+                }
                 parts.remove(0);
             }
             match parts.as_slice() {
                 [url] => SlashCommand::PluginInstall {
                     url: (*url).to_string(),
                     user,
+                    force,
                 },
                 _ => SlashCommand::Unknown(
-                    "usage: /plugin install [--user] <name-or-git-url-or-.zip>".into(),
+                    "usage: /plugin install [--user] [--force] <name-or-git-url-or-.zip>".into(),
                 ),
             }
         }
@@ -1677,6 +1687,7 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
         "rename" => SlashCommand::Rename(args.to_string()),
         "research" => parse_research_subcommand(args),
         "mcp" => parse_mcp_subcommand(args),
+        "tools" | "tool" => SlashCommand::Tools,
         "plugin" | "plugins" => parse_plugin_subcommand(cmd, args),
         "tasks" | "todo" => SlashCommand::Tasks,
         "context" => SlashCommand::Context,
@@ -1934,8 +1945,12 @@ fn parse_cloud_subcommand(args: &str) -> SlashCommand {
             let dry_run = has("--dry-run");
             let force_rebind = has("--force-rebind");
             // `--force` skips the divergence guard (overwrite the other end's
-            // newer changes). Distinct from `--force-rebind` (pairing check).
-            let force = has("--force");
+            // newer changes). `--force-rebind` bypasses the binding/identity
+            // check — and since deliberately re-pointing a folder at a
+            // workspace *is* an overwrite, it's a superset that implies
+            // `--force` too. Users reasonably expect `--force-rebind` to push
+            // (or pull) through in any case, including over divergence.
+            let force = has("--force") || force_rebind;
             // Target workspace: `--workspace <slug>` or the first positional
             // (non-flag) token, so `/cloud push <slug>` works without the flag.
             let workspace = toks
@@ -3956,6 +3971,7 @@ pub fn render_help() -> &'static str {
      /rename [NAME]    Rename the current session (no arg clears the title)\n  \
      /memory           List memory entries\n  \
      /memory read NAME Show a memory entry by name\n  \
+     /tools            List the tools actually registered this session\n  \
      /mcp              List active MCP servers and their tools\n  \
      /mcp add [--user] <name> <url> [--header \"K: V\"]\n  \
                        Register a remote (HTTP) MCP server. Writes to\n  \
@@ -4294,6 +4310,45 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
                 }
             }
             Ok(Arc::new(provider))
+        }
+        ProviderKind::AtlasCloud => {
+            // Atlas Cloud exposes an OpenAI-compatible LLM API. Model ids
+            // use the `atlascloud/<id>` routing prefix locally, stripped
+            // before the upstream request so Atlas sees ids such as
+            // `qwen/qwen3.5-flash` or `deepseek-ai/deepseek-v4-pro`.
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "ATLASCLOUD_BASE_URL",
+                "https://api.atlascloud.ai/v1",
+                api_key,
+            );
+            Ok(Arc::new(
+                OpenAIProvider::new(key)
+                    .with_base_url(url)
+                    .with_strip_model_prefix("atlascloud/"),
+            ))
+        }
+        ProviderKind::NineRouter => {
+            // 9router (github.com/decolua/9router) — self-hosted OpenAI-
+            // compatible router/gateway (default localhost:20128). Model ids
+            // use the `9router/<alias>/<model>` routing prefix locally; the
+            // `9router/` prefix is stripped before the request so 9router sees
+            // `<alias>/<model>` (e.g. `kr/claude-sonnet-4.5`), which its model
+            // resolver splits on the first `/`. BYOK — the user runs the
+            // instance and supplies NINEROUTER_API_KEY.
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "NINEROUTER_BASE_URL",
+                "http://localhost:20128/v1",
+                api_key,
+            );
+            Ok(Arc::new(
+                OpenAIProvider::new(key)
+                    .with_base_url(url)
+                    .with_strip_model_prefix("9router/"),
+            ))
         }
         ProviderKind::TokenRouter => {
             // TokenRouter (tokenrouter.com) — OpenAI-compatible unified
@@ -4858,6 +4913,7 @@ pub async fn run_print_mode_with(
     if config.image_tools_enabled {
         tool_registry.register(Arc::new(crate::tools::TextToImageTool));
         tool_registry.register(Arc::new(crate::tools::ImageToImageTool));
+        tool_registry.register(Arc::new(crate::tools::TextToSpeechTool));
         tool_registry.register(Arc::new(crate::tools::TextToVideoTool));
         tool_registry.register(Arc::new(crate::tools::ImageToVideoTool));
         tool_registry.register(Arc::new(crate::tools::MediaJobStatusTool));
@@ -5265,6 +5321,7 @@ pub async fn run_agent_workflow(
     if config.image_tools_enabled && !dry_tools {
         tool_registry.register(Arc::new(crate::tools::TextToImageTool));
         tool_registry.register(Arc::new(crate::tools::ImageToImageTool));
+        tool_registry.register(Arc::new(crate::tools::TextToSpeechTool));
         tool_registry.register(Arc::new(crate::tools::TextToVideoTool));
         tool_registry.register(Arc::new(crate::tools::ImageToVideoTool));
         tool_registry.register(Arc::new(crate::tools::MediaJobStatusTool));
@@ -5473,6 +5530,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     if config.image_tools_enabled {
         tool_registry.register(Arc::new(crate::tools::TextToImageTool));
         tool_registry.register(Arc::new(crate::tools::ImageToImageTool));
+        tool_registry.register(Arc::new(crate::tools::TextToSpeechTool));
         tool_registry.register(Arc::new(crate::tools::TextToVideoTool));
         tool_registry.register(Arc::new(crate::tools::ImageToVideoTool));
         tool_registry.register(Arc::new(crate::tools::MediaJobStatusTool));
@@ -7979,7 +8037,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         }
                     }
                 }
-                SlashCommand::PluginInstall { url, user } => {
+                SlashCommand::PluginInstall { url, user, force } => {
                     // Allow `/plugin install <name>` to resolve a
                     // marketplace slug to its install_url. If `url`
                     // already looks like a URL, this is a no-op.
@@ -7988,7 +8046,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         println!("{COLOR_YELLOW}{msg}{COLOR_RESET}");
                         continue;
                     }
-                    match crate::plugins::install(&effective_url, user).await {
+                    match crate::plugins::install(&effective_url, user, force).await {
                         Ok(plugin) => {
                             let manifest = plugin.manifest().ok();
                             let scope = if user { "user" } else { "project" };
@@ -8528,6 +8586,19 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         Err(e) => {
                             println!("{COLOR_YELLOW}[mcp] reauth failed: {e}{COLOR_RESET}");
                         }
+                    }
+                }
+                SlashCommand::Tools => {
+                    let defs = agent.tool_defs();
+                    println!("{COLOR_DIM}{} tools available:{COLOR_RESET}", defs.len());
+                    for d in &defs {
+                        let desc = d.description.lines().next().unwrap_or("").trim();
+                        let desc: String = if desc.chars().count() > 90 {
+                            format!("{}…", desc.chars().take(89).collect::<String>())
+                        } else {
+                            desc.to_string()
+                        };
+                        println!("{COLOR_DIM}  {} — {}{COLOR_RESET}", d.name, desc);
                     }
                 }
                 SlashCommand::Mcp => {
@@ -9639,12 +9710,14 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     }
                 }
                 SlashCommand::KmsNew { name, project } => {
-                    let scope = if project {
-                        crate::kms::KmsScope::Project
+                    // Default (project) reuses an existing same-named KMS in
+                    // any scope; `--user` stays an explicit global opt-in.
+                    let res = if project {
+                        crate::kms::ensure_default(&name)
                     } else {
-                        crate::kms::KmsScope::User
+                        crate::kms::create(&name, crate::kms::KmsScope::User)
                     };
-                    match crate::kms::create(&name, scope) {
+                    match res {
                         Ok(k) => println!(
                             "{COLOR_DIM}created KMS '{}' ({}) → {}{COLOR_RESET}",
                             k.name,
@@ -12275,6 +12348,54 @@ mod tests {
         assert_eq!(parse_slash("/quit"), Some(SlashCommand::Quit));
         assert_eq!(parse_slash("/q"), Some(SlashCommand::Quit));
         assert_eq!(parse_slash("/exit"), Some(SlashCommand::Quit));
+    }
+
+    #[test]
+    fn parse_slash_cloud_push_force_rebind_implies_force() {
+        // `--force-rebind` is a superset of `--force`: it must also skip the
+        // divergence guard so the push goes through in any case. Also tolerates
+        // an em-dash (—force-rebind) from smart-dash terminals/IMEs.
+        for input in [
+            "/cloud push nvidia-gpu --force-rebind",
+            "/cloud push nvidia-gpu —force-rebind",
+        ] {
+            match parse_slash(input) {
+                Some(SlashCommand::Cloud(CloudSlash::Push {
+                    force_rebind,
+                    force,
+                    ..
+                })) => {
+                    assert!(force_rebind, "force_rebind should be set for {input:?}");
+                    assert!(force, "force-rebind must imply force for {input:?}");
+                }
+                other => panic!("expected Cloud::Push for {input:?}, got {other:?}"),
+            }
+        }
+        // Plain push: neither flag.
+        match parse_slash("/cloud push nvidia-gpu") {
+            Some(SlashCommand::Cloud(CloudSlash::Push {
+                force,
+                force_rebind,
+                ..
+            })) => {
+                assert!(!force && !force_rebind);
+            }
+            other => panic!("expected Cloud::Push, got {other:?}"),
+        }
+        // Pull honours the same superset rule.
+        match parse_slash("/cloud pull nvidia-gpu --force-rebind") {
+            Some(SlashCommand::Cloud(CloudSlash::Pull {
+                force,
+                force_rebind,
+                ..
+            })) => {
+                assert!(
+                    force_rebind && force,
+                    "force-rebind must imply force on pull"
+                );
+            }
+            other => panic!("expected Cloud::Pull, got {other:?}"),
+        }
     }
 
     #[test]

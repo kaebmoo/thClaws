@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.101.0] — 2026-07-21
+
+New built-in TextToSpeech tool, MCP plugin-contributed server fixes, plugin install improvements, and catalogue refresh.
+
+### Added
+- **TextToSpeech: new built-in tool powered by Gemini `gemini-3.1-flash-tts-preview`.**
+- **REPL: `/tools` prints a deterministic list of all registered tools.**
+- **Plugins: install from a local folder path, `--force` reinstall, and self-heal orphaned plugin directories.**
+
+### Fixed
+- **Media: TextToSpeech tool now registers correctly in GUI, session, and headless paths.**
+- **MCP: `/mcp reauth` resolves plugin-contributed servers, and `/mcp list` includes them on GUI and server.**
+
+### Changed
+- **Catalogue: kimi-k3 updated to 1M-context window, AtlasCloud added as a kimi-k3 provider, dead and free-tier models pruned.**
+
+## [0.100.1] — 2026-07-19
+
+KMS project-scoping fix — unqualified create calls default to project scope and the research tool passes scope explicitly.
+
+### Fixed
+- **KMS: unqualified create calls now default to project scope, preventing cross-scope duplicate knowledge entries, and the research tool passes `scope:"project"` explicitly.**
+
+## [0.100.0] — 2026-07-17
+
+Windows GUI Shell bridge inline and python3 PATH fix.
+
+### Fixed
+- **Windows: the GUI Shell bridge script is inlined so custom tabs load without a fetch round-trip, and a python3 PATH shim is injected at startup so bundled tools resolve correctly.**
+
+## [0.99.0] — 2026-07-17
+
+Tutorial Studio chapter context menus and tab reattach, background-job health reporting, and cloud sync timeout fixes.
+
+### Added
+- **Tutorial Studio: right-click a chapter to rename or delete via a context menu.**
+- **Tutorial Studio: reopening a closed tab re-attaches to its running background job instead of starting fresh.**
+- **Serve: the `/healthz` endpoint reports busy while a detached background job is running.**
+
+### Fixed
+- **Tutorial Studio: the job runner strips `--` separators before re-spawning a background job.**
+- **Cloud sync: push and pull switch to a no-total-timeout client so long-running transfers don't fail spuriously.**
+
+## [0.98.0] — 2026-07-17
+
+Tutorial Studio batch workflows, Book Author drafting improvements, Moonshot Kimi K3 pricing, and a tier-s memory bump.
+
+### Added
+- **Tutorial Studio: a book-to-tutorial flow — per-slide layout picker, GUI buttons for book and prose imports.**
+- **Tutorial Studio: batch voice-over picker and a Build-all button for chapter videos.**
+- **Tutorial Studio: drafting now gives each chapter whole-course context, and prose files sort by name.**
+- **Book Author: the Idea form auto-fills when re-entering an existing book.**
+- **Pricing: Moonshot Kimi K3 model ($3 input / $15 output per million tokens).**
+- **Runner: tier-s memory limit raised from 1 GiB to 2 GiB.**
+- **Cloud sync: push and pull stream through temp files, sync cap raised to 10 GiB.**
+
+### Fixed
+- **GUI Shell: an empty asset path now defaults to `index.html` instead of failing. [#183](https://github.com/thClaws/thClaws/issues/183)**
+- **UI: streamed slash-command output is folded into a single chat bubble instead of splitting across several.**
+- **Cloud sync: `--force-rebind` now implies `--force` on push and pull.**
+- **Book Author: fails gracefully when draft staging is missing, and stale staging is cleared on startup.**
+
+## [0.97.0] — 2026-07-15
+
+New BYOK provider, prompt history in Chat, global copy selection, and a GFM table rendering fix.
+
+### Added
+- **9router: a self-hosted BYOK provider with an OpenAI-compatible API.**
+- **Chat: bash-style prompt history, now shared with Terminal.**
+- **Copy: Ctrl/Cmd+C copies a selection everywhere — Chat, Terminal, and agent shells.**
+- **GUI Shell: GFM tables now render in the shared chat component.**
+
+### Fixed
+- **Doc tools: miscounted GFM table delimiter rows are repaired before rendering.**
+
+## [0.96.0] — 2026-07-15
+
+New BYOK provider, catalogue additions, and fixes for bash cancellation and app layout.
+
+### Added
+- **Atlas Cloud: a new BYOK provider with an OpenAI-compatible API, surfaced as a managed key in Settings.**
+- **Catalogue: QwenCloud and ThaiLLM model lists are now included.**
+
+### Fixed
+- **Bash: a turn cancel now kills the in-flight process, not just its timeout.**
+- **UI: the app root is pinned to the viewport top and descendant scroll containers use `overflow-clip`, preventing the navbar from scrolling off-screen and inner scroll from shifting the app viewport.**
+
 ## [0.95.0] — 2026-07-15
 
 Research engine improvements, KMS graph toggle, and Files-tab context-menu actions.

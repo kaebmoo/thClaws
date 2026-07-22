@@ -1770,15 +1770,19 @@ pub async fn reauth_server(
     base_url_override: Option<&str>,
 ) -> crate::error::Result<ReauthOutcome> {
     let config = crate::config::AppConfig::load()?;
-    let server = config
-        .mcp_servers
-        .iter()
-        .find(|s| s.name == name)
-        .ok_or_else(|| {
-            crate::error::Error::Config(format!(
-                "no MCP server named '{name}' in mcp.json (try /mcp to list)"
-            ))
-        })?;
+    // Search the same merged set the runtime spawns: mcp.json (project ∪
+    // user) plus plugin-contributed servers. Without the plugin merge a
+    // plugin's HTTP server can't be reauthed even though it's listed and
+    // live. Config wins on a name clash.
+    let mut servers = config.mcp_servers.clone();
+    for p_mcp in crate::plugins::plugin_mcp_servers() {
+        if !servers.iter().any(|s| s.name == p_mcp.name) {
+            servers.push(p_mcp);
+        }
+    }
+    let server = servers.iter().find(|s| s.name == name).ok_or_else(|| {
+        crate::error::Error::Config(format!("no MCP server named '{name}' (try /mcp to list)"))
+    })?;
     if !server.transport.eq_ignore_ascii_case("http") {
         return Err(crate::error::Error::Config(format!(
             "server '{name}' has transport '{}' — /mcp reauth only applies to HTTP servers (OAuth)",
@@ -1787,7 +1791,7 @@ pub async fn reauth_server(
     }
     if server.url.trim().is_empty() {
         return Err(crate::error::Error::Config(format!(
-            "server '{name}' has no `url` set in mcp.json"
+            "server '{name}' has no `url` set"
         )));
     }
     let mcp_url = server.url.clone();

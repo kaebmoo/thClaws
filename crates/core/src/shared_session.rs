@@ -865,6 +865,8 @@ impl WorkerState {
             self.tool_registry
                 .register(std::sync::Arc::new(crate::tools::ImageToImageTool));
             self.tool_registry
+                .register(std::sync::Arc::new(crate::tools::TextToSpeechTool));
+            self.tool_registry
                 .register(std::sync::Arc::new(crate::tools::TextToVideoTool));
             self.tool_registry
                 .register(std::sync::Arc::new(crate::tools::ImageToVideoTool));
@@ -1292,6 +1294,14 @@ async fn run_worker(
 
     let mut tools = ToolRegistry::with_builtins();
 
+    // issue #182: re-register a cancel-aware Bash over the default so Stop /
+    // Esc / Cmd+. kills an in-flight command (build, test, long sleep) instead
+    // of letting it run to `timeout_ms`. `register()` overwrites by tool name,
+    // and the token is the same session cancel the agent's main loop races.
+    tools.register(std::sync::Arc::new(crate::tools::BashTool::with_cancel(
+        cancel.clone(),
+    )));
+
     // Plan-state → ViewEvent bridge + JSONL persistence (M1). Every
     // time a plan tool calls `submit` / `update_step` / `clear`, the
     // broadcaster registered here:
@@ -1442,6 +1452,7 @@ async fn run_worker(
     if config.image_tools_enabled {
         tools.register(std::sync::Arc::new(crate::tools::TextToImageTool));
         tools.register(std::sync::Arc::new(crate::tools::ImageToImageTool));
+        tools.register(std::sync::Arc::new(crate::tools::TextToSpeechTool));
         tools.register(std::sync::Arc::new(crate::tools::TextToVideoTool));
         tools.register(std::sync::Arc::new(crate::tools::ImageToVideoTool));
         tools.register(std::sync::Arc::new(crate::tools::MediaJobStatusTool));
