@@ -7,6 +7,108 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.108.0] — 2026-07-28
+
+Media Studio gets its biggest update yet with speech mode, resumable renders, and a polished UI, plus chat history now preserves thinking and cost footers across every turn.
+
+### Added
+- **Media Studio: speech mode, renders that survive a reload, and a full UI pass.** Text → Speech is a first-class mode; a submitted video becomes a background job with live elapsed time that keeps being watched after the shell reloads, instead of blocking the panel; the gallery gained audio cards, type filters, search, and a theme that follows the app.
+- **Media Studio: "Enhance" rewrites a prompt on your active model** — translated and filled out for the image model, while text meant to appear *inside* the picture is preserved verbatim (and the rewrite is rejected if it isn't).
+- **Media Studio: the rewrite lands in its own box** — your prompt is never overwritten, and Generate uses the enhanced text only while it has any.
+- **Chat history: each turn now keeps its thinking block and cost footer** when you reopen a conversation.
+
+### Fixed
+- **Media Studio: the viewer's prompt no longer covers the video controls** — it sits below the media, hidden behind a "Show prompt" toggle.
+- **Session Explorer: sessions are listed from the store,** not from a prompt that could go stale or time out.
+- **Chat: the first turn's thinking block and `[tokens: …]` footer no longer disappear when the turn ends.** A redundant session reload was replaying stored history over the live view.
+
+## [0.107.0] — 2026-07-27
+
+The chatbot gets its biggest settings upgrade yet — Plugins and Connectors panels, My Models with bring-your-own-key, and a raft of chat refinements from pinned conversations to slash commands.
+
+### Added
+- **Settings: new Connectors and Plugins panels.** Connectors manages MCP servers — add an HTTP one, see live status and tool counts, remove — and includes the ones installed plugins contribute. Plugins lists installed bundles with what each contributes, and installs from a git or `.zip` URL; skills install from a URL too. The Telegram and Browser-extension placeholders are retired.
+- **My Models is now a real provider/model picker with bring-your-own-key** and a sticky search bar.
+- **Chat history: pin conversations, bulk-delete, rename, and search.**
+- **Chat turns: edit and resend messages, copy code blocks, paste inline images, slash commands, and read-aloud (TTS).**
+- **Turn toolbar: an approvals panel, tool-activity feed, stop button, the signed-in account name, per-model usage stats, and voice settings.**
+- **`.pptx` files now render as slides** in the file viewer instead of dumping extracted text.
+
+### Fixed
+- **Agent SDK `--allowed-tools` / `--disallowed-tools` now gate the MCP bridge,** which was registered after the tool filter ran — same class of bug as the `Task`/`WorkflowRun` fix in v0.106.0.
+- **Agent SDK CLI: the bridge-request prompt is answered during init,** cutting ~65 seconds off the first user turn that references an MCP tool.
+- **GUI Shell: `fileUrl` resolves relative paths** on desktop instead of returning broken links.
+- **Settings panels no longer use body-level dialogs** that the shell sandbox blocks — modals and name-entry fields are now scoped inside each panel.
+- **Settings nav icons have a fixed-width column,** so labels don't jump when switching between sections.
+
+## [0.106.0] — 2026-07-27
+
+Images get where they're going — through Telegram, and through the agent SDK.
+
+### Added
+- **Telegram: a photo reaches the agent instead of vanishing.** Sending a photo used to do nothing at all — no reply, no log line — because Telegram puts a photo's words in `caption` rather than `text`, so even a captioned photo looked textless and was dropped. Photos now travel the same route the GUI's paste path uses, and an uncaptioned one gets a default prompt. Thanks to [@HelloMAF](https://github.com/HelloMAF) for the diagnosis ([#187](https://github.com/thClaws/thClaws/issues/187)).
+
+### Fixed
+- **`agent/*`: a pasted or dragged image reaches the model.** The user turn was serialized as text only, so the image was silently discarded and the model answered as though nothing had been attached ([#185](https://github.com/thClaws/thClaws/issues/185), reported by [@HelloMAF](https://github.com/HelloMAF)).
+- **Windows: no more console flash on every turn under `agent/*`.** The `claude` subprocess is spawned once per turn and was missing `CREATE_NO_WINDOW`, so each message popped a console window that stole focus ([#186](https://github.com/thClaws/thClaws/issues/186), reported by [@HelloMAF](https://github.com/HelloMAF)).
+- **`--allowed-tools` / `--disallowed-tools` now cover `Task` and `WorkflowRun`.** Both are registered after the filter runs — deliberately, so a spawned subagent inherits the already-filtered tool set — which left the two tools themselves exempt from the operator's own lists.
+
+## [0.105.0] — 2026-07-26
+
+Dependency security pass — vulnerable crates out of the shipped binary and the frontend toolchain.
+
+### Security
+- **KMS search index: tantivy 0.22 → 0.26.** tantivy pinned `lru` below 0.16.3, whose `IterMut` violates Stacked Borrows, and `kms_search_index` is compiled into every published binary — so the crate shipped in the artifacts rather than staying a build-time concern.
+- **Frontend: 11 of 12 dependency advisories cleared.** js-yaml, postcss, `@babel/core` and brace-expansion move to patched releases inside their existing majors, and the unused `tiptap-markdown` is dropped — it was the only path pulling linkify-it and markdown-it. The remaining advisory reaches brace-expansion through eslint's `minimatch@3`, which has no patched 1.x release; it is dev-only and never reaches the shipped bundle.
+
+## [0.104.0] — 2026-07-26
+
+Plugins survive a workspace move, per-file cloud-sync divergence, and a catalogue refresh.
+
+### Fixed
+- **Plugins: a plugin's skills, commands, and agents no longer vanish after the workspace is pushed to a hosted workspace or moved on disk.** The registry recorded an absolute install path, so it stopped resolving anywhere else; it's now stored relative to the registry file itself, and an existing absolute entry is repaired on load.
+- **Cloud Sync: divergence is judged per file against each end's own recorded manifest.** A single changed byte on the far end no longer blocks the whole push with `--force` as the only way out — the guard names the files and blocks only on work the other end did.
+- **Serve: the "working" indicator comes back when a browser reconnects mid-turn.**
+
+### Changed
+- **Catalogue: 2026-07-26 refresh — adds the qwen3.7-flash family, priced from the Alibaba international page.**
+
+## [0.103.0] — 2026-07-26
+
+GUI Shell settings suite, cloud sync reliability improvements, and WYSIWYG editor hardening.
+
+### Added
+- **GUI Shell: full settings suite — schedule, heartbeat, skills, knowledge, mode, and profile configuration.**
+- **Cloud Sync: push and pull now preserve empty subfolders.**
+- **Files: Source ⇄ Rich text toggle when editing a `.md` — edit the raw markdown when byte-exact formatting matters.**
+
+### Fixed
+- **Files: WYSIWYG markdown editor destroyed tables, images, HTML comments, `{{…}}` placeholder tokens, and YAML frontmatter on save.**
+- **Cloud Sync: divergence detection now bases off the runner manifest instead of local state, preventing false conflicts.**
+- **Cloud Sync: content directories named `build`, `dist`, or `target` are no longer silently dropped during sync.**
+- **Cloud: bulk sync transfers force HTTP/1.1 to avoid connection failures.**
+- **Files: media controls bar no longer bleeds into other tabs.**
+
+## [0.102.0] — 2026-07-23
+
+White-label GUI Shell with sessions and memory bridge APIs, new RenderSlides built-in tool, plugin .zip installs, and catalogue refresh.
+
+### Added
+- **GUI Shell: white-label chat shell replaces the chatbot example — markdown, chat bubbles, dark theme, sessions history, and memory panel.**
+- **GUI Shell: "Set as default" button on picker cards.**
+- **RenderSlides: new built-in tool relays Marp slide decks to the slide-render service.**
+- **Plugins: install from a local `.zip` file, not just HTTP URLs.**
+
+### Fixed
+- **GUI Shell: settings drawer no longer appears on load and can be closed.**
+- **Multiuser: per-user memory root prevents cross-tenant memory leaks.**
+- **Chat: autocorrect and spellcheck disabled on the chat input.**
+- **RenderSlides: PNG output normalised to `slide-NN.png` (dash separator).**
+- **Media: Gemini pro image model corrected to `gemini-3-pro-image` (was returning 404).**
+
+### Changed
+- **Catalogue: 2026-07-22 model catalogue refresh.**
+
 ## [0.101.0] — 2026-07-21
 
 New built-in TextToSpeech tool, MCP plugin-contributed server fixes, plugin install improvements, and catalogue refresh.

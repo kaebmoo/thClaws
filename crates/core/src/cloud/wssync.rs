@@ -25,7 +25,7 @@ use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -92,41 +92,103 @@ fn norm(rel: &Path) -> String {
 /// root), so a monorepo's `frontend/node_modules/` is dropped too. Everything
 /// NOT in this list teleports verbatim — sessions/state, `.git/`, secrets —
 /// which is the whole point of push|pull vs. a catalog publish.
-pub const SYNC_STRIP_DIRS: &[&str] = &[
-    "node_modules",
-    "target",
-    ".venv",
-    "__pycache__",
-    ".next",
-    "dist",
-    "build",
+/// Always-stripped tool dirs — unambiguously regenerable caches.
+pub const SYNC_STRIP_DIRS: &[&str] = &["node_modules", ".venv", "__pycache__", ".next"];
+
+/// Rendered `.pptx` previews. Unlike the rest of `.thclaws/state/` this
+/// is derived output, not work: several MB per deck (a 23-slide deck
+/// lands at ~7.5 MB of PDF + PNGs), and the far end re-renders on
+/// demand. Carrying it would inflate every push for nothing.
+const PPTX_CACHE_PREFIX: &str = crate::tools::slide_render::PPTX_CACHE_REL;
+
+/// Conditionally-stripped names: real toolchain OUTPUT only when the
+/// marker file that generates them sits beside them. `build/` in a JS
+/// project (sibling `package.json`) is regenerable; `build/` in a
+/// book-production workspace (sibling `book.yaml`, no `package.json`)
+/// is the DELIVERABLES — epub/pdf/rendered slides/TTS audio that cost
+/// real money to produce — and was being silently dropped from
+/// /cloud push (544MB of a 1GB workspace in the reported case).
+pub const SYNC_STRIP_IF_MARKER: &[(&str, &str)] = &[
+    ("target", "Cargo.toml"),
+    ("build", "package.json"),
+    ("dist", "package.json"),
 ];
 
-fn in_stripped_dir(rel: &Path) -> bool {
-    rel.components().any(|c| {
-        matches!(c, Component::Normal(seg)
-            if seg.to_str().is_some_and(|s| SYNC_STRIP_DIRS.contains(&s)))
-    })
+fn in_stripped_dir(root: &Path, rel: &Path) -> bool {
+    let mut parent = PathBuf::new();
+    for c in rel.components() {
+        if let Component::Normal(seg) = c {
+            if let Some(s) = seg.to_str() {
+                if SYNC_STRIP_DIRS.contains(&s) {
+                    return true;
+                }
+                for (name, marker) in SYNC_STRIP_IF_MARKER {
+                    if s == *name && root.join(&parent).join(marker).is_file() {
+                        return true;
+                    }
+                }
+            }
+        }
+        parent.push(c);
+    }
+    false
 }
 
 /// Inside the sync exclude set? Only the regenerable build dirs
-/// ([`SYNC_STRIP_DIRS`]) plus the `.sync-trash/` tree itself (never sync the
-/// trash). NOT `pack::is_strippable` — push|pull keeps runtime state.
-fn excluded(rel: &Path) -> bool {
+/// ([`SYNC_STRIP_DIRS`] + marker-confirmed [`SYNC_STRIP_IF_MARKER`])
+/// plus the `.sync-trash/` tree itself (never sync the trash). NOT
+/// `pack::is_strippable` — push|pull keeps runtime state.
+fn excluded(root: &Path, rel: &Path) -> bool {
     let s = norm(rel);
     s == SYNC_BASE_REL
         || s == TRASH_PREFIX
         || s.starts_with(&format!("{TRASH_PREFIX}/"))
-        || in_stripped_dir(rel)
+        || s == PPTX_CACHE_PREFIX
+        || s.starts_with(&format!("{PPTX_CACHE_PREFIX}/"))
+        || in_stripped_dir(root, rel)
 }
 
 /// Collect files relative to `root`. `keep` decides inclusion; symlinks are
 /// always skipped (never followed — traversal safety).
 fn walk(root: &Path, keep: &dyn Fn(&Path) -> bool) -> Result<Vec<PathBuf>, String> {
+    Ok(walk_with_dirs(root, keep)?.0)
+}
+
+/// Like [`walk`] but also returns every kept DIRECTORY (for empty-dir
+/// preservation: dirs with no synced file beneath still ride the tar as
+/// directory entries so scaffolding like `media/screenshots/` survives
+/// a push).
+fn walk_with_dirs(
+    root: &Path,
+    keep: &dyn Fn(&Path) -> bool,
+) -> Result<(Vec<PathBuf>, Vec<PathBuf>), String> {
     let mut out = Vec::new();
-    walk_inner(root, root, keep, &mut out)?;
+    let mut dirs = Vec::new();
+    walk_inner(root, root, keep, &mut out, &mut dirs)?;
     out.sort();
-    Ok(out)
+    dirs.sort();
+    Ok((out, dirs))
+}
+
+/// Kept directories with no synced file beneath them.
+fn empty_dirs_for(root: &Path, keep: &dyn Fn(&Path) -> bool) -> Result<Vec<PathBuf>, String> {
+    let (files, dirs) = walk_with_dirs(root, keep)?;
+    let file_norms: Vec<String> = files.iter().map(|f| norm(f)).collect();
+    Ok(dirs
+        .into_iter()
+        .filter(|d| {
+            let prefix = format!("{}/", norm(d));
+            !file_norms.iter().any(|f| f.starts_with(&prefix))
+        })
+        .collect())
+}
+
+/// Empty dirs under the standard synced view (strip set + syncignore).
+fn empty_synced_dirs(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let ignores = load_syncignore(root);
+    empty_dirs_for(root, &|rel| {
+        !excluded(root, rel) && !ignored_by(&norm(rel), &ignores)
+    })
 }
 
 fn walk_inner(
@@ -134,6 +196,7 @@ fn walk_inner(
     dir: &Path,
     keep: &dyn Fn(&Path) -> bool,
     out: &mut Vec<PathBuf>,
+    dirs: &mut Vec<PathBuf>,
 ) -> Result<(), String> {
     let rd = match std::fs::read_dir(dir) {
         Ok(rd) => rd,
@@ -154,7 +217,8 @@ fn walk_inner(
         if ft.is_symlink() {
             continue; // never follow or sync symlinks
         } else if ft.is_dir() {
-            walk_inner(root, &path, keep, out)?;
+            dirs.push(rel.clone());
+            walk_inner(root, &path, keep, out, dirs)?;
         } else if ft.is_file() {
             out.push(rel);
         }
@@ -208,7 +272,7 @@ fn ignored_by(rel: &str, patterns: &[String]) -> bool {
 fn walk_synced(root: &Path) -> Result<Vec<PathBuf>, String> {
     let ignores = load_syncignore(root);
     walk(root, &|rel| {
-        !excluded(rel) && !ignored_by(&norm(rel), &ignores)
+        !excluded(root, rel) && !ignored_by(&norm(rel), &ignores)
     })
 }
 
@@ -249,10 +313,24 @@ pub fn write_binding(root: &Path, b: &Binding) -> Result<(), String> {
     std::fs::write(&p, data).map_err(|e| format!("write binding: {}", e))
 }
 
-/// Tar+gzip a list of rel paths under `root` into `w`.
-fn write_tar<W: Write>(root: &Path, files: &[PathBuf], w: W) -> Result<(), String> {
+/// Tar+gzip a list of rel paths under `root` into `w`. `empty_dirs`
+/// ride as directory entries (~0 bytes) so scaffold folders survive;
+/// receivers that predate dir handling skip them harmlessly.
+fn write_tar<W: Write>(
+    root: &Path,
+    files: &[PathBuf],
+    empty_dirs: &[PathBuf],
+    w: W,
+) -> Result<(), String> {
     let enc = GzEncoder::new(w, Compression::default());
     let mut tar = tar::Builder::new(enc);
+    for rel in empty_dirs {
+        let abs = root.join(rel);
+        if abs.is_dir() {
+            tar.append_dir(rel, &abs)
+                .map_err(|e| format!("tar append dir {}: {}", rel.display(), e))?;
+        }
+    }
     for rel in files {
         let abs = root.join(rel);
         let mut f =
@@ -269,13 +347,17 @@ fn write_tar<W: Write>(root: &Path, files: &[PathBuf], w: W) -> Result<(), Strin
 /// the strip set (still skips `.sync-trash/`). Enforces `MAX_SYNC_BYTES`.
 /// Returns the uncompressed byte total.
 pub fn tar_workspace_to<W: Write>(root: &Path, include_runtime: bool, w: W) -> Result<u64, String> {
-    let files = if include_runtime {
-        walk(root, &|rel| {
-            let s = norm(rel);
-            s != TRASH_PREFIX && !s.starts_with(&format!("{TRASH_PREFIX}/"))
-        })?
+    let runtime_keep = |rel: &Path| {
+        let s = norm(rel);
+        s != TRASH_PREFIX && !s.starts_with(&format!("{TRASH_PREFIX}/"))
+    };
+    let (files, empty_dirs) = if include_runtime {
+        (
+            walk(root, &runtime_keep)?,
+            empty_dirs_for(root, &runtime_keep)?,
+        )
     } else {
-        walk_synced(root)?
+        (walk_synced(root)?, empty_synced_dirs(root)?)
     };
     let total: u64 = files
         .iter()
@@ -292,7 +374,7 @@ pub fn tar_workspace_to<W: Write>(root: &Path, include_runtime: bool, w: W) -> R
             MAX_SYNC_BYTES / 1_048_576
         ));
     }
-    write_tar(root, &files, w)?;
+    write_tar(root, &files, &empty_dirs, w)?;
     Ok(total)
 }
 
@@ -336,6 +418,10 @@ fn extract_tarball<R: Read>(reader: R, root: &Path) -> Result<(usize, BTreeSet<P
             return Err(format!("refused unsafe entry path: {}", path.display()));
         }
         if entry.header().entry_type().is_dir() {
+            // Empty-dir preservation: materialize directory entries so
+            // scaffold folders (media/screenshots/, output/, …) survive.
+            std::fs::create_dir_all(root.join(&path))
+                .map_err(|e| format!("mkdir {}: {}", path.display(), e))?;
             continue;
         }
         let out = root.join(&path);
@@ -494,8 +580,27 @@ pub fn manifest_fingerprint(entries: &[FileEntry]) -> String {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct SyncBase {
+    /// v1: whole-workspace fingerprint. Still written so an older engine
+    /// reading this file keeps its guard instead of seeing "never synced".
     #[serde(skip_serializing_if = "Option::is_none")]
     base: Option<String>,
+    /// v2: the per-file views each end held at the last successful sync. Two
+    /// manifests, not one, because identical work can hash differently per end
+    /// when the client's and runner's strip rules disagree — each side is
+    /// judged against its OWN recorded view so that skew never reads as drift.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    local: Option<Vec<FileEntry>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote: Option<Vec<FileEntry>>,
+}
+
+fn write_base(root: &Path, b: &SyncBase) -> Result<(), String> {
+    let path = root.join(SYNC_BASE_REL);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
+    }
+    let body = serde_json::to_vec(b).map_err(|e| format!("encode base: {}", e))?;
+    std::fs::write(&path, body).map_err(|e| format!("write base: {}", e))
 }
 
 /// The content fingerprint recorded at the last successful sync (the agreed
@@ -508,17 +613,109 @@ pub fn read_sync_base(root: &Path) -> Option<String> {
 }
 
 /// Record the agreed-state fingerprint after a successful sync. Excluded from
-/// the payload, so it stays local to this end.
+/// the payload, so it stays local to this end. Drops any per-file base: the
+/// callers that reach for this have no cloud-side view to record, so a stale
+/// one would misattribute the next change.
 pub fn write_sync_base(root: &Path, fingerprint: &str) -> Result<(), String> {
-    let path = root.join(SYNC_BASE_REL);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
+    write_base(
+        root,
+        &SyncBase {
+            base: Some(fingerprint.to_string()),
+            ..Default::default()
+        },
+    )
+}
+
+/// The per-file base views recorded at the last successful sync, `(local,
+/// remote)`. `None` when this folder has no v2 base — never synced, or last
+/// synced by an engine that only wrote the v1 fingerprint.
+pub fn read_sync_base_manifests(root: &Path) -> Option<(Vec<FileEntry>, Vec<FileEntry>)> {
+    let s: SyncBase = std::fs::read(root.join(SYNC_BASE_REL))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())?;
+    Some((s.local?, s.remote?))
+}
+
+/// Record both ends' per-file views after a successful sync, so the NEXT sync
+/// can tell WHICH end moved WHAT rather than only that something did.
+pub fn write_sync_base_manifests(
+    root: &Path,
+    local: &[FileEntry],
+    remote: &[FileEntry],
+) -> Result<(), String> {
+    write_base(
+        root,
+        &SyncBase {
+            base: Some(manifest_fingerprint(remote)),
+            local: Some(local.to_vec()),
+            remote: Some(remote.to_vec()),
+        },
+    )
+}
+
+/// Which end moved each path since the agreed base.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Reconcile {
+    /// Changed on this machine only — a push carries them, a pull loses them.
+    pub push: Vec<String>,
+    /// Changed on the cloud only — a pull carries them, a push loses them.
+    pub pull: Vec<String>,
+    /// Both ends moved to DIFFERENT content: no safe automatic answer.
+    pub conflicts: Vec<String>,
+}
+
+impl Reconcile {
+    /// Nothing either end would destroy — the sync is safe in both directions.
+    pub fn is_clean(&self) -> bool {
+        self.push.is_empty() && self.pull.is_empty() && self.conflicts.is_empty()
     }
-    let body = serde_json::to_vec(&SyncBase {
-        base: Some(fingerprint.to_string()),
-    })
-    .map_err(|e| format!("encode base: {}", e))?;
-    std::fs::write(&path, body).map_err(|e| format!("write base: {}", e))
+}
+
+/// Three-way compare of the two ends against the base recorded at their last
+/// successful sync. Paths where NEITHER end moved are left alone even if their
+/// content differs today: that difference predates the base, which is exactly
+/// the per-end strip-rule skew case. Clock-free — nothing here reads an mtime,
+/// so it holds across machines with unsynced clocks.
+pub fn reconcile(
+    base_local: &[FileEntry],
+    base_remote: &[FileEntry],
+    local: &[FileEntry],
+    remote: &[FileEntry],
+) -> Reconcile {
+    fn index(es: &[FileEntry]) -> BTreeMap<&str, &str> {
+        es.iter()
+            .filter(|e| !FINGERPRINT_SKIP.contains(&e.path.as_str()))
+            .map(|e| (e.path.as_str(), e.sha256.as_str()))
+            .collect()
+    }
+    let (bl, br, l, r) = (
+        index(base_local),
+        index(base_remote),
+        index(local),
+        index(remote),
+    );
+    let mut out = Reconcile::default();
+    let paths: BTreeSet<&str> = bl
+        .keys()
+        .chain(br.keys())
+        .chain(l.keys())
+        .chain(r.keys())
+        .copied()
+        .collect();
+    for p in paths {
+        let (lh, rh) = (l.get(p), r.get(p));
+        if lh == rh {
+            // Already agree — including both ends making the identical edit.
+            continue;
+        }
+        match (lh != bl.get(p), rh != br.get(p)) {
+            (true, true) => out.conflicts.push(p.to_string()),
+            (true, false) => out.push.push(p.to_string()),
+            (false, true) => out.pull.push(p.to_string()),
+            (false, false) => {}
+        }
+    }
+    out
 }
 
 /// Has `manifest` drifted from the recorded agreed state? `false` when there
@@ -556,7 +753,11 @@ pub fn tar_paths_to<W: Write>(root: &Path, paths: &[String], w: W) -> Result<u64
             MAX_SYNC_BYTES / 1_048_576
         ));
     }
-    write_tar(root, &valid, w)?;
+    // Every incremental push also carries the CURRENT empty dirs — dir
+    // entries are ~free, create_dir_all on the receiver is idempotent,
+    // and the manifest (files-only, fixed wire shape) can't express them.
+    let empty_dirs = empty_synced_dirs(root)?;
+    write_tar(root, &valid, &empty_dirs, w)?;
     Ok(total)
 }
 
@@ -815,7 +1016,110 @@ mod tests {
             "a changed session must read as divergence"
         );
         // The base file itself never travels.
-        assert!(excluded(Path::new(".thclaws/cloud-sync-base.json")));
+        assert!(excluded(&root, Path::new(".thclaws/cloud-sync-base.json")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn ent(path: &str, sha: &str) -> FileEntry {
+        FileEntry {
+            path: path.to_string(),
+            size: sha.len() as u64,
+            sha256: sha.to_string(),
+        }
+    }
+
+    #[test]
+    fn reconcile_attributes_each_change_to_the_end_that_made_it() {
+        // Agreed base: both ends held the same four files.
+        let base: Vec<FileEntry> = vec![
+            ent("only_local.rs", "a"),
+            ent("only_cloud.rs", "b"),
+            ent("both.rs", "c"),
+            ent("untouched.rs", "d"),
+        ];
+        let local = vec![
+            ent("only_local.rs", "a2"),
+            ent("only_cloud.rs", "b"),
+            ent("both.rs", "c_local"),
+            ent("untouched.rs", "d"),
+            ent("new_local.rs", "n"),
+        ];
+        let remote = vec![
+            ent("only_local.rs", "a"),
+            ent("only_cloud.rs", "b2"),
+            ent("both.rs", "c_cloud"),
+            ent("untouched.rs", "d"),
+        ];
+        let r = reconcile(&base, &base, &local, &remote);
+        assert_eq!(r.push, vec!["new_local.rs", "only_local.rs"]);
+        assert_eq!(r.pull, vec!["only_cloud.rs"]);
+        assert_eq!(r.conflicts, vec!["both.rs"]);
+        assert!(!r.is_clean());
+    }
+
+    #[test]
+    fn reconcile_is_clean_when_nothing_moved_or_both_made_the_same_edit() {
+        let base = vec![ent("a.rs", "1"), ent("b.rs", "2")];
+        // Identical edit on both ends is already agreed — not a conflict.
+        let same = vec![ent("a.rs", "1"), ent("b.rs", "2_edited")];
+        assert!(reconcile(&base, &base, &same, &same).is_clean());
+        assert!(reconcile(&base, &base, &base, &base).is_clean());
+    }
+
+    #[test]
+    fn reconcile_ignores_per_end_strip_skew() {
+        // The regression 38d16bc4 chased: the client strips `build/` but the
+        // runner (older engine) still reports it, so the two ends disagree on a
+        // path NEITHER of them touched. Judging each end against its own
+        // recorded view must leave it alone — otherwise every sync demands
+        // --force forever.
+        let base_local = vec![ent("src/main.rs", "m")];
+        let base_remote = vec![ent("src/main.rs", "m"), ent("build/out.js", "stale")];
+        let local = base_local.clone();
+        let remote = base_remote.clone();
+        assert!(
+            reconcile(&base_local, &base_remote, &local, &remote).is_clean(),
+            "pre-existing per-end skew must not read as a change"
+        );
+        // A real edit on top of that skew is still attributed correctly.
+        let local2 = vec![ent("src/main.rs", "m2")];
+        let r = reconcile(&base_local, &base_remote, &local2, &remote);
+        assert_eq!(r.push, vec!["src/main.rs"]);
+        assert!(r.pull.is_empty() && r.conflicts.is_empty());
+    }
+
+    #[test]
+    fn reconcile_tracks_deletions_and_skips_plumbing() {
+        let base = vec![ent("gone.rs", "g"), ent(".thclaws/settings.json", "s")];
+        // Deleted locally, still on the cloud → a local-side change to push.
+        let local: Vec<FileEntry> = vec![ent(".thclaws/settings.json", "s_overlay")];
+        let remote = vec![ent("gone.rs", "g"), ent(".thclaws/settings.json", "s")];
+        let r = reconcile(&base, &base, &local, &remote);
+        assert_eq!(r.push, vec!["gone.rs"]);
+        assert!(
+            r.pull.is_empty() && r.conflicts.is_empty(),
+            "the per-end settings overlay must never count"
+        );
+    }
+
+    #[test]
+    fn per_file_base_round_trips_and_keeps_v1_compat() {
+        let root = tmp("base-v2");
+        write(&root, "src/main.rs", "fn main(){}");
+        let local = build_manifest(&root).unwrap();
+        let remote = vec![ent("src/main.rs", "different")];
+        // No v2 base yet.
+        assert!(read_sync_base_manifests(&root).is_none());
+        write_sync_base_manifests(&root, &local, &remote).unwrap();
+        let (bl, br) = read_sync_base_manifests(&root).unwrap();
+        assert_eq!(bl, local);
+        assert_eq!(br, remote);
+        // An older engine reading the same file still finds its v1 watermark,
+        // and it is the RUNNER's fingerprint (the pre-3-way contract).
+        assert_eq!(read_sync_base(&root), Some(manifest_fingerprint(&remote)));
+        // Writing a v1 base drops the stale per-file views.
+        write_sync_base(&root, &manifest_fingerprint(&local)).unwrap();
+        assert!(read_sync_base_manifests(&root).is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -831,8 +1135,16 @@ mod tests {
         // Regenerable / arch-specific — never ride, incl. a NESTED node_modules.
         write(&root, "node_modules/pkg/index.js", "js");
         write(&root, "frontend/node_modules/x.js", "js");
+        write(&root, "Cargo.toml", "[package]");
         write(&root, "target/debug/app", "bin");
         write(&root, "__pycache__/m.pyc", "x");
+        // Marker heuristic: a book-style build/ (no package.json) is
+        // CONTENT and must ride; a JS build/ (sibling package.json) is
+        // regenerable output and must not.
+        write(&root, "build/slides/ch01.pdf", "pdf");
+        write(&root, "web/package.json", "{}");
+        write(&root, "web/build/bundle.js", "js");
+        write(&root, "tools/target/data.csv", "csv"); // no Cargo.toml → content
         let files: Vec<String> = walk_synced(&root)
             .unwrap()
             .iter()
@@ -848,7 +1160,65 @@ mod tests {
         );
         assert!(!files.iter().any(|f| f.starts_with("target/")));
         assert!(!files.iter().any(|f| f.contains("__pycache__")));
+        assert!(
+            files.contains(&"build/slides/ch01.pdf".to_string()),
+            "book-style build/ (no package.json) must sync"
+        );
+        assert!(
+            !files.iter().any(|f| f.starts_with("web/build/")),
+            "JS build/ beside package.json must strip"
+        );
+        assert!(
+            files.contains(&"tools/target/data.csv".to_string()),
+            "target/ without Cargo.toml must sync"
+        );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn empty_dirs_survive_roundtrip() {
+        let root = tmp("emptydirs-src");
+        write(&root, "chapters/ch01.md", "# ch1");
+        // Scaffold dirs with no files — must survive a push.
+        std::fs::create_dir_all(root.join("media/screenshots")).unwrap();
+        std::fs::create_dir_all(root.join("media/generated")).unwrap();
+        std::fs::create_dir_all(root.join("output")).unwrap();
+        // A stripped empty dir must NOT ride.
+        std::fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        // A dir that DOES have a file is not an "empty dir" but still lands.
+        write(&root, "reports/r.md", "r");
+
+        let empties: Vec<String> = empty_synced_dirs(&root)
+            .unwrap()
+            .iter()
+            .map(|d| norm(d))
+            .collect();
+        assert!(empties.contains(&"media/screenshots".to_string()));
+        assert!(empties.contains(&"media/generated".to_string()));
+        assert!(empties.contains(&"output".to_string()));
+        assert!(!empties.iter().any(|d| d.contains("node_modules")));
+        assert!(
+            !empties.contains(&"reports".to_string()),
+            "reports has a file"
+        );
+
+        // Full round-trip: tar → untar into a fresh root.
+        let bytes = tar_workspace(&root, false).unwrap();
+        let dst = tmp("emptydirs-dst");
+        untar_workspace(&bytes, &dst, false).unwrap();
+        assert!(
+            dst.join("media/screenshots").is_dir(),
+            "empty scaffold dir teleported"
+        );
+        assert!(dst.join("media/generated").is_dir());
+        assert!(dst.join("output").is_dir());
+        assert!(dst.join("chapters/ch01.md").is_file());
+        assert!(
+            !dst.join("node_modules").exists(),
+            "stripped dir not teleported"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&dst);
     }
 
     #[test]

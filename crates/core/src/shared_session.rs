@@ -130,6 +130,23 @@ pub enum ShellInput {
     /// etc.). Surface as a `ViewEvent::ErrorText` so the user sees
     /// *why* a configured MCP server never came online.
     McpFailed { server_name: String, error: String },
+    /// Connect ONE newly-configured MCP server into the running
+    /// session — the Connectors surface writes `mcp.json` and sends
+    /// this, so a connector added mid-conversation is usable on the
+    /// very next turn instead of after a restart. Same spawn →
+    /// `McpReady` fan-out the startup and `ChangeCwd` paths use.
+    McpConnect(Box<crate::mcp::McpServerConfig>),
+    /// Re-discover skills and rebuild around them. Sent after a skill
+    /// is installed from a surface that isn't the slash command (the
+    /// GUI-Shell skills panel), so the new skill is listed in
+    /// `# Available skills` for the very next turn instead of after a
+    /// restart.
+    SkillsRefresh,
+    /// Detach a server that was just removed from `mcp.json`: drop its
+    /// tools from the live registry and its client, then rebuild. The
+    /// config write alone would leave the tools advertised to the model
+    /// (and callable) for the rest of the session.
+    McpDisconnect { server_name: String },
     /// Reload `AppConfig` from disk and rebuild the agent's provider in
     /// place. Sent by the GUI after `api_key_set` / `api_key_clear` so
     /// the running session picks up the new key (and any auto-fallback
@@ -231,6 +248,10 @@ pub enum ShellInput {
     /// then chunks + sends it back via `sendMessage`.
     TelegramMessage {
         text: String,
+        /// Attachments as `(media_type, base64)` — a Telegram photo
+        /// (public issue #187). Empty for a plain text message, which
+        /// keeps that path on `handle_line` exactly as before.
+        images: Vec<(String, String)>,
         respond: tokio::sync::oneshot::Sender<String>,
     },
     /// dev-plan/29: owner approved a pairing code in the GUI. Worker
@@ -526,9 +547,51 @@ pub enum ViewEvent {
 pub struct DisplayMessage {
     pub role: String,
     pub content: String,
+    /// The model's reasoning for this turn, when it produced any. Kept
+    /// out of `content` so the surface can render it the way it renders
+    /// live reasoning — a collapsed block above the answer — rather
+    /// than inlining it into the reply text.
+    pub thinking: Option<String>,
 }
 
 impl DisplayMessage {
+    /// Same as [`from_messages`], plus the session's stored per-turn
+    /// usage footers dropped back in as `system` rows at the message
+    /// counts they were recorded at. This is what a reload should
+    /// render: the live view shows those footers, so history that
+    /// silently omits them is a different conversation.
+    pub fn from_session(session: &crate::session::Session) -> Vec<Self> {
+        let usage = &session.turn_usage;
+        if usage.is_empty() {
+            return Self::from_messages(&session.messages);
+        }
+        let mut out: Vec<Self> = Vec::new();
+        let mut next = 0usize;
+        for (i, _) in session.messages.iter().enumerate() {
+            // Rebuild one message at a time so a footer recorded at
+            // `after = N` lands after exactly N messages' worth of rows.
+            out.extend(Self::from_messages(&session.messages[i..=i]));
+            while next < usage.len() && usage[next].after == i + 1 {
+                out.push(DisplayMessage {
+                    role: "system".into(),
+                    content: usage[next].text.clone(),
+                    thinking: None,
+                });
+                next += 1;
+            }
+        }
+        // Footers recorded past the end (history trimmed by a compaction
+        // since) still belong at the bottom rather than being dropped.
+        for u in &usage[next..] {
+            out.push(DisplayMessage {
+                role: "system".into(),
+                content: u.text.clone(),
+                thinking: None,
+            });
+        }
+        out
+    }
+
     pub fn from_messages(messages: &[Message]) -> Vec<Self> {
         let mut out: Vec<DisplayMessage> = Vec::new();
         // Map tool_use_id → tool name so when we later see a
@@ -554,6 +617,7 @@ impl DisplayMessage {
             // the Terminal tab) — except AskUserQuestion's, which IS
             // the user's typed reply and renders as a user bubble.
             let mut text_parts: Vec<String> = Vec::new();
+            let mut thinking_parts: Vec<String> = Vec::new();
             let mut deferred_tools: Vec<DisplayMessage> = Vec::new();
             let mut deferred_user_replies: Vec<DisplayMessage> = Vec::new();
             for b in &m.content {
@@ -563,12 +627,13 @@ impl DisplayMessage {
                     // it in the chat-list display. When the GUI gets a
                     // dedicated "show thinking" toggle, surface this
                     // there instead of the main bubble.
-                    ContentBlock::Thinking { .. } => {}
+                    ContentBlock::Thinking { content, .. } => thinking_parts.push(content.clone()),
                     ContentBlock::ToolUse { id, name, .. } => {
                         tool_use_names.insert(id.clone(), name.clone());
                         deferred_tools.push(DisplayMessage {
                             role: "tool".into(),
                             content: name.clone(),
+                            thinking: None,
                         });
                     }
                     ContentBlock::ToolResult {
@@ -592,6 +657,7 @@ impl DisplayMessage {
                                 deferred_user_replies.push(DisplayMessage {
                                     role: "user".into(),
                                     content: trimmed.to_string(),
+                                    thinking: None,
                                 });
                             }
                         }
@@ -611,10 +677,16 @@ impl DisplayMessage {
             // user message so the prior assistant question reads
             // before the answer in the chat list.
             let text = text_parts.join("\n");
-            if !text.is_empty() {
+            let thinking = if thinking_parts.is_empty() {
+                None
+            } else {
+                Some(thinking_parts.join("\n"))
+            };
+            if !text.is_empty() || thinking.is_some() {
                 out.push(DisplayMessage {
                     role: role.to_string(),
                     content: text,
+                    thinking,
                 });
             }
             out.extend(deferred_tools);
@@ -866,6 +938,8 @@ impl WorkerState {
                 .register(std::sync::Arc::new(crate::tools::ImageToImageTool));
             self.tool_registry
                 .register(std::sync::Arc::new(crate::tools::TextToSpeechTool));
+            self.tool_registry
+                .register(std::sync::Arc::new(crate::tools::RenderSlidesTool));
             self.tool_registry
                 .register(std::sync::Arc::new(crate::tools::TextToVideoTool));
             self.tool_registry
@@ -1453,6 +1527,7 @@ async fn run_worker(
         tools.register(std::sync::Arc::new(crate::tools::TextToImageTool));
         tools.register(std::sync::Arc::new(crate::tools::ImageToImageTool));
         tools.register(std::sync::Arc::new(crate::tools::TextToSpeechTool));
+        tools.register(std::sync::Arc::new(crate::tools::RenderSlidesTool));
         tools.register(std::sync::Arc::new(crate::tools::TextToVideoTool));
         tools.register(std::sync::Arc::new(crate::tools::ImageToVideoTool));
         tools.register(std::sync::Arc::new(crate::tools::MediaJobStatusTool));
@@ -2290,7 +2365,7 @@ async fn run_worker(
                     let _ = crate::permissions::take_pre_plan_mode();
                     crate::permissions::set_current_mode_and_broadcast(state.agent.permission_mode);
                 }
-                let display = DisplayMessage::from_messages(&state.session.messages);
+                let display = DisplayMessage::from_session(&state.session);
                 let _ = events_tx.send(ViewEvent::HistoryReplaced(display));
                 // Refresh so the sidebar's "current session" highlight
                 // moves to the freshly-loaded id.
@@ -2358,13 +2433,114 @@ async fn run_worker(
                 // (No `cfg(feature = "gui")` — the whole module is already
                 // gated at file scope; the inner cfg block was redundant.)
                 crate::gui::update_mcp_tool_count(&server_name, tool_count);
+                crate::gui::clear_mcp_failure(&server_name);
                 let payload = crate::gui::build_mcp_update_payload();
                 let _ = events_tx.send(ViewEvent::McpUpdate(payload.to_string()));
             }
             ShellInput::McpFailed { server_name, error } => {
+                crate::gui::record_mcp_failure(&server_name, &error);
                 let _ = events_tx.send(ViewEvent::ErrorText(format!(
                     "[mcp] '{server_name}' failed to start: {error}"
                 )));
+                let payload = crate::gui::build_mcp_update_payload();
+                let _ = events_tx.send(ViewEvent::McpUpdate(payload.to_string()));
+            }
+            ShellInput::McpConnect(server_cfg) => {
+                let approver_for_spawn = state.approver.clone();
+                let input_tx_for_spawn = input_tx_self.clone();
+                let server_cfg = *server_cfg;
+                crate::gui::clear_mcp_failure(&server_cfg.name);
+                tokio::spawn(async move {
+                    let server_name = server_cfg.name.clone();
+                    match crate::mcp::McpClient::spawn_with_approver(
+                        server_cfg,
+                        Some(approver_for_spawn),
+                    )
+                    .await
+                    {
+                        Ok(client) => match client.list_tools().await {
+                            Ok(tools) => {
+                                let _ = input_tx_for_spawn.send(ShellInput::McpReady {
+                                    server_name,
+                                    client,
+                                    tools,
+                                });
+                            }
+                            Err(e) => {
+                                let _ = input_tx_for_spawn.send(ShellInput::McpFailed {
+                                    server_name,
+                                    error: format!("list_tools failed: {e}"),
+                                });
+                            }
+                        },
+                        Err(e) => {
+                            let _ = input_tx_for_spawn.send(ShellInput::McpFailed {
+                                server_name,
+                                error: e.to_string(),
+                            });
+                        }
+                    }
+                });
+            }
+            ShellInput::SkillsRefresh => {
+                // Same live-refresh the `/skill install` slash arm does:
+                // swap the SkillTool's store contents, then recompute
+                // the system prompt so the new skill is advertised.
+                let refreshed = crate::skills::SkillStore::discover();
+                let count = refreshed.skills.len();
+                if let Ok(mut store) = state.skill_store.lock() {
+                    *store = refreshed;
+                }
+                state.rebuild_system_prompt();
+                if let Err(e) = state.rebuild_agent(true) {
+                    let _ = events_tx.send(ViewEvent::ErrorText(format!(
+                        "[skills] refresh failed: {e}"
+                    )));
+                } else {
+                    let _ = events_tx.send(ViewEvent::SlashOutput(format!(
+                        "[skills] reloaded ({count} available)"
+                    )));
+                }
+            }
+            ShellInput::McpDisconnect { server_name } => {
+                // Tool names are `<sanitized-server>__<tool>`, so the
+                // prefix is what identifies this server's tools —
+                // sanitize the same way the registration did or a
+                // server named `my.server` never matches.
+                let prefix = format!(
+                    "{}{}",
+                    crate::mcp::sanitize_tool_name_segment(&server_name),
+                    crate::mcp::MCP_NAME_SEPARATOR
+                );
+                let doomed: Vec<String> = state
+                    .tool_registry
+                    .names()
+                    .iter()
+                    .filter(|n| n.starts_with(&prefix))
+                    .map(|n| n.to_string())
+                    .collect();
+                for name in &doomed {
+                    state.tool_registry.remove(name);
+                }
+                state.mcp_clients.retain(|c| c.name() != server_name);
+                crate::gui::clear_mcp_failure(&server_name);
+                crate::gui::update_mcp_tool_count(&server_name, 0);
+                state.sync_factory_snapshot();
+                // Drop the server's `# MCP server instructions` section
+                // before the agent is rebuilt around the trimmed registry.
+                state.rebuild_system_prompt();
+                if let Err(e) = state.rebuild_agent(true) {
+                    let _ = events_tx.send(ViewEvent::ErrorText(format!(
+                        "[mcp] '{server_name}' detached but rebuild failed: {e}"
+                    )));
+                } else {
+                    let _ = events_tx.send(ViewEvent::SlashOutput(format!(
+                        "[mcp] '{server_name}' disconnected ({} tool(s) removed)",
+                        doomed.len()
+                    )));
+                }
+                let payload = crate::gui::build_mcp_update_payload();
+                let _ = events_tx.send(ViewEvent::McpUpdate(payload.to_string()));
             }
             ShellInput::LineConnect(line_cfg) => {
                 // If a session is already running, cancel it
@@ -2709,7 +2885,11 @@ async fn run_worker(
                     "[telegram] bridge disconnected".into(),
                 ));
             }
-            ShellInput::TelegramMessage { text, respond } => {
+            ShellInput::TelegramMessage {
+                text,
+                images,
+                respond,
+            } => {
                 // Drive the live agent for an inbound Telegram message.
                 // Subscribe before the turn, accumulate the FINAL
                 // assistant text (cleared on each ToolCallStart so only
@@ -2741,7 +2921,19 @@ async fn run_worker(
                 // "please ask in your reply" text instead of a GUI modal
                 // the Telegram user can't see (reuses the LINE flag).
                 crate::tools::ask::set_line_driven_turn(true);
-                handle_line(text, &mut state, &events_tx, &cancel, &input_tx_self).await;
+                if images.is_empty() {
+                    handle_line(text, &mut state, &events_tx, &cancel, &input_tx_self).await;
+                } else {
+                    handle_line_with_images(
+                        text,
+                        images,
+                        &mut state,
+                        &events_tx,
+                        &cancel,
+                        &input_tx_self,
+                    )
+                    .await;
+                }
                 crate::tools::ask::set_line_driven_turn(false);
                 let final_text = collector.await.unwrap_or_default();
                 let _ = respond.send(final_text);
@@ -4955,14 +5147,22 @@ async fn drive_turn_stream_inner(
                 } else {
                     String::new()
                 };
-                let _ = events_tx.send(ViewEvent::TurnUsage(format!(
+                let usage_line = format!(
                     "[tokens: {}in/{}out{} · {}{}]",
                     usage.input_tokens,
                     usage.output_tokens,
                     cache_info,
                     crate::tool_display::format_duration(turn_start.elapsed()),
                     cost_str
-                )));
+                );
+                // Persist alongside the turn so reopening the session
+                // shows what each turn cost, instead of a conversation
+                // with every cost line stripped out.
+                if let Some(store) = &state.session_store {
+                    let path = store.path_for(&state.session.id);
+                    let _ = state.session.append_turn_usage_to(&path, &usage_line);
+                }
+                let _ = events_tx.send(ViewEvent::TurnUsage(usage_line));
 
                 let _ = events_tx.send(ViewEvent::TurnDone);
             }
@@ -5962,6 +6162,81 @@ mod tests {
         assert_eq!(display.len(), 1);
         assert_eq!(display[0].role, "tool");
         assert_eq!(display[0].content, "AskUserQuestion");
+    }
+    /// A reloaded conversation has to look like the live one: the
+    /// model's reasoning comes back as a collapsed block, and each
+    /// turn's cost footer lands under the turn it belongs to.
+    #[test]
+    fn from_session_restores_thinking_and_usage_footers() {
+        use crate::types::{ContentBlock, Message, Role};
+        let mut session = crate::session::Session::new("m", "/tmp");
+        session.messages = vec![
+            Message::user("first"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        content: "weighing it up".into(),
+                        signature: None,
+                    },
+                    ContentBlock::Text { text: "one".into() },
+                ],
+            },
+            Message::user("second"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text { text: "two".into() }],
+            },
+        ];
+        session.turn_usage = vec![
+            crate::session::TurnUsage {
+                after: 2,
+                text: "[tokens: 10in/2out · 1s]".into(),
+            },
+            crate::session::TurnUsage {
+                after: 4,
+                text: "[tokens: 20in/4out · 2s]".into(),
+            },
+        ];
+
+        let display = DisplayMessage::from_session(&session);
+        let shape: Vec<(&str, &str)> = display
+            .iter()
+            .map(|d| (d.role.as_str(), d.content.as_str()))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                ("user", "first"),
+                ("assistant", "one"),
+                ("system", "[tokens: 10in/2out · 1s]"),
+                ("user", "second"),
+                ("assistant", "two"),
+                ("system", "[tokens: 20in/4out · 2s]"),
+            ],
+            "each footer belongs under its own turn"
+        );
+        assert_eq!(
+            display[1].thinking.as_deref(),
+            Some("weighing it up"),
+            "reasoning survives the reload"
+        );
+        assert!(display[4].thinking.is_none());
+    }
+
+    /// A footer recorded past the end — history trimmed by a compaction
+    /// after the fact — still renders rather than disappearing.
+    #[test]
+    fn from_session_keeps_footers_recorded_past_the_end() {
+        let mut session = crate::session::Session::new("m", "/tmp");
+        session.messages = vec![crate::types::Message::user("only")];
+        session.turn_usage = vec![crate::session::TurnUsage {
+            after: 9,
+            text: "[tokens: 1in/1out · 0s]".into(),
+        }];
+        let display = DisplayMessage::from_session(&session);
+        assert_eq!(display.len(), 2);
+        assert_eq!(display[1].role, "system");
     }
 
     // Regression test for issue #148: `progress_buf.drain(..drain)` in

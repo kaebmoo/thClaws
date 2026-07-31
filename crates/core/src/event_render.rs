@@ -132,10 +132,17 @@ pub fn render_chat_dispatches(ev: &ViewEvent) -> Vec<String> {
             let arr: Vec<serde_json::Value> = messages
                 .iter()
                 .map(|m| {
-                    serde_json::json!({
+                    // `thinking` is omitted rather than null when the
+                    // turn had none, so the frontend's `msg.thinking`
+                    // check stays a plain truthiness test.
+                    let mut row = serde_json::json!({
                         "role": m.role,
                         "content": strip_ansi(&m.content),
-                    })
+                    });
+                    if let Some(t) = &m.thinking {
+                        row["thinking"] = serde_json::json!(strip_ansi(t));
+                    }
+                    row
                 })
                 .collect();
             vec![serde_json::json!({
@@ -337,6 +344,19 @@ pub fn render_gui_shell_dispatch(ev: &ViewEvent) -> Option<String> {
                 "type": "gui_shell_event",
                 "event": "done",
                 "payload": null,
+            })
+            .to_string(),
+        ),
+        // Per-turn cost/latency. Already rendered for the Terminal and
+        // Chat tabs; shells never saw it, so a chat shell could not tell
+        // the user what a turn cost — which matters most on cloud, where
+        // it's their credits. Ships the same preformatted line the other
+        // surfaces show.
+        ViewEvent::TurnUsage(text) => Some(
+            serde_json::json!({
+                "type": "gui_shell_event",
+                "event": "usage",
+                "payload": { "text": strip_ansi(text) },
             })
             .to_string(),
         ),
@@ -838,6 +858,25 @@ mod chat_render_tests {
         assert_eq!(parsed["text"], raw);
     }
 
+    /// A shell that shows per-turn cost needs the usage line, which is
+    /// emitted as its own ViewEvent AFTER the text and BEFORE TurnDone.
+    /// It used to fall through to `None`, so shells could not tell the
+    /// user what a turn cost — the number that matters most on cloud,
+    /// where it's their credits.
+    #[test]
+    fn turn_usage_reaches_shells() {
+        let out = render_gui_shell_dispatch(&ViewEvent::TurnUsage(
+            "\u{1b}[2m[tokens: 2in/5out · 3.4s]\u{1b}[0m".into(),
+        ))
+        .expect("TurnUsage should produce a gui_shell event");
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["type"], "gui_shell_event");
+        assert_eq!(parsed["event"], "usage");
+        // Shell markup is HTML, not a terminal — colour codes must not
+        // ride along into it.
+        assert_eq!(parsed["payload"]["text"], "[tokens: 2in/5out · 3.4s]");
+    }
+
     #[test]
     fn gui_shell_slash_output_becomes_bash_tool_result() {
         // Regression: a `!bang` status fetch (SlashOutput) used to map to
@@ -869,18 +908,22 @@ mod chat_render_tests {
             DisplayMessage {
                 role: "user".into(),
                 content: "first prompt".into(),
+                thinking: None,
             },
             DisplayMessage {
                 role: "assistant".into(),
                 content: "ok".into(),
+                thinking: None,
             },
             DisplayMessage {
                 role: "tool".into(),
                 content: "Bash".into(),
+                thinking: None,
             },
             DisplayMessage {
                 role: "user".into(),
                 content: "follow-up".into(),
+                thinking: None,
             },
         ];
         let out = render_terminal_ansi(&mut state, &ViewEvent::HistoryReplaced(msgs))
@@ -909,10 +952,12 @@ mod chat_render_tests {
             DisplayMessage {
                 role: "user".into(),
                 content: "research \x1b[1mGPUs\x1b[0m".into(),
+                thinking: None,
             },
             DisplayMessage {
                 role: "assistant".into(),
                 content: "done".into(),
+                thinking: None,
             },
         ];
         let out = render_gui_shell_dispatch(&ViewEvent::HistoryReplaced(msgs))

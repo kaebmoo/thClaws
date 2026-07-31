@@ -64,7 +64,7 @@ fn build_image_result(bytes: &[u8], path: &std::path::Path) -> ToolResultContent
 }
 
 const MODEL_DESC: &str = "Which image model. Provider is inferred from the model. \
-Gemini: `flash` (default; gemini-3.1-flash-image) or `pro` (gemini-3.1-pro-image). \
+Gemini: `flash` (default; gemini-3.1-flash-image) or `pro` (gemini-3-pro-image). \
 OpenAI: `gpt-image-2` (alias `openai`). Qwen: `qwen-image-2.0` (alias `qwen`) or \
 `qwen-image-2.0-pro` — strong at multi-image editing + text rendering. Default: flash.";
 const PROVIDER_DESC: &str = "Optional explicit provider (`gemini` | `openai` | `qwen`). \
@@ -253,7 +253,13 @@ mod tests {
     fn aliases_route_to_the_right_provider() {
         assert_eq!(
             registry::resolve("", "pro").unwrap().1,
-            "gemini-3.1-pro-image"
+            "gemini-3-pro-image"
+        );
+        // The 3.1 id 404s upstream (d5a17692) but stays an alias so
+        // existing callers keep working — it must resolve to the real one.
+        assert_eq!(
+            registry::resolve("", "gemini-3.1-pro-image").unwrap().1,
+            "gemini-3-pro-image"
         );
         let (p, m) = registry::resolve("", "gpt-image-2").unwrap();
         assert_eq!(p.id(), "openai");

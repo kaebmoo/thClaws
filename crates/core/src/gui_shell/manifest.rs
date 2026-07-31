@@ -39,6 +39,28 @@ const ALLOWED_PERMISSION_PREFIXES: &[&str] = &[
     "agent.run",
     "session.read",
     "session.list",
+    // Sessions bridge (thclaws.sessions.*): write = new/rename/delete a
+    // session. read/list gate the read side.
+    "session.write",
+    // Memory bridge (thclaws.memory.*): read = view core memory (MEMORY.md);
+    // write = overwrite it.
+    "memory.read",
+    "memory.write",
+    // Schedule bridge (thclaws.schedule.* + thclaws.heartbeat.*): read =
+    // list; write = create/delete/toggle + heartbeat interval.
+    "schedule.read",
+    "schedule.write",
+    // Skills bridge (thclaws.skills.*): read = list/view; write =
+    // save/delete PROJECT skills.
+    "skills.read",
+    "skills.write",
+    // KMS write side (thclaws.knowledge.*): create a KMS + ingest docs.
+    // (Read side is the existing `kms.read`.)
+    "kms.write",
+    // Composer mode selector (thclaws.mode.*): switch auto/ask.
+    "mode.write",
+    // Profile panel (thclaws.profile.*): engine-side identity facts.
+    "profile.read",
     "fs.shell-scoped",
     "tools.invoke:",
     "network.outbound:",
@@ -52,6 +74,25 @@ const ALLOWED_PERMISSION_PREFIXES: &[&str] = &[
     // instead of prompting the model for it.
     "kms.read",
     "research.read",
+    // BYOK from a shell's settings surface (thclaws.keys.set): store a
+    // provider API key. Write-only — there is no getter, so a shell can
+    // set a key it was given but never read back one already stored.
+    "keys.write",
+    // Connectors = MCP servers (thclaws.connectors.*): read = list them
+    // with live status; write = add an HTTP connector / remove one.
+    // stdio connectors are never addable from a shell (that names a
+    // command the engine spawns) — desktop `/mcp add` only.
+    "connectors.read",
+    "connectors.write",
+    // One-shot completion on the active model (thclaws.llm.complete):
+    // a language-model step in service of the shell's own UI, not the
+    // user's conversation. Spends credits, hence its own permission.
+    "llm.complete",
+    // Plugins (thclaws.plugins.*): read = list installed bundles with
+    // what they contribute; write = enable/disable/uninstall. Installing
+    // is deliberately absent — it fetches and unpacks code.
+    "plugins.read",
+    "plugins.write",
     // dev-plan/39 Tier 3: the shell hosts its own approve/deny widget
     // (thclaws.approvals.*) for mutating tool calls instead of the
     // full-screen system modal. Declarative signal for the marketplace
@@ -99,7 +140,9 @@ impl ShellManifest {
                 return Err(format!(
                     "unknown permission '{p}'. Allowed: agent.run, session.read, session.list, \
                      fs.shell-scoped, tools.invoke:<tool>, network.outbound:<host>, model.read, \
-                     model.write, kms.read, research.read, approval.inline"
+                     model.write, kms.read, research.read, keys.write, connectors.read, \
+                     connectors.write, plugins.read, plugins.write, llm.complete, \
+                     approval.inline"
                 ));
             }
         }

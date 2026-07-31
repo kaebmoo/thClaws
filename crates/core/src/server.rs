@@ -1620,7 +1620,21 @@ fn resolve_session_handle(
         eprintln!("\x1b[33m[serve] HMAC rejected: {e}\x1b[0m");
         StatusCode::UNAUTHORIZED
     })?;
-    let session = mt.registry.get_or_spawn(&user_id);
+    // Display name is NOT part of the signed triple — it's advisory,
+    // for greeting the user. The id is what's authenticated.
+    // Percent-encoded UTF-8: HTTP header values are latin-1 and most of
+    // our users have Thai names, so the API encodes and we decode. A
+    // malformed value degrades to no name rather than failing the
+    // connection — it's a greeting, not an auth input.
+    let display_name = headers
+        .get("x-thclaws-user-name")
+        .and_then(|v| v.to_str().ok())
+        .map(|raw| {
+            urlencoding::decode(raw)
+                .map(|c| c.into_owned())
+                .unwrap_or_else(|_| raw.to_string())
+        });
+    let session = mt.registry.get_or_spawn(&user_id, display_name.as_deref());
     Ok(session.handle.clone())
 }
 
@@ -1931,6 +1945,14 @@ fn build_initial_state_payload(sessions_dir: Option<std::path::PathBuf>) -> Stri
         "team_enabled": team_enabled,
         "shell_tab_enabled": shell_tab_enabled,
         "browser_enabled": config.browser_enabled,
+        // Whether the worker has an agent turn in flight RIGHT NOW. A
+        // browser that (re)connects mid-turn — e.g. after detaching during
+        // a long TextToSpeech/video render — must restore its "working"
+        // indicator, otherwise the still-running turn looks stopped even
+        // though it keeps producing output server-side and the result
+        // streams in when it finishes. The frontend re-subscribes to the
+        // live event stream on connect, so the terminal `done` clears it.
+        "agent_busy": crate::agent_activity::is_agent_busy(),
         "version": crate::version::VERSION,
     })
     .to_string()
@@ -1958,7 +1980,7 @@ fn build_gui_shell_history_payload(sessions_dir: Option<std::path::PathBuf>) -> 
         .into_iter()
         .find(|m| m.message_count > 0)?;
     let session = store.load(&meta.id).ok()?;
-    let display = crate::shared_session::DisplayMessage::from_messages(&session.messages);
+    let display = crate::shared_session::DisplayMessage::from_session(&session);
     if display.is_empty() {
         return None;
     }

@@ -40,6 +40,16 @@
 //
 //   thclaws.kms.list()               -> Promise<{kmss:[{name,scope,active}]}>   // needs kms.read
 //   thclaws.kms.browse(name)         -> Promise<{kms, pages, sources}>          // needs kms.read
+//   thclaws.connectors.list()        -> Promise<{connectors:[{name,transport,url,scope,tools,status,error}]}>  // connectors.read
+//   thclaws.connectors.add({name,url,headers}) -> Promise<{ok,name,path}>       // connectors.write (HTTP only)
+//   thclaws.connectors.remove(name)  -> Promise<{ok,name,scope}>                // connectors.write
+//   thclaws.skills.install(url, {name,user}) -> Promise<{ok,report,scope}>      // needs skills.write
+//   thclaws.llm.complete({prompt,system,maxTokens}) -> Promise<{text,model}>   // needs llm.complete
+//   thclaws.plugins.list()           -> Promise<{plugins:[{name,version,enabled,scope,skills,commands,agents,mcpServers}]}>  // plugins.read
+//   thclaws.plugins.install(url, {user}) -> Promise<{ok,name,version,skills,commands,agents,mcpServers}>  // plugins.write
+//   thclaws.plugins.setEnabled(name, on) -> Promise<{ok,name,enabled,scope}>    // plugins.write
+//   thclaws.plugins.remove(name)     -> Promise<{ok,name}>                      // plugins.write
+//   thclaws.keys.set(provider, key)  -> Promise<{ok,provider,storage}>          // needs keys.write (write-only)
 //   thclaws.research.list()          -> Promise<{jobs:[…]}>                     // needs research.read
 //   thclaws.research.get(id)         -> Promise<{job|null}>                     // needs research.read
 
@@ -325,16 +335,31 @@
     // path like "output/abc.svg" maps to /t/<token>/file-asset/output/
     // abc.svg.
     //
-    // Mode A: cwd is the launch dir (Tier 2.x — Task 21 adds CWD
-    // switching). For now the shell author should ensure the agent
-    // returns an absolute path in Mode A; relative paths return null.
+    // Mode A: the desktop `/file-asset/` route tries the path as
+    // absolute and then falls back to joining it with cwd, so a
+    // workspace-relative path resolves there too — an agent answering
+    // with `![cat](./output/cat.jpg)` must render, not print its own
+    // markdown. (This used to return null for relative paths, from
+    // before the desktop route grew the cwd fallback.)
     fileUrl(path) {
       if (typeof path !== "string" || !path) return null;
+      // Already fetchable — an agent that answered with a real URL, or a
+      // caller passing a data:/blob: it built itself. Don't file-asset it.
+      if (/^(https?|data|blob):/i.test(path)) return path;
+      // `./output/x.jpg` → `output/x.jpg`; the leading dot survives the
+      // URL otherwise and only the cwd-join branch would tolerate it.
+      path = String(path).replace(/^\.\/+/, "");
+      // Spaces and non-ASCII names must survive the trip: both routes
+      // percent-decode. Pass RAW filesystem paths — `%` is escaped too
+      // (a file really can be named `50%.png`), so a caller that
+      // pre-encoded would double-encode. `#` and `?` would truncate the
+      // path, and encodeURI leaves them alone, so escape those by hand.
+      const enc = (p) => encodeURI(p).replace(/#/g, "%23").replace(/\?/g, "%3F");
       if (isModeB) {
         const wsUrl = window.__thclaws_shell_ws_url || "";
         const prefix = wsUrl.endsWith("/__ws") ? wsUrl.slice(0, -5) : wsUrl;
         const tail = path.startsWith("/") ? path : "/" + path;
-        return `${prefix}/file-asset${tail}`;
+        return `${prefix}/file-asset${enc(tail)}`;
       }
       // Mode A. The desktop wry webview serves the `thclaws://` custom
       // scheme (host `thclaws.localhost`, exposed as http on WebView2).
@@ -351,12 +376,20 @@
         // Strip back from `…/gui-shell/<id>/…` to the workspace root.
         const m = location.pathname.match(/^(.*?)\/gui-shell\/[^/]+\//);
         const root = m ? m[1] + "/" : location.pathname.replace(/[^/]*$/, "");
-        return location.origin + root + "file-asset/" + rel;
+        return location.origin + root + "file-asset/" + enc(rel);
       }
-      if (path.startsWith("/")) {
-        return `thclaws://localhost/file-asset${path}`;
-      }
-      return null;
+      // Absolute and relative both go to the same route: it re-adds the
+      // leading slash and tries Sandbox::check as absolute, then as
+      // cwd-relative. Whichever the agent produced, the sandbox is what
+      // decides whether it's readable.
+      //
+      // Build from the page's own scheme+host rather than hardcoding
+      // `thclaws://localhost`: WebView2 exposes the custom protocol as
+      // `http://thclaws.localhost/`, where a literal `thclaws://` URL is
+      // an unknown scheme and the image never loads.
+      const tail = path.startsWith("/") ? path : "/" + path;
+      const host = location.host ? `${location.protocol}//${location.host}` : "thclaws://localhost";
+      return `${host}/file-asset${enc(tail)}`;
     },
 
     // Tier 2: direct tool invocation, bypasses the agent loop. Use
@@ -780,6 +813,290 @@
           if (window.thclaws.model.current) callback(window.thclaws.model.current);
         });
         return unsub;
+      },
+    },
+
+    // Sessions / chat-history API (dev-plan/33). Drives the SAME shared
+    // session Chat uses: list past sessions, load one (its history is
+    // returned AND the agent is primed so run() continues it), start a
+    // new one, rename, delete. Needs `session.list`/`session.read`
+    // (reads) and `session.write` (new/rename/delete) in the manifest.
+    sessions: {
+      // -> { sessions: [{ id, title, updatedAt, messageCount, model }] }
+      list() {
+        return send("session_list", {});
+      },
+      // -> { messages: [{ role: "user"|"bot", text }] }
+      load(id) {
+        if (typeof id !== "string" || !id) {
+          return Promise.reject(
+            new TypeError("thclaws.sessions.load: id must be a non-empty string"),
+          );
+        }
+        return send("session_load", { loadId: id });
+      },
+      // Start a fresh session (becomes the active one). -> { ok: true }
+      new() {
+        return send("session_new", {});
+      },
+      rename(id, title) {
+        if (typeof id !== "string" || !id) {
+          return Promise.reject(
+            new TypeError("thclaws.sessions.rename: id must be a non-empty string"),
+          );
+        }
+        return send("session_rename", { renameId: id, title: String(title ?? "") });
+      },
+      delete(id) {
+        if (typeof id !== "string" || !id) {
+          return Promise.reject(
+            new TypeError("thclaws.sessions.delete: id must be a non-empty string"),
+          );
+        }
+        return send("session_delete", { deleteId: id });
+      },
+    },
+
+    // Schedule API (settings "Schedule" panel). Needs `schedule.read`
+    // (list) / `schedule.write` (create/delete/toggle).
+    schedule: {
+      // -> { schedules: [{ id, cron, runAt, prompt, enabled, lastRun }] }
+      list() {
+        return send("schedule_list", {});
+      },
+      create(prompt, cron) {
+        return send("schedule_create", { prompt: String(prompt ?? ""), cron: String(cron ?? "") });
+      },
+      delete(id) {
+        return send("schedule_delete", { scheduleId: String(id ?? "") });
+      },
+      setEnabled(id, enabled) {
+        return send("schedule_toggle", { scheduleId: String(id ?? ""), enabled: !!enabled });
+      },
+    },
+
+    // Heartbeat API (settings "Heartbeat" panel) — proactive check-ins as
+    // a reserved schedule. Intervals: "off" | "30m" | "1h" | "4h" | "1d".
+    // Needs `schedule.read` / `schedule.write`.
+    heartbeat: {
+      get() {
+        return send("heartbeat_get", {});
+      },
+      set(interval) {
+        return send("heartbeat_set", { interval: String(interval ?? "off") });
+      },
+    },
+
+    // Skills API (settings "Skills" panel). list/view need `skills.read`;
+    // save/delete operate on PROJECT skills and need `skills.write`.
+    skills: {
+      /**
+       * Install a skill from an https:// git repo or .zip, the same as
+       * `/skill install`. Downloads and unpacks only.
+       * @param {string} url
+       * @param {{name?: string, user?: boolean}} [opts] name overrides
+       *   the one derived from the URL; user scope installs for every
+       *   project (default is this workspace).
+       */
+      install(url, opts) {
+        if (typeof url !== "string" || !url.trim()) {
+          return Promise.reject(
+            new TypeError("thclaws.skills.install: url must be a non-empty string"),
+          );
+        }
+        const o = opts || {};
+        return send("skill_install", {
+          url: url.trim(),
+          name: typeof o.name === "string" ? o.name.trim() : "",
+          user: !!o.user,
+        });
+      },
+      // -> { skills: [{ name, description, whenToUse, editable }] }
+      list() {
+        return send("skills_list", {});
+      },
+      // -> { content, editable }
+      get(name) {
+        return send("skills_get", { skillName: String(name ?? "") });
+      },
+      save(name, content) {
+        return send("skills_save", { skillName: String(name ?? ""), content: String(content ?? "") });
+      },
+      delete(name) {
+        return send("skills_delete", { skillName: String(name ?? "") });
+      },
+    },
+
+    // Knowledge write API (settings "Knowledge" panel) — pairs with the
+    // read-only thclaws.kms.*. Needs `kms.write`. Upload flow: uploadFile()
+    // the document first, then ingest(kmsName, uploadedPath).
+    knowledge: {
+      create(name) {
+        return send("kms_create", { kmsName: String(name ?? "") });
+      },
+      ingest(kmsName, path) {
+        return send("kms_ingest", { kmsName: String(kmsName ?? ""), path: String(path ?? "") });
+      },
+    },
+
+    // Composer mode selector — permission mode "auto" | "ask". get is
+    // ungated; set needs `mode.write`.
+    mode: {
+      get() {
+        return send("mode_get", {});
+      },
+      set(mode) {
+        return send("mode_set", { mode: String(mode ?? "auto") });
+      },
+    },
+
+    // Profile facts (engine-side): { memberId, workspace, multiuser }.
+    // Needs `profile.read`. Email/password live in the cloud control plane.
+    // Provider credentials (BYOK). Needs `keys.write` — a shell asking
+    // for this is asking to hold provider secrets, so it must be
+    // declared in its manifest and visible to whoever installs it.
+    // Write-only by design: there is no getter, so a shell can set a key
+    // it was given but can never read back one already stored.
+    // Connectors = the MCP servers this workspace talks to. Reads need
+    // `connectors.read`; add/remove need `connectors.write`.
+    //
+    // `add` is HTTP-only by design. A stdio connector names a command
+    // the engine spawns, so accepting one here would let a shell run
+    // arbitrary local code — those stay a desktop `/mcp add` decision.
+    connectors: {
+      list() {
+        return send("connectors_list", {});
+      },
+      /**
+       * @param {{name: string, url: string, headers?: Record<string,string>}} spec
+       * Header values are stored verbatim in mcp.json, so prefer a
+       * `${ENV_VAR}` placeholder over a literal secret — the engine
+       * resolves it from the environment at connect time.
+       */
+      add(spec) {
+        const { name, url, headers } = spec || {};
+        if (typeof name !== "string" || !name.trim()) {
+          return Promise.reject(
+            new TypeError("thclaws.connectors.add: name must be a non-empty string"),
+          );
+        }
+        if (typeof url !== "string" || !url.trim()) {
+          return Promise.reject(
+            new TypeError("thclaws.connectors.add: url must be a non-empty string"),
+          );
+        }
+        return send("connector_add", { name: name.trim(), url: url.trim(), headers: headers || {} });
+      },
+      remove(name) {
+        if (typeof name !== "string" || !name) {
+          return Promise.reject(
+            new TypeError("thclaws.connectors.remove: name must be a non-empty string"),
+          );
+        }
+        return send("connector_remove", { name });
+      },
+    },
+
+    // One-shot completion on whatever model the session is using right
+    // now. For a language-model step that serves the shell's own UI —
+    // rewriting a prompt, naming something — not the user's chat. Needs
+    // `llm.complete`; the reply is `{text, model}`.
+    llm: {
+      /**
+       * @param {{prompt: string, system?: string, maxTokens?: number}} spec
+       */
+      complete(spec) {
+        const { prompt, system, maxTokens } = spec || {};
+        if (typeof prompt !== "string" || !prompt.trim()) {
+          return Promise.reject(
+            new TypeError("thclaws.llm.complete: prompt must be a non-empty string"),
+          );
+        }
+        return send("llm_complete", {
+          prompt: prompt.trim(),
+          system: typeof system === "string" ? system : "",
+          maxTokens: Number.isFinite(maxTokens) ? maxTokens : undefined,
+        });
+      },
+    },
+
+    // Installed plugin bundles (skills + commands + agents + MCP
+    // servers). Reads need `plugins.read`; enable/disable/uninstall need
+    // `plugins.write`. There is no install(): installing fetches and
+    // unpacks code, which stays a desktop `/plugin install` decision.
+    plugins: {
+      list() {
+        return send("plugins_list", {});
+      },
+      /**
+       * Install from an https:// git repo or .zip. Downloads and
+       * unpacks only — nothing in the archive runs at install time.
+       * @param {string} url
+       * @param {{user?: boolean}} [opts] user scope = every project on
+       *   this machine; default is this workspace.
+       */
+      install(url, opts) {
+        if (typeof url !== "string" || !url.trim()) {
+          return Promise.reject(
+            new TypeError("thclaws.plugins.install: url must be a non-empty string"),
+          );
+        }
+        return send("plugin_install", { url: url.trim(), user: !!(opts && opts.user) });
+      },
+      setEnabled(name, enabled) {
+        if (typeof name !== "string" || !name) {
+          return Promise.reject(
+            new TypeError("thclaws.plugins.setEnabled: name must be a non-empty string"),
+          );
+        }
+        return send("plugin_set_enabled", { name, enabled: !!enabled });
+      },
+      remove(name) {
+        if (typeof name !== "string" || !name) {
+          return Promise.reject(
+            new TypeError("thclaws.plugins.remove: name must be a non-empty string"),
+          );
+        }
+        return send("plugin_remove", { name });
+      },
+    },
+
+    keys: {
+      set(provider, key) {
+        if (typeof provider !== "string" || !provider) {
+          return Promise.reject(
+            new TypeError("thclaws.keys.set: provider must be a non-empty string"),
+          );
+        }
+        if (typeof key !== "string" || !key.trim()) {
+          return Promise.reject(new TypeError("thclaws.keys.set: key must be non-empty"));
+        }
+        return send("key_set", { provider, key });
+      },
+    },
+
+    profile: {
+      // -> { memberId, displayName, workspace, multiuser }
+      //
+      // `displayName` is set only where there IS a login — a cloud
+      // workspace. On desktop it comes back null and a shell should
+      // render no name at all rather than inventing a placeholder.
+      get() {
+        return send("profile_get", {});
+      },
+    },
+
+    // Memory API (dev-plan/33 — settings "Memory" panel). Core memory is
+    // the MEMORY.md index injected into every turn. Needs `memory.read`
+    // (get) / `memory.write` (set).
+    memory: {
+      // -> { core: "<MEMORY.md contents>" }
+      getCore() {
+        return send("memory_get", {});
+      },
+      // Overwrite core memory. -> { ok: true }
+      setCore(text) {
+        return send("memory_set", { core: String(text ?? "") });
       },
     },
 

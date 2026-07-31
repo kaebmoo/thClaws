@@ -4182,11 +4182,32 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             // `mcp__thclaws__Bash`, … instead of Claude Code's
             // Write/Bash/etc. Solves the long-standing UX gap
             // where KMS / Memory tools were unreachable on agent/*.
-            let tools = crate::providers::agent_sdk::AgentSdkProvider::with_default_thclaws_tools();
+            let mut bridge =
+                crate::providers::agent_sdk::AgentSdkProvider::default_bridge_registry();
+            // The bridge is a second, independent registry — the
+            // operator's --allowed-tools / --disallowed-tools were
+            // applied to the agent's registry only, so under agent/* a
+            // run restricted to `Read` still advertised Bash, Write and
+            // Edit over the bridge and the model could call them. Apply
+            // the same lists here.
+            for name in bridge
+                .names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+            {
+                if !tool_passes_filters(
+                    &name,
+                    config.allowed_tools.as_deref(),
+                    config.disallowed_tools.as_deref(),
+                ) {
+                    bridge.remove(&name);
+                }
+            }
             return Ok(Arc::new(
                 crate::providers::agent_sdk::AgentSdkProvider::new()
                     .with_bin(bin)
-                    .with_tools(tools),
+                    .with_tools(Arc::new(bridge)),
             ));
         }
         ProviderKind::Ollama => {
@@ -4914,6 +4935,7 @@ pub async fn run_print_mode_with(
         tool_registry.register(Arc::new(crate::tools::TextToImageTool));
         tool_registry.register(Arc::new(crate::tools::ImageToImageTool));
         tool_registry.register(Arc::new(crate::tools::TextToSpeechTool));
+        tool_registry.register(Arc::new(crate::tools::RenderSlidesTool));
         tool_registry.register(Arc::new(crate::tools::TextToVideoTool));
         tool_registry.register(Arc::new(crate::tools::ImageToVideoTool));
         tool_registry.register(Arc::new(crate::tools::MediaJobStatusTool));
@@ -5322,6 +5344,7 @@ pub async fn run_agent_workflow(
         tool_registry.register(Arc::new(crate::tools::TextToImageTool));
         tool_registry.register(Arc::new(crate::tools::ImageToImageTool));
         tool_registry.register(Arc::new(crate::tools::TextToSpeechTool));
+        tool_registry.register(Arc::new(crate::tools::RenderSlidesTool));
         tool_registry.register(Arc::new(crate::tools::TextToVideoTool));
         tool_registry.register(Arc::new(crate::tools::ImageToVideoTool));
         tool_registry.register(Arc::new(crate::tools::MediaJobStatusTool));
@@ -5491,6 +5514,26 @@ fn refresh_repl_system_prompt(
 
 /// Interactive REPL. Reads from stdin via `rustyline`, streams assistant
 /// output live, handles slash commands. Runs until `/quit`, EOF, or Ctrl-C.
+/// Whether `name` survives the operator's `--allowed-tools` /
+/// `--disallowed-tools`. An absent list means "no restriction"; an
+/// allow-list that doesn't name the tool removes it, and the deny-list
+/// wins over the allow-list.
+///
+/// Split out because Task and WorkflowRun are registered *after* the
+/// main filter pass (deliberately — the subagent has to inherit the
+/// already-filtered `base_tools`), so they need the same rules applied
+/// separately, and that pass sits too deep inside `run_repl` to test.
+fn tool_passes_filters(
+    name: &str,
+    allowed: Option<&[String]>,
+    disallowed: Option<&[String]>,
+) -> bool {
+    if disallowed.is_some_and(|d| d.iter().any(|t| t == name)) {
+        return false;
+    }
+    allowed.is_none_or(|a| a.iter().any(|t| t == name))
+}
+
 pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     // Push the configured stream-chunk timeout into the providers'
     // global atomic. Same hook the GUI/serve worker uses at boot —
@@ -5531,6 +5574,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         tool_registry.register(Arc::new(crate::tools::TextToImageTool));
         tool_registry.register(Arc::new(crate::tools::ImageToImageTool));
         tool_registry.register(Arc::new(crate::tools::TextToSpeechTool));
+        tool_registry.register(Arc::new(crate::tools::RenderSlidesTool));
         tool_registry.register(Arc::new(crate::tools::TextToVideoTool));
         tool_registry.register(Arc::new(crate::tools::ImageToVideoTool));
         tool_registry.register(Arc::new(crate::tools::MediaJobStatusTool));
@@ -5729,6 +5773,9 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     };
     let approver = ReplApprover::new();
 
+    // (see `tool_passes_filters` for the post-registration pass that
+    // applies these same lists to Task / WorkflowRun.)
+    //
     // M6.33 SUB3: tool filtering MUST run BEFORE registering the Task
     // tool — otherwise the subagent's `base_tools` snapshot includes
     // tools the parent was forbidden from using, so a model that
@@ -5851,6 +5898,24 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
             config.model.clone(),
             Some(subagent_arc),
         )));
+    }
+
+    // Task and WorkflowRun are registered AFTER the filter above — which
+    // is deliberate (the subagent must inherit the already-filtered
+    // base_tools, see M6.33 SUB3) but left these two exempt from the
+    // operator's own restriction. `--allowed-tools ''` still handed the
+    // model both, and in one-shot print mode a turn spent calling one is
+    // a turn that produces no text: `scripts/changelog-stub.sh` came
+    // back empty three releases running. Re-apply the lists to just
+    // these names, after the fact.
+    for name in ["Task", "WorkflowRun"] {
+        if !tool_passes_filters(
+            name,
+            config.allowed_tools.as_deref(),
+            config.disallowed_tools.as_deref(),
+        ) {
+            tool_registry.remove(name);
+        }
     }
 
     // If a team exists, inject lead coordination rules into the system prompt.
@@ -12241,6 +12306,73 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--allowed-tools ''` parses to `Some([""])` (app.rs splits the
+    /// empty string), which must mean "nothing survives" — the case
+    /// `scripts/changelog-stub.sh` relies on to get a tool-free
+    /// one-shot generation.
+    #[test]
+    /// The agent/* SDK bridge is a SECOND registry, built fresh in
+    /// `build_provider`. The operator's lists were only ever applied to
+    /// the agent's own registry, so a run restricted to `Read` still
+    /// advertised `mcp__thclaws__Bash` / `Write` / `Edit` to the model.
+    /// Same predicate now gates both.
+    #[test]
+    fn bridge_registry_honours_the_operator_lists() {
+        let full = crate::providers::agent_sdk::AgentSdkProvider::default_bridge_registry();
+        let names: Vec<String> = full.names().iter().map(|s| s.to_string()).collect();
+        assert!(names.iter().any(|n| n == "Bash"), "baseline has Bash");
+        assert!(names.iter().any(|n| n == "Read"), "baseline has Read");
+
+        let allow_read = vec!["Read".to_string()];
+        let kept: Vec<&String> = names
+            .iter()
+            .filter(|n| tool_passes_filters(n, Some(&allow_read), None))
+            .collect();
+        assert_eq!(kept, vec!["Read"], "allow-list keeps only what it names");
+
+        let deny = vec!["Bash".to_string(), "Write".to_string()];
+        let kept: Vec<&String> = names
+            .iter()
+            .filter(|n| tool_passes_filters(n, None, Some(&deny)))
+            .collect();
+        assert!(!kept.iter().any(|n| *n == "Bash" || *n == "Write"));
+        assert!(kept.iter().any(|n| *n == "Read"), "unrelated tools survive");
+    }
+
+    #[test]
+    fn tool_filters_govern_task_and_workflow_run() {
+        let empty_allow = vec![String::new()];
+        assert!(!tool_passes_filters("Task", Some(&empty_allow), None));
+        assert!(!tool_passes_filters(
+            "WorkflowRun",
+            Some(&empty_allow),
+            None
+        ));
+
+        // No lists at all → unrestricted.
+        assert!(tool_passes_filters("Task", None, None));
+
+        // An allow-list keeps only what it names.
+        let allow_read = vec!["Read".to_string()];
+        assert!(!tool_passes_filters("Task", Some(&allow_read), None));
+        let allow_task = vec!["Read".to_string(), "Task".to_string()];
+        assert!(tool_passes_filters("Task", Some(&allow_task), None));
+        assert!(!tool_passes_filters("WorkflowRun", Some(&allow_task), None));
+
+        // Deny wins over allow.
+        let deny_task = vec!["Task".to_string()];
+        assert!(!tool_passes_filters(
+            "Task",
+            Some(&allow_task),
+            Some(&deny_task)
+        ));
+        assert!(tool_passes_filters(
+            "Task",
+            None,
+            Some(&vec!["Bash".into()])
+        ));
+    }
 
     #[test]
     fn cloud_push_pull_positional_slug_and_em_dash() {
