@@ -54,17 +54,20 @@ const PROVIDER_LABELS: Record<string, string> = {
   "ollama-cloud": "Ollama Cloud",
   "opencode-go": "OpenCode Go",
   moonshot: "Moonshot AI (Kimi)",
+  meta: "Meta AI (Muse Spark)",
   xai: "xAI (Grok)",
   groq: "Groq",
   minimax: "MiniMax",
   azure: "Azure AI Foundry",
   vllm: "vLLM (self-hosted)",
   llamacpp: "llama.cpp (self-hosted)",
+  litellm: "LiteLLM Proxy (self-hosted)",
   "openai-compat": "OpenAI-Compatible (custom endpoint)",
   tavily: "Tavily Search",
   "brave-search": "Brave Search",
   serpapi: "SerpAPI (Google Search)",
   hal: "HAL Public API (YouTube transcript + Web scrape)",
+  ltx: "LTX (video generation + native audio)",
 };
 
 export function SettingsModal({ onClose }: { onClose: () => void }) {

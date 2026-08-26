@@ -860,6 +860,32 @@ pub struct Agent {
     pub(crate) injection_queue: Arc<Mutex<std::collections::VecDeque<String>>>,
 }
 
+/// Build a provider for a model that belongs to a different backend than
+/// the session's — the cross-provider half of a skill's `model:`
+/// recommendation. Returns `None` when the model routes to the same
+/// provider kind (nothing to swap), when the config can't be read, or
+/// when that provider has no usable credential — all cases where the
+/// caller should keep the session's provider and let the model string
+/// stand on its own.
+fn provider_for_model(model: &str) -> Option<Arc<dyn Provider>> {
+    let mut cfg = crate::config::AppConfig::load().ok()?;
+    let current = cfg.detect_provider_kind().ok();
+    cross_provider_kind(current, model)?;
+    cfg.model = model.to_string();
+    crate::repl::build_provider(&cfg).ok()
+}
+
+/// The backend a swapped model belongs to, when it isn't the session's
+/// own. `None` means "same family, or unrecognisable" — either way the
+/// session's provider is the right one to keep.
+fn cross_provider_kind(
+    current: Option<crate::providers::ProviderKind>,
+    model: &str,
+) -> Option<crate::providers::ProviderKind> {
+    let wanted = crate::providers::ProviderKind::detect(model)?;
+    (Some(wanted) != current).then_some(wanted)
+}
+
 impl Agent {
     pub fn new(
         provider: Arc<dyn Provider>,
@@ -1101,6 +1127,10 @@ impl Agent {
         user_content: Vec<ContentBlock>,
     ) -> impl Stream<Item = Result<AgentEvent>> + Send + 'static {
         let provider = self.provider.clone();
+        // Cache for a cross-provider skill swap, so the provider is built
+        // once per turn rather than per iteration.
+        let swapped_provider: Arc<Mutex<Option<(String, Arc<dyn Provider>)>>> =
+            Arc::new(Mutex::new(None));
         let tools = self.tools.clone();
         let model = self.model.clone();
         let model_override = self.model_override.clone();
@@ -1289,6 +1319,39 @@ impl Agent {
                     let g = model_override.lock().expect("model_override lock");
                     g.as_ref().cloned().unwrap_or_else(|| model.clone())
                 };
+                // A skill's `model:` recommendation can name a model from a
+                // DIFFERENT provider than the session's (extract-and-save
+                // asks for `gpt-4.1-nano` while the user sits on DeepSeek).
+                // Swapping only the model string sends OpenAI's model id to
+                // DeepSeek's endpoint — "model not found", with the id
+                // rendered as `deepseek/gpt-4.1-nano`. Build the matching
+                // provider for the swapped model instead, once per turn.
+                let active_provider: Arc<dyn Provider> = if active_model == model {
+                    provider.clone()
+                } else {
+                    match swapped_provider.lock() {
+                        Ok(mut slot) => {
+                            let hit = slot
+                                .as_ref()
+                                .filter(|(m, _)| *m == active_model)
+                                .map(|(_, p)| p.clone());
+                            match hit {
+                                Some(p) => p,
+                                None => match provider_for_model(&active_model) {
+                                    Some(p) => {
+                                        *slot = Some((active_model.clone(), p.clone()));
+                                        p
+                                    }
+                                    // Same provider family (or nothing usable
+                                    // to build) — the model string alone is
+                                    // the right change.
+                                    None => provider.clone(),
+                                },
+                            }
+                        }
+                        Err(_) => provider.clone(),
+                    }
+                };
                 // Long-running-feature override: read fresh every
                 // iteration so a slash dispatch that set it before
                 // run_turn carries through every retry/iteration of
@@ -1312,8 +1375,19 @@ impl Agent {
                     Some(cap) => current_max_tokens.min(cap),
                     None => current_max_tokens,
                 };
-                let req = StreamRequest {
-                    model: active_model,
+                // dev-plan/55: swap Thai PII for `[ID_1]`-style placeholders
+                // on the way out, and restore it on the way back below.
+                // History stays plaintext — the masking lives at the wire, so
+                // every turn re-masks and coreference keeps the placeholders
+                // stable. Skipped for local models: nothing leaves the host,
+                // and masking would only cost the model context.
+                let masker = crate::sensitive::active().filter(|_| {
+                    !crate::providers::ProviderKind::detect(&active_model)
+                        .map(|k| k.is_local())
+                        .unwrap_or(false)
+                });
+                let mut req = StreamRequest {
+                    model: active_model.clone(),
                     system: if system.is_empty() { None } else { Some(system.clone()) },
                     messages,
                     tools: tool_defs,
@@ -1321,6 +1395,9 @@ impl Agent {
                     thinking_budget,
                     stream_chunk_timeout_override: chunk_timeout_override,
                 };
+                if let Some(m) = &masker {
+                    m.mask_request(&mut req);
+                }
 
                 // Retry with exponential backoff on transient errors.
                 // Config errors (missing API key, bad model name, etc.)
@@ -1337,7 +1414,7 @@ impl Agent {
                     let mut stream_result = None;
                     let mut cancelled_during_retry = false;
                     for attempt in 0..=max_retries {
-                        match provider.stream(req.clone()).await {
+                        match active_provider.stream(req.clone()).await {
                             Ok(s) => { stream_result = Some(s); break; }
                             Err(e) => {
                                 let is_config = matches!(e, Error::Config(_));
@@ -1369,7 +1446,34 @@ impl Agent {
                     }
                     match stream_result {
                         Some(s) => s,
-                        None => Err(last_err.unwrap())?,
+                        None => {
+                            // The swapped-in model is a *recommendation* — a
+                            // skill asking for something better suited. If it
+                            // won't answer (retired id, no entitlement,
+                            // history the new backend rejects — DeepSeek
+                            // refuses a thinking model whose prior turn
+                            // carries no `reasoning_content`), the turn is
+                            // still the user's to finish. Drop back to the
+                            // session's own model rather than failing it.
+                            if active_model != model {
+                                let err = last_err
+                                    .as_ref()
+                                    .map(|e| e.to_string())
+                                    .unwrap_or_default();
+                                eprintln!(
+                                    "\x1b[33m[skill model {active_model} unavailable — falling back to {model}: {err}]\x1b[0m"
+                                );
+                                if let Ok(mut g) = model_override.lock() {
+                                    *g = None;
+                                }
+                                let _ = crate::skills_state::take_swap_active();
+                                let mut retry_req = req.clone();
+                                retry_req.model = model.clone();
+                                provider.stream(retry_req).await?
+                            } else {
+                                Err(last_err.unwrap())?
+                            }
+                        }
                     }
                 };
                 let mut assembled = Box::pin(assemble(raw));
@@ -1377,6 +1481,10 @@ impl Agent {
                 let mut turn_text = String::new();
                 let mut turn_thinking = String::new();
                 let mut turn_tool_uses: Vec<ContentBlock> = Vec::new();
+                // Un-masking carry buffer: a placeholder can straddle two
+                // text deltas, so the tail of a chunk that might still become
+                // one is held until the next chunk (flushed after the loop).
+                let mut mask_pending = String::new();
                 // L4 (M6.17): id → parse error message for any tool use
                 // whose JSON input failed to parse mid-stream. The per-
                 // tool dispatch loop emits a synthetic error tool_result
@@ -1387,8 +1495,23 @@ impl Agent {
                 while let Some(ev) = assembled.next().await {
                     match ev? {
                         AssembledEvent::Text(s) => {
-                            turn_text.push_str(&s);
-                            yield AgentEvent::Text(s);
+                            match &masker {
+                                // Persist the plain reading, show the marked
+                                // one: history and tools must never carry the
+                                // display wrapper, but the reader should see
+                                // which values were put back locally.
+                                Some(m) => {
+                                    let r = m.feed(&mut mask_pending, &s);
+                                    if !r.is_empty() {
+                                        turn_text.push_str(&r.plain);
+                                        yield AgentEvent::Text(r.display);
+                                    }
+                                }
+                                None => {
+                                    turn_text.push_str(&s);
+                                    yield AgentEvent::Text(s);
+                                }
+                            }
                         }
                         AssembledEvent::Thinking(s) => {
                             // Capture for persistence so it can be echoed
@@ -1424,7 +1547,16 @@ impl Agent {
                             // below can emit a matching error result.
                             turn_parse_errors.push((id, error));
                         }
-                        AssembledEvent::ToolUse(block) => {
+                        AssembledEvent::ToolUse(mut block) => {
+                            // Restore real values in the arguments BEFORE the
+                            // tool runs — otherwise a Write lands `[PHONE_1]`
+                            // in the user's file. Done on the parsed Value, so
+                            // a value carrying a quote can't break the JSON.
+                            if let Some(m) = &masker {
+                                if let ContentBlock::ToolUse { input, .. } = &mut block {
+                                    m.unmask_json(input);
+                                }
+                            }
                             // L1 (M6.17): announce the tool call as soon as
                             // it's parsed, BEFORE the per-tool execution
                             // loop's approval / plan-mode / dispatch gates.
@@ -1458,6 +1590,16 @@ impl Agent {
                                 cumulative_usage.accumulate(u);
                             }
                         }
+                    }
+                }
+
+                // Whatever the un-masker was still holding for a possible
+                // placeholder is plain text now that the stream is over.
+                if let Some(m) = &masker {
+                    let tail = m.flush(&mut mask_pending);
+                    if !tail.is_empty() {
+                        turn_text.push_str(&tail.plain);
+                        yield AgentEvent::Text(tail.display);
                     }
                 }
 
@@ -3618,6 +3760,36 @@ mod tests {
         assert_eq!(history[3].role, Role::Assistant);
     }
 
+    /// A skill's `model:` recommendation routinely names another
+    /// backend's model — `extract-and-save` asks for `gpt-4.1-nano`
+    /// while the user sits on DeepSeek. Swapping only the model string
+    /// posted OpenAI's id to DeepSeek's endpoint, which answered "model
+    /// not found" for `deepseek/gpt-4.1-nano`.
+    #[test]
+    fn a_swapped_model_from_another_backend_needs_its_own_provider() {
+        use crate::providers::ProviderKind;
+        assert_eq!(
+            cross_provider_kind(Some(ProviderKind::DeepSeek), "gpt-4.1-nano"),
+            Some(ProviderKind::OpenAI),
+            "the reported bug: DeepSeek session, OpenAI recommendation"
+        );
+        // Same backend → nothing to build; the model string alone is right.
+        assert_eq!(
+            cross_provider_kind(Some(ProviderKind::OpenAI), "gpt-4.1-nano"),
+            None
+        );
+        assert_eq!(
+            cross_provider_kind(Some(ProviderKind::DeepSeek), "deepseek-chat"),
+            None
+        );
+        // Unrecognisable model → keep the session provider rather than
+        // guessing a backend for it.
+        assert_eq!(
+            cross_provider_kind(Some(ProviderKind::DeepSeek), "some-local-thing"),
+            None
+        );
+    }
+
     #[tokio::test]
     async fn tool_error_surfaces_as_tool_result_is_error_and_loop_continues() {
         // Tool is Read with a path that doesn't exist → Tool error.
@@ -4035,6 +4207,130 @@ mod tests {
         assert_eq!(
             got[1], None,
             "override should clear after the first turn ends"
+        );
+    }
+
+    /// dev-plan/55 step 3 — the wire boundary, end to end. Unit-testing the
+    /// masker proves the helpers; this proves the choke point is in the right
+    /// place, which is the part that would actually leak. Two halves:
+    /// the provider must never see the phone number, and the user must never
+    /// see the placeholder — including when the model splits one across
+    /// stream chunks, which is the failure mode a naive per-chunk replace
+    /// would ship silently.
+    #[tokio::test]
+    async fn masking_hides_pii_from_the_provider_and_restores_it_locally() {
+        use std::sync::Mutex;
+        let _pin = crate::sensitive::pin_for_test();
+
+        struct CapturingProvider {
+            seen: Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait]
+        impl Provider for CapturingProvider {
+            async fn stream(&self, req: crate::providers::StreamRequest) -> Result<EventStream> {
+                let flat: String = req
+                    .messages
+                    .iter()
+                    .flat_map(|m| m.content.iter())
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                self.seen.lock().unwrap().push(flat);
+                // Echo the placeholder back, split mid-token across two
+                // deltas the way a real stream would.
+                Ok(Box::pin(stream::iter(vec![
+                    Ok(ProviderEvent::TextDelta("โทรกลับที่ [PHO".into())),
+                    Ok(ProviderEvent::TextDelta("NE_1] ได้เลย".into())),
+                    Ok(ProviderEvent::ContentBlockStop),
+                    Ok(ProviderEvent::MessageStop {
+                        stop_reason: Some("end_turn".into()),
+                        usage: None,
+                    }),
+                ])))
+            }
+        }
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let agent = Agent::new(
+            Arc::new(CapturingProvider { seen: seen.clone() }),
+            ToolRegistry::default(),
+            "test-model",
+            "",
+        );
+
+        // Force a fresh masker so placeholder numbering is deterministic
+        // regardless of what other tests left in the process-wide map.
+        crate::sensitive::configure(false, Vec::new());
+        crate::sensitive::configure(true, Vec::new());
+        let out = collect_agent_turn(agent.run_turn("โทรหาผมที่ 081-234-5678 นะครับ".into())).await;
+        crate::sensitive::configure(false, Vec::new());
+
+        let sent = seen.lock().unwrap().join("\n");
+        assert!(
+            !sent.contains("081-234-5678"),
+            "phone number reached the provider: {sent}"
+        );
+        assert!(sent.contains("[PHONE_1]"), "not masked at all: {sent}");
+
+        let text = out.expect("turn should succeed").text;
+        assert!(
+            text.contains("081-234-5678"),
+            "reply not restored locally: {text}"
+        );
+        assert!(
+            !text.contains("PHONE_1"),
+            "placeholder leaked into the reply: {text}"
+        );
+        // The reader has to be able to tell a restored value from something
+        // the model actually knew.
+        assert!(
+            text.contains(crate::sensitive::MARK_OPEN),
+            "restored value not marked for the reader: {text}"
+        );
+
+        // History keeps plaintext, which is what makes turn 2 safe: it
+        // re-masks from the real value instead of shipping a stale copy.
+        let history = agent.history_snapshot();
+        let last = history.last().expect("assistant message");
+        let stored: String = last
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            stored.contains("081-234-5678") && !stored.contains("PHONE_1"),
+            "history should hold plaintext, got {stored:?}"
+        );
+        assert!(
+            !stored.contains(crate::sensitive::MARK_OPEN),
+            "display marker persisted into history: {stored:?}"
+        );
+    }
+
+    /// The masker must stay off unless the user turns it on — a privacy
+    /// feature that silently rewrites prompts by default would be worse
+    /// than not shipping it.
+    #[tokio::test]
+    async fn masking_is_off_unless_configured() {
+        let _pin = crate::sensitive::pin_for_test();
+        crate::sensitive::configure(false, Vec::new());
+        assert!(crate::sensitive::active().is_none());
+        // Multiuser refuses to arm even when the setting says yes: one
+        // shared worker, one process-wide map, several members.
+        crate::workdir::set_multiuser(true);
+        crate::sensitive::configure(true, Vec::new());
+        let armed_under_multiuser = crate::sensitive::active().is_some();
+        crate::workdir::set_multiuser(false);
+        crate::sensitive::configure(false, Vec::new());
+        assert!(
+            !armed_under_multiuser,
+            "masking must not arm under multiuser"
         );
     }
 }

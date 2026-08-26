@@ -255,6 +255,30 @@ pub fn build_full_system_prompt(
     // guide AND opens the `gui-shell` tool gate (GuiShellCreate etc.), so
     // the ~3KB manual no longer rides every GUI turn's system prompt.
 
+    // dev-plan/55: when masking is armed the model receives `[PHONE_1]`
+    // where the user typed a phone number. Without this note it reads the
+    // placeholder as an unfilled template and derails — asking the user to
+    // "send the real number", which then gets un-masked on the way out into
+    // a nonsense sentence about the number being a placeholder.
+    if crate::sensitive::active().is_some() {
+        system.push_str(
+            "\n\n# Redacted values\n\
+             Placeholders like `[PHONE_1]`, `[ID_2]`, `[NAME_1]`, `[PLATE_1]` \
+             stand for real personal data the user DID provide. It was hidden \
+             from you on purpose and is restored automatically before the user \
+             sees your reply, so:\n\
+             - Treat a placeholder as the value itself — it is not missing, \
+             not a template, not an error. Never ask the user to \"send the \
+             real one\".\n\
+             - Reuse it verbatim in your reply and in tool arguments (the same \
+             placeholder always means the same value); the real value is \
+             substituted back before any tool runs.\n\
+             - Don't reason about the placeholder's format — you cannot see \
+             the underlying digits or spelling, so don't validate, reformat, \
+             or comment on them.\n",
+        );
+    }
+
     // (7) Skill catalog + (8) Repl-only priming
     if let Some(store) = skill_store {
         if !store.skills.is_empty() {
@@ -406,9 +430,11 @@ pub(crate) fn collaboration_primitives_section(team_enabled: bool) -> String {
     // Teams item entirely when off, rather than printing a "disabled" notice.
     let subagent = "**Subagent** — the `Task` tool launches one scoped child \
          agent that returns a transcript when done. Always available. \
-         Use for a single side-quest that would clutter history, a \
-         read-only sweep, or a well-defined delegation. NOT for \
-         parallel fan-out (one call = one child).";
+         Use for a side-quest that would clutter history, a read-only \
+         sweep, or a well-defined delegation. To fan out, emit SEVERAL \
+         `Task` calls in ONE message — they run concurrently. A lone \
+         `Task` call, or one batched with a tool that isn't read-only, \
+         runs sequentially.";
     let teams = "**Agent Teams** — `TeamCreate` + `SpawnTeammate` start \
          persistent parallel teammates with optional worktree \
          isolation; `TeamTaskCreate` / `Claim` / `Complete` for the \
@@ -416,9 +442,9 @@ pub(crate) fn collaboration_primitives_section(team_enabled: bool) -> String {
          coordination. See the detailed playbook below.";
     let workflow = "**WorkflowRun** — `WorkflowRun(prompt: \"…\")` authors a \
          JavaScript orchestration script and runs it in a Boa \
-         sandbox. Use for deterministic fan-out across N items, \
-         retry loops, multistep pipelines with budget control, or \
-         anything where you'd otherwise loop over Subagent calls. \
+         sandbox. Use when a batch of `Task` calls isn't enough because \
+         the work needs deterministic control flow: fan-out across N \
+         items, retry loops, multistep pipelines, budget caps. \
          Requires user approval per invocation. Nested WorkflowRun \
          calls (from inside a running workflow) are rejected — \
          orchestrate via `thclaws.subagent(...)` / \
@@ -753,6 +779,34 @@ pub(crate) fn team_grounding_prompt(model: &str, team_enabled: bool) -> String {
 mod tests {
     use super::*;
 
+    /// dev-plan/55: with masking armed the model sees `[PHONE_1]` where the
+    /// user typed a number. Live-testing v1 showed what happens without the
+    /// briefing — the model treats the placeholder as an unfilled template
+    /// and asks the user to "send the real number", which the un-masker then
+    /// rewrites into a sentence claiming the real number is a placeholder.
+    #[test]
+    fn masking_briefs_the_model_only_while_armed() {
+        let _pin = crate::sensitive::pin_for_test();
+        let tmp = tempfile::tempdir().unwrap();
+        let config = crate::config::AppConfig::default();
+
+        crate::sensitive::configure(false, Vec::new());
+        let off = build_full_system_prompt(&config, tmp.path(), None, &[], SurfaceHints::Gui);
+        crate::sensitive::configure(true, Vec::new());
+        let on = build_full_system_prompt(&config, tmp.path(), None, &[], SurfaceHints::Gui);
+        crate::sensitive::configure(false, Vec::new());
+
+        assert!(on.contains("# Redacted values"), "no briefing while armed");
+        assert!(
+            on.contains("[PHONE_1]") && on.contains("not a template"),
+            "briefing must name the shape and kill the template reading"
+        );
+        assert!(
+            !off.contains("# Redacted values"),
+            "briefing leaked into a prompt with masking off"
+        );
+    }
+
     /// Tier-2 followup test: the Repl surface adds the slash-command
     /// shortcut priming after the skill catalog; Gui / Headless do
     /// not. Checks only the surface-specific marker text — not full
@@ -972,6 +1026,35 @@ mod tests {
             !off.to_lowercase().contains("team"),
             "team-off must not say 'team' at all"
         );
+    }
+
+    /// Regression: the Subagent item used to end "NOT for parallel
+    /// fan-out (one call = one child)", which told the model to issue
+    /// `Task` calls one at a time — so subagents never overlapped even
+    /// though the runtime has run them concurrently since dev-plan/46
+    /// (`SubAgentTool::parallelizable() == true` + the ≥2-parallelizable
+    /// fast-path in `agent::run_turn`). The prompt, not the engine, was
+    /// the reason. It also contradicted system.md's "run independent
+    /// tool calls in parallel in a single turn".
+    #[test]
+    fn collaboration_section_tells_model_to_batch_task_calls() {
+        for section in [
+            collaboration_primitives_section(true),
+            collaboration_primitives_section(false),
+        ] {
+            assert!(
+                !section.contains("NOT for parallel fan-out"),
+                "must not forbid Task fan-out — the runtime supports it"
+            );
+            assert!(
+                section.contains("SEVERAL `Task` calls in ONE message"),
+                "must tell the model how to fan out, got: {section}"
+            );
+            assert!(
+                section.contains("run concurrently"),
+                "must say batched Task calls run concurrently, got: {section}"
+            );
+        }
     }
 
     /// The unified builder slots the Collaboration section between

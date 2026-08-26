@@ -882,6 +882,9 @@ pub enum CloudSlash {
         force_rebind: bool,
         force: bool,
     },
+    /// `/cloud revision [<slug>]` — print the sync revision each end is on,
+    /// without moving a byte. Read-only: it won't wake a paused workspace.
+    Revision { workspace: Option<String> },
     /// `/cloud pull […]` — mirror a hosted cloud workspace DOWN to the cwd.
     Pull {
         delete: bool,
@@ -1888,6 +1891,23 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
                 }
             }
         }
+        // Parse-time alias: `/index <folder>` → `/agent folder-indexer …`.
+        // The subagent drives the deterministic `FolderIndex` tool, so a
+        // re-index of an unchanged folder costs one tool call and no reads.
+        "index" => {
+            let prompt = args.trim();
+            if prompt.is_empty() {
+                SlashCommand::Unknown(
+                    "usage: /index [--language=<code>] <folder>   (alias for /agent folder-indexer …)"
+                        .into(),
+                )
+            } else {
+                SlashCommand::Agent {
+                    name: "folder-indexer".into(),
+                    prompt: prompt.to_string(),
+                }
+            }
+        }
         // Parse-time alias: `/extract xxx` → `/agent content-extractor xxx`.
         // The subagent allow-lists FetchImages, which opens the gated
         // `content-extractor` tool group for its isolated run.
@@ -1907,6 +1927,59 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
         }
         _ => SlashCommand::Unknown(cmd.to_string()),
     })
+}
+
+/// Smart-dash tolerance: terminals / IMEs can turn "--" into an em (—) or en
+/// (–) dash. Normalize before flag parsing.
+fn normalize_dashes(rest: &str) -> String {
+    rest.replace(['—', '–'], "--")
+}
+
+/// Reject a dash-prefixed token we don't recognise, instead of treating it as
+/// a workspace slug (or ignoring it outright). A silently-swallowed
+/// `--dryrun` used to run a REAL push — the safety word not being spelled
+/// exactly meant no safety at all, with no hint that anything was wrong.
+///
+/// `--workspace=<slug>` counts as known: it's the form users type, and
+/// rejecting it while accepting `--workspace <slug>` would trade one silent
+/// surprise for a confusing one.
+fn reject_unknown_flags(toks: &[&str], allowed: &[&str]) -> Option<String> {
+    let bad = toks.iter().find(|t| {
+        let Some(name) = t.strip_prefix('-') else {
+            return false;
+        };
+        // A bare "-" or a slug never starts with a dash; anything that does is
+        // meant to be a flag.
+        if name.is_empty() {
+            return true;
+        }
+        let base = t.split_once('=').map(|(k, _)| k).unwrap_or(t);
+        !allowed.contains(&base)
+    })?;
+    Some(format!(
+        "unknown option '{bad}' — valid here: {}. Nothing was run; a mistyped flag is not treated as a workspace name.",
+        allowed.join(", ")
+    ))
+}
+
+/// Target workspace for the sync subcommands: `--workspace <slug>` or the
+/// first positional (non-flag) token, so `/cloud push <slug>` works without
+/// the flag. Shared by push/pull/revision so all three name a workspace the
+/// same way.
+fn parse_workspace_target(toks: &[&str]) -> Option<String> {
+    toks.iter()
+        .find_map(|t| t.strip_prefix("--workspace=").map(|v| v.to_string()))
+        .or_else(|| {
+            toks.iter()
+                .position(|t| *t == "--workspace")
+                .and_then(|i| toks.get(i + 1))
+                .map(|s| s.to_string())
+        })
+        .or_else(|| {
+            toks.iter()
+                .find(|t| !t.starts_with('-'))
+                .map(|s| s.to_string())
+        })
 }
 
 /// Parse `/cloud <subcommand>` — `list [--mine]` / `status`. URL +
@@ -1935,11 +2008,32 @@ fn parse_cloud_subcommand(args: &str) -> SlashCommand {
         }
         "publish" => SlashCommand::Cloud(CloudSlash::Publish),
         "unbind" => SlashCommand::Cloud(CloudSlash::Unbind),
-        "push" | "pull" => {
-            // Smart-dash tolerance: terminals / IMEs can turn "--" into an em (—)
-            // or en (–) dash. Normalize before flag parsing.
-            let norm = rest.replace('—', "--").replace('–', "--");
+        // `rev` because this is a thing you check often and mid-flow.
+        "revision" | "rev" => {
+            let norm = normalize_dashes(rest);
             let toks: Vec<&str> = norm.split_whitespace().collect();
+            if let Some(err) = reject_unknown_flags(&toks, &["--workspace"]) {
+                return SlashCommand::Unknown(err);
+            }
+            SlashCommand::Cloud(CloudSlash::Revision {
+                workspace: parse_workspace_target(&toks),
+            })
+        }
+        "push" | "pull" => {
+            let norm = normalize_dashes(rest);
+            let toks: Vec<&str> = norm.split_whitespace().collect();
+            if let Some(err) = reject_unknown_flags(
+                &toks,
+                &[
+                    "--delete",
+                    "--dry-run",
+                    "--force",
+                    "--force-rebind",
+                    "--workspace",
+                ],
+            ) {
+                return SlashCommand::Unknown(err);
+            }
             let has = |f: &str| toks.iter().any(|t| *t == f);
             let delete = has("--delete");
             let dry_run = has("--dry-run");
@@ -1951,18 +2045,7 @@ fn parse_cloud_subcommand(args: &str) -> SlashCommand {
             // `--force` too. Users reasonably expect `--force-rebind` to push
             // (or pull) through in any case, including over divergence.
             let force = has("--force") || force_rebind;
-            // Target workspace: `--workspace <slug>` or the first positional
-            // (non-flag) token, so `/cloud push <slug>` works without the flag.
-            let workspace = toks
-                .iter()
-                .position(|t| *t == "--workspace")
-                .and_then(|i| toks.get(i + 1))
-                .map(|s| s.to_string())
-                .or_else(|| {
-                    toks.iter()
-                        .find(|t| !t.starts_with("--"))
-                        .map(|s| s.to_string())
-                });
+            let workspace = parse_workspace_target(&toks);
             if sub == "push" {
                 SlashCommand::Cloud(CloudSlash::Push {
                     delete,
@@ -1984,7 +2067,7 @@ fn parse_cloud_subcommand(args: &str) -> SlashCommand {
         other => SlashCommand::Unknown(format!(
             "unknown cloud subcommand: '{other}' \
              (try: /cloud status, /cloud list [--mine], /cloud get <slug>, \
-             /cloud publish, /cloud unbind, \
+             /cloud publish, /cloud unbind, /cloud revision, \
              /cloud push|pull [<slug>] [--delete] [--dry-run] [--force-rebind] [--force])"
         )),
     }
@@ -4088,6 +4171,12 @@ pub fn render_help() -> &'static str {
      \x20                   Clips a URL / file / pasted page into clean markdown\n  \
      \x20                   with images downloaded local. Runs isolated (keeps the\n  \
      \x20                   raw page out of your context); fan out for batch.\n  \
+     /index [--language=<code>] FOLDER\n  \
+     \x20                   Alias for /agent folder-indexer FOLDER (GUI-only).\n  \
+     \x20                   Writes FOLDER/index.md — one row per file with a\n  \
+     \x20                   description read from its content. Incremental:\n  \
+     \x20                   only files whose bytes changed are re-read\n  \
+     \x20                   (fingerprints cached in FOLDER/.thclaws-index.json).\n  \
      /cloud status        Show the configured catalog URL + whether a\n  \
      \x20                   CLI token is stored.\n  \
      /cloud list [--mine] Browse thClaws.cloud catalog (dev-plan/34).\n  \
@@ -4100,6 +4189,9 @@ pub fn render_help() -> &'static str {
      /cloud unbind        Detach the folder's agent uuid — lets you\n  \
      \x20                   /cloud get a DIFFERENT agent here, or\n  \
      \x20                   /cloud publish it as a new (forked) entry.\n  \
+     /cloud revision      Show the sync revision this folder and its\n  \
+     \x20                   hosted workspace are each on. Read-only —\n  \
+     \x20                   never wakes a paused workspace.\n  \
      \x20                   (Configure URL + token via Settings →\n  \
      \x20                   thClaws.cloud; mint tokens at /dashboard.)\n\n  \
      ! <command>       Run a shell command directly (e.g. ! git status)"
@@ -4268,6 +4360,30 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
                     .with_strip_model_prefix(prefix),
             ));
         }
+        ProviderKind::LiteLlm => {
+            // Self-hosted LiteLLM proxy — OpenAI-compatible at /v1, default
+            // port 4000. Auth is optional: only a proxy started with a
+            // `master_key` (or issuing virtual keys) checks the bearer, so a
+            // missing LITELLM_API_KEY falls back to a placeholder instead of
+            // failing the build like a cloud provider would.
+            let base = std::env::var("LITELLM_BASE_URL")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "http://localhost:4000/v1".to_string());
+            let url = if base.ends_with("/chat/completions") {
+                base
+            } else {
+                format!("{}/chat/completions", base.trim_end_matches('/'))
+            };
+            let key = config
+                .api_key_from_env()
+                .unwrap_or_else(|| "local-no-auth".to_string());
+            return Ok(Arc::new(
+                OpenAIProvider::new(key)
+                    .with_base_url(url)
+                    .with_strip_model_prefix("litellm/"),
+            ));
+        }
         ProviderKind::ChatGptCodex => {
             // ChatGPT-subscription Codex auth: read CodexAuth from
             // ~/.config/thclaws/auth/default.json, falling back to legacy
@@ -4376,6 +4492,29 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
                 OpenAIProvider::new(key)
                     .with_base_url(url)
                     .with_strip_model_prefix("atlascloud/"),
+            ))
+        }
+        ProviderKind::MetaAi => {
+            // Meta AI (api.meta.ai) — OpenAI-compatible chat/completions.
+            // BYOK only: there is no gateway segment for it, so a hosted
+            // workspace without META_API_KEY simply cannot reach it.
+            //
+            // muse-spark reasons before answering and bills that to the same
+            // budget as the reply — "2+2" spends ~257 reasoning tokens for an
+            // 11-token answer. Too small a max_tokens returns HTTP 200 with
+            // empty content and finish_reason=length, which reads like a
+            // broken provider rather than an exhausted budget.
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "META_BASE_URL",
+                "https://api.meta.ai/v1",
+                api_key,
+            );
+            Ok(Arc::new(
+                OpenAIProvider::new(key)
+                    .with_base_url(url)
+                    .with_strip_model_prefix("meta/"),
             ))
         }
         ProviderKind::NineRouter => {
@@ -4725,6 +4864,7 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
         | ProviderKind::LMStudio
         | ProviderKind::VLlm
         | ProviderKind::LlamaCpp
+        | ProviderKind::LiteLlm
         | ProviderKind::AgentSdk
         | ProviderKind::ChatGptCodex => {
             unreachable!("handled above")
@@ -4958,6 +5098,9 @@ pub async fn run_print_mode_with(
     verbose: bool,
     save_session: bool,
 ) -> Result<()> {
+    // Both binaries call THIS, not the `run_print_mode` wrapper — a hook on
+    // the wrapper armed nothing and `-p` shipped PII unmasked.
+    config.apply_process_globals();
     let cwd = std::env::current_dir()?;
 
     let mut tool_registry = ToolRegistry::with_builtins();
@@ -5572,7 +5715,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     // global atomic. Same hook the GUI/serve worker uses at boot —
     // ensures CLI users get the configurable timeout too (default
     // 120s, override via `stream_chunk_timeout_secs` in settings.json).
-    crate::providers::set_stream_chunk_timeout_secs(config.stream_chunk_timeout_secs);
+    config.apply_process_globals();
 
     let cwd = std::env::current_dir()?;
     // Keep `memory_store` around for the `/memory list/show/dump/...`
@@ -11262,8 +11405,11 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             }
                         }
                         CloudSlash::Get { slug } => {
+                            let cwd = std::env::current_dir()
+                                .unwrap_or_else(|_| std::path::PathBuf::from("."));
                             let lines = crate::cloud::cmd::get_into_cwd_lines(
                                 slug.clone(),
+                                &cwd,
                                 None,
                                 cloud_cfg.as_ref(),
                             )
@@ -11291,7 +11437,10 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             }
                         }
                         CloudSlash::Publish => {
+                            let cwd = std::env::current_dir()
+                                .unwrap_or_else(|_| std::path::PathBuf::from("."));
                             for line in crate::cloud::cmd::publish_cwd_lines(
+                                &cwd,
                                 None,
                                 cloud_cfg.as_ref(),
                             )
@@ -11303,6 +11452,16 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         CloudSlash::Unbind => {
                             for line in crate::cloud::cmd::unbind_lines() {
                                 println!("{line}");
+                            }
+                        }
+                        CloudSlash::Revision { workspace } => {
+                            match std::env::current_dir() {
+                                Ok(cwd) => {
+                                    for line in crate::cloud::cmd::revision_lines(&cwd, None, cloud_cfg.as_ref(), workspace.as_deref()).await {
+                                        println!("{line}");
+                                    }
+                                }
+                                Err(e) => println!("/cloud revision: can't read cwd: {e}"),
                             }
                         }
                         CloudSlash::Push { delete, dry_run, workspace, force_rebind, force } => {
@@ -12340,11 +12499,6 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// `--allowed-tools ''` parses to `Some([""])` (app.rs splits the
-    /// empty string), which must mean "nothing survives" — the case
-    /// `scripts/changelog-stub.sh` relies on to get a tool-free
-    /// one-shot generation.
-    #[test]
     /// The agent/* SDK bridge is a SECOND registry, built fresh in
     /// `build_provider`. The operator's lists were only ever applied to
     /// the agent's own registry, so a run restricted to `Read` still
@@ -12373,6 +12527,10 @@ mod tests {
         assert!(kept.iter().any(|n| *n == "Read"), "unrelated tools survive");
     }
 
+    /// `--allowed-tools ''` parses to `Some([""])` (app.rs splits the
+    /// empty string), which must mean "nothing survives" — the case
+    /// `scripts/changelog-stub.sh` relies on to get a tool-free
+    /// one-shot generation.
     #[test]
     fn tool_filters_govern_task_and_workflow_run() {
         let empty_allow = vec![String::new()];
@@ -12513,6 +12671,98 @@ mod tests {
         assert_eq!(parse_slash("/quit"), Some(SlashCommand::Quit));
         assert_eq!(parse_slash("/q"), Some(SlashCommand::Quit));
         assert_eq!(parse_slash("/exit"), Some(SlashCommand::Quit));
+    }
+
+    #[test]
+    fn parse_slash_cloud_rejects_a_mistyped_flag_instead_of_running() {
+        // The one that motivated this: `--dryrun` used to be swallowed and
+        // the push ran for real. A typo in the safety word must not silently
+        // mean "no safety".
+        for input in [
+            "/cloud push --dryrun",
+            "/cloud pull --dry_run",
+            "/cloud push --forcerebind",
+            "/cloud push -delete",
+            "/cloud rev --delete", // valid flag, wrong subcommand
+        ] {
+            match parse_slash(input) {
+                Some(SlashCommand::Unknown(msg)) => {
+                    assert!(msg.contains("unknown option"), "{input:?} → {msg}");
+                    assert!(
+                        msg.contains("Nothing was run"),
+                        "the message must say nothing happened: {msg}"
+                    );
+                }
+                other => panic!("{input:?} should have been refused, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_slash_cloud_still_accepts_every_real_flag_form() {
+        // Guard against the rejection being over-eager.
+        let ok = |input: &str| match parse_slash(input) {
+            Some(SlashCommand::Cloud(c)) => c,
+            other => panic!("{input:?} should have parsed, got {other:?}"),
+        };
+        match ok("/cloud push --delete --dry-run --force-rebind") {
+            CloudSlash::Push {
+                delete,
+                dry_run,
+                force_rebind,
+                force,
+                ..
+            } => assert!(delete && dry_run && force_rebind && force),
+            other => panic!("{other:?}"),
+        }
+        // Both `--workspace` spellings, plus the bare positional.
+        for input in [
+            "/cloud push --workspace my-ws",
+            "/cloud push --workspace=my-ws",
+            "/cloud push my-ws",
+            "/cloud push —workspace=my-ws", // em-dash tolerance still applies
+        ] {
+            match ok(input) {
+                CloudSlash::Push { workspace, .. } => {
+                    assert_eq!(workspace.as_deref(), Some("my-ws"), "{input:?}")
+                }
+                other => panic!("{input:?} → {other:?}"),
+            }
+        }
+        match ok("/cloud rev --workspace=my-ws") {
+            CloudSlash::Revision { workspace } => {
+                assert_eq!(workspace.as_deref(), Some("my-ws"))
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_slash_cloud_revision_takes_an_optional_target() {
+        for input in ["/cloud revision", "/cloud rev"] {
+            assert_eq!(
+                parse_slash(input),
+                Some(SlashCommand::Cloud(CloudSlash::Revision {
+                    workspace: None
+                })),
+                "{input:?}"
+            );
+        }
+        // Named the same way push/pull name a workspace: bare positional or
+        // the explicit flag (em-dash tolerated, as elsewhere).
+        for input in [
+            "/cloud revision nvidia-gpu",
+            "/cloud rev --workspace nvidia-gpu",
+            "/cloud revision —workspace nvidia-gpu",
+        ] {
+            assert_eq!(
+                parse_slash(input),
+                Some(SlashCommand::Cloud(CloudSlash::Revision {
+                    workspace: Some("nvidia-gpu".to_string())
+                })),
+                "{input:?}"
+            );
+        }
     }
 
     #[test]
@@ -14435,6 +14685,23 @@ mod tests {
                 prompt: "docs/page.html".into(),
             }),
         );
+    }
+
+    #[test]
+    fn parse_slash_index_routes_to_folder_indexer() {
+        assert_eq!(
+            parse_slash("/index --language=th articles"),
+            Some(SlashCommand::Agent {
+                name: "folder-indexer".into(),
+                prompt: "--language=th articles".into(),
+            }),
+        );
+        match parse_slash("/index") {
+            Some(SlashCommand::Unknown(msg)) => {
+                assert!(msg.contains("usage: /index"), "got: {msg}")
+            }
+            other => panic!("expected Unknown, got {other:?}"),
+        }
     }
 
     #[test]

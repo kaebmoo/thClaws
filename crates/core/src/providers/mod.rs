@@ -60,6 +60,7 @@ pub mod thclaws_gateway;
 pub enum ProviderKind {
     Anthropic,
     AtlasCloud,
+    MetaAi,
     NineRouter,
     AgentSdk,
     OpenAI,
@@ -102,6 +103,21 @@ pub enum ProviderKind {
     /// 8080, no auth. Serves one GGUF at a time and ignores the `model`
     /// field in the request, so any id routes correctly.
     LlamaCpp,
+    /// LiteLLM Proxy (`litellm --config config.yaml`) — the self-hosted
+    /// OpenAI-compatible router, default port 4000. Split out of
+    /// [`OpenAICompat`] so it gets its own `litellm/` namespace, base-URL
+    /// env and Settings row. Model ids are whatever `model_name` aliases
+    /// the operator declared in `model_list`, so no default can be right —
+    /// `list_models` fills the picker from the live `/models`, and
+    /// `/model/info` supplies the real context window.
+    ///
+    /// Auth is optional: a proxy started without `master_key` accepts any
+    /// bearer, one with virtual keys wants `LITELLM_API_KEY`. Unlike vLLM /
+    /// llama.cpp this is a *router*, not an inference server — the model it
+    /// resolves to usually lives at OpenAI/Anthropic/etc., so it is
+    /// deliberately absent from [`Self::is_local`] and the org-policy
+    /// gateway's local bypass.
+    LiteLlm,
     AzureAIFoundry,
     OpenAICompat,
     DeepSeek,
@@ -162,6 +178,26 @@ impl ProviderTier {
     }
 }
 
+/// Human-readable "where this provider actually points" — the env var
+/// the user set, resolved to its current value. Used when a listing
+/// comes back empty so the message names the endpoint that was asked
+/// rather than a provider label the user never typed.
+pub fn endpoint_hint(kind: ProviderKind) -> String {
+    let (var, default) = match kind {
+        ProviderKind::OpenAICompat => ("OPENAI_COMPAT_BASE_URL", "http://localhost:8000/v1"),
+        ProviderKind::LiteLlm => ("LITELLM_BASE_URL", "http://localhost:4000/v1"),
+        ProviderKind::Ollama | ProviderKind::OllamaAnthropic => {
+            ("OLLAMA_BASE_URL", "http://localhost:11434")
+        }
+        _ => return crate::model_catalogue::provider_kind_name(kind).to_string(),
+    };
+    let base = std::env::var(var)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| default.to_string());
+    format!("{base} ({var})")
+}
+
 impl ProviderKind {
     /// Curated display order for the Featured tier in model pickers — the
     /// priority order the product promotes. Additional providers follow,
@@ -220,6 +256,7 @@ impl ProviderKind {
     pub const ALL: &'static [Self] = &[
         Self::Anthropic,
         Self::AtlasCloud,
+        Self::MetaAi,
         Self::NineRouter,
         Self::AgentSdk,
         Self::OpenAI,
@@ -237,6 +274,7 @@ impl ProviderKind {
         Self::LMStudio,
         Self::VLlm,
         Self::LlamaCpp,
+        Self::LiteLlm,
         Self::AzureAIFoundry,
         Self::OpenAICompat,
         Self::DeepSeek,
@@ -253,6 +291,7 @@ impl ProviderKind {
         match self {
             Self::Anthropic => "anthropic",
             Self::AtlasCloud => "atlascloud",
+            Self::MetaAi => "meta",
             Self::NineRouter => "9router",
             Self::AgentSdk => "anthropic-agent",
             Self::OpenAI => "openai",
@@ -270,6 +309,7 @@ impl ProviderKind {
             Self::LMStudio => "lmstudio",
             Self::VLlm => "vllm",
             Self::LlamaCpp => "llamacpp",
+            Self::LiteLlm => "litellm",
             Self::AzureAIFoundry => "azure",
             Self::OpenAICompat => "openai-compat",
             Self::DeepSeek => "deepseek",
@@ -287,12 +327,19 @@ impl ProviderKind {
         match self {
             Self::Anthropic => "claude-sonnet-4-6",
             Self::AtlasCloud => "atlascloud/qwen/qwen3.5-flash",
+            // muse-spark reasons before it answers, so it needs a large
+            // output budget — see the catalogue's max_output note.
+            Self::MetaAi => "meta/muse-spark-1.2",
             // 9router routes by `<alias>/<model>`; `anthropic` is a standard
             // registry alias. Users normally pick from the live /models list.
             Self::NineRouter => "9router/anthropic/claude-sonnet-4.5",
             Self::AgentSdk => "agent/claude-sonnet-4-6",
             Self::OpenAI => "gpt-4.1",
-            Self::OpenAIResponses => "codex/gpt-5.2-codex",
+            // gpt-5.2-codex was retired by OpenAI (404 on both
+            // /v1/chat/completions and /v1/responses); gpt-5.3-codex is the
+            // live successor. A dead default means every user who picks this
+            // provider without naming a model gets a 404 on their first turn.
+            Self::OpenAIResponses => "codex/gpt-5.3-codex",
             Self::ChatGptCodex => "chatgpt-codex/gpt-5.4",
             Self::OpenRouter => "openrouter/qwen/qwen3.7-plus",
             Self::TokenRouter => "tokenrouter/anthropic/claude-sonnet-4.5",
@@ -333,6 +380,11 @@ impl ProviderKind {
             // llama-server ignores the request's `model` field entirely (one
             // GGUF per process), so this placeholder actually works as-is.
             Self::LlamaCpp => "llamacpp/local-model",
+            // LiteLLM routes on the operator's own `model_name` aliases, so
+            // like vLLM there is no id we can know up front. `gpt-4o-mini` is
+            // the alias LiteLLM's own quickstart config ships with; the picker
+            // replaces it with the live `/models` listing.
+            Self::LiteLlm => "litellm/gpt-4o-mini",
             // Azure AI Foundry deployments are user-specific (each subscription
             // names its own deployments), so there's no sensible default. The
             // placeholder routes to the right provider but forces the user to
@@ -394,6 +446,7 @@ impl ProviderKind {
         match self {
             Self::TokenRouter => Some("TOKENROUTER_BASE_URL"),
             Self::AtlasCloud => Some("ATLASCLOUD_BASE_URL"),
+            Self::MetaAi => Some("META_BASE_URL"),
             Self::NineRouter => Some("NINEROUTER_BASE_URL"),
             Self::DashScope => Some("DASHSCOPE_BASE_URL"),
             Self::QwenCloud => Some("QWENCLOUD_BASE_URL"),
@@ -403,6 +456,7 @@ impl ProviderKind {
             Self::LMStudio => Some("LMSTUDIO_BASE_URL"),
             Self::VLlm => Some("VLLM_BASE_URL"),
             Self::LlamaCpp => Some("LLAMACPP_BASE_URL"),
+            Self::LiteLlm => Some("LITELLM_BASE_URL"),
             Self::AzureAIFoundry => Some("AZURE_AI_FOUNDRY_ENDPOINT"),
             Self::OpenAICompat => Some("OPENAI_COMPAT_BASE_URL"),
             Self::DeepSeek => Some("DEEPSEEK_BASE_URL"),
@@ -430,6 +484,7 @@ impl ProviderKind {
                 | Self::LMStudio
                 | Self::VLlm
                 | Self::LlamaCpp
+                | Self::LiteLlm
                 | Self::AzureAIFoundry
                 | Self::OpenAICompat
                 // Self-hosted router: base URL / port varies per user, so the
@@ -445,6 +500,7 @@ impl ProviderKind {
         match self {
             Self::TokenRouter => Some("https://api.tokenrouter.com/v1"),
             Self::AtlasCloud => Some("https://api.atlascloud.ai/v1"),
+            Self::MetaAi => Some("https://api.meta.ai/v1"),
             // Self-hosted router; localhost default. Override per user via
             // NINEROUTER_BASE_URL for a remote / non-default-port instance.
             Self::NineRouter => Some("http://localhost:20128/v1"),
@@ -466,6 +522,11 @@ impl ProviderKind {
             Self::VLlm => Some("http://localhost:8000/v1"),
             // `llama-server` binds 127.0.0.1:8080 and exposes /v1.
             Self::LlamaCpp => Some("http://localhost:8080/v1"),
+            // `litellm --config config.yaml` binds 0.0.0.0:4000 and exposes
+            // the OpenAI surface at the root — `/v1` is accepted too, and is
+            // what keeps the derived `/models` and `/model/info` probes on
+            // the same prefix.
+            Self::LiteLlm => Some("http://localhost:4000/v1"),
             Self::AzureAIFoundry => Some("https://{resource}.services.ai.azure.com"),
             // Generic OAI-compat: users always set their own URL; this
             // placeholder just hints at the expected shape (path ending in /v1).
@@ -495,6 +556,24 @@ impl ProviderKind {
         }
     }
 
+    /// True when this provider runs on the user's own machine, so text sent
+    /// to it never leaves the host. Drives dev-plan/55 masking: PII is worth
+    /// hiding from a cloud endpoint, but masking a local model only degrades
+    /// the answer for no privacy gain.
+    ///
+    /// `OpenAICompat` is deliberately NOT listed even though it's usually a
+    /// local runtime — its base URL is user-supplied and can point anywhere,
+    /// and the safe default for a privacy gate is to treat unknown as remote.
+    /// `LiteLlm` is out for the same reason: the proxy is self-hosted, but it
+    /// is a router whose upstream is normally OpenAI/Anthropic/…, so the text
+    /// does leave the host.
+    pub fn is_local(&self) -> bool {
+        matches!(
+            self,
+            Self::Ollama | Self::OllamaAnthropic | Self::LMStudio | Self::VLlm | Self::LlamaCpp
+        )
+    }
+
     /// True when the user has a usable API key for this provider —
     /// either via the OS keychain (`secrets::get`) or the relevant
     /// env var (set directly or loaded from `.env`). Providers with
@@ -504,7 +583,9 @@ impl ProviderKind {
     pub fn has_key_available(&self) -> bool {
         // OpenAI-compatible endpoints are local runtimes (vLLM / llama.cpp /
         // SGLang / Atlas) — auth optional, never require a key to be usable.
-        if matches!(self, Self::OpenAICompat) {
+        // LiteLLM the same: a proxy started without `master_key` takes any
+        // bearer, so a missing LITELLM_API_KEY must not mark it unusable.
+        if matches!(self, Self::OpenAICompat | Self::LiteLlm) {
             return true;
         }
         let Some(env_var) = self.api_key_env() else {
@@ -529,6 +610,7 @@ impl ProviderKind {
             Self::OpenRouter => Some("OPENROUTER_API_KEY"),
             Self::TokenRouter => Some("TOKENROUTER_API_KEY"),
             Self::AtlasCloud => Some("ATLASCLOUD_API_KEY"),
+            Self::MetaAi => Some("META_API_KEY"),
             Self::NineRouter => Some("NINEROUTER_API_KEY"),
             Self::Gemini => Some("GEMINI_API_KEY"),
             Self::Ollama => None,
@@ -541,6 +623,10 @@ impl ProviderKind {
             // Self-hosted; auth only if started with --api-key, which
             // users set through the generic compat provider instead.
             Self::VLlm | Self::LlamaCpp => None,
+            // Optional — set only when the proxy runs with a master key or
+            // mints virtual keys. Absent, `build_provider` sends a
+            // placeholder bearer rather than refusing to build.
+            Self::LiteLlm => Some("LITELLM_API_KEY"),
             Self::AzureAIFoundry => Some("AZURE_AI_FOUNDRY_API_KEY"),
             Self::OpenAICompat => Some("OPENAI_COMPAT_API_KEY"),
             Self::DeepSeek => Some("DEEPSEEK_API_KEY"),
@@ -630,6 +716,7 @@ impl ProviderKind {
             Self::OpenAI
             | Self::OpenAIResponses
             | Self::AtlasCloud
+            | Self::MetaAi
             // 9router uses full `9router/<alias>/<model>` ids; no short-alias
             // table (the alias segment is 9router's own, typed explicitly).
             | Self::NineRouter
@@ -644,6 +731,7 @@ impl ProviderKind {
             | Self::LMStudio
             | Self::VLlm
             | Self::LlamaCpp
+            | Self::LiteLlm
             | Self::AzureAIFoundry
             | Self::OpenAICompat
             | Self::DeepSeek
@@ -669,6 +757,13 @@ impl ProviderKind {
             Some(Self::OpenRouter)
         } else if model.starts_with("atlascloud/") {
             Some(Self::AtlasCloud)
+        } else if model.starts_with("meta/") {
+            // Meta AI (api.meta.ai) — BYOK only, no gateway route. Ids look
+            // like meta/muse-spark-1.2; the prefix is stripped before the
+            // upstream request. OpenRouter proxies the same models, but its
+            // ids always arrive as `openrouter/meta/...` and that branch is
+            // checked first — same arrangement as `nvidia/` above.
+            Some(Self::MetaAi)
         } else if model.starts_with("9router/") {
             // Self-hosted 9router gateway. Ids look like
             // `9router/kr/claude-sonnet-4.5`; the `9router/` prefix is stripped
@@ -689,6 +784,18 @@ impl ProviderKind {
             // the broader match steals the route.
             Some(Self::ChatGptCodex)
         } else if model.starts_with("codex/") || model.contains("codex") {
+            Some(Self::OpenAIResponses)
+        } else if model.starts_with("gpt-") && model.contains("-pro") {
+            // OpenAI's `-pro` tier is Responses-only: `gpt-5-pro`,
+            // `gpt-5.2-pro`, `gpt-5.4-pro`, `gpt-5.5-pro` and their dated
+            // snapshots all answer `/v1/responses` and 404 on
+            // `/v1/chat/completions` with "This is not a chat model". They
+            // used to land on the OpenAI arm below and fail every time.
+            //
+            // Guarded on the `gpt-` prefix so it cannot catch a `-pro` model
+            // from another vendor; every routed id here is one of OpenAI's
+            // own bare names, since prefixed ones (openrouter/…, atlascloud/…)
+            // are matched earlier.
             Some(Self::OpenAIResponses)
         } else if model.starts_with("gpt-")
             || model.starts_with("o1-")
@@ -762,6 +869,12 @@ impl ProviderKind {
             // llama.cpp's llama-server. The id after the prefix is cosmetic
             // (the server serves whichever GGUF it was started with).
             Some(Self::LlamaCpp)
+        } else if model.starts_with("litellm/") {
+            // Self-hosted LiteLLM proxy. Models look like
+            // litellm/<model_name-alias>, and an alias may itself be
+            // namespaced (litellm/azure/gpt-4o) — only the leading
+            // "litellm/" is stripped, so the rest survives to the proxy.
+            Some(Self::LiteLlm)
         } else if model.starts_with("oa/") {
             Some(Self::OllamaAnthropic)
         } else if model.starts_with("ollama/") {
@@ -1213,7 +1326,8 @@ pub fn kind_has_credentials(kind: Option<ProviderKind>) -> bool {
         | ProviderKind::LlamaCpp => true,
         // OpenAI-compatible = local runtimes (vLLM / llama.cpp / SGLang / Atlas)
         // pointed at OPENAI_COMPAT_BASE_URL; auth is optional (key sent if set).
-        ProviderKind::OpenAICompat => true,
+        // LiteLLM is self-hosted with optional auth on the same terms.
+        ProviderKind::OpenAICompat | ProviderKind::LiteLlm => true,
         // ChatGptCodex auths via a file-based OAuth token, not an env
         // var, so the generic api_key_env() probe below always misses.
         ProviderKind::ChatGptCodex => {
@@ -1304,9 +1418,13 @@ pub async fn build_all_models_payload() -> String {
             continue;
         }
         let provider_featured = kind.tier() == ProviderTier::Featured;
-        // (id) -> (context, featured). `featured` = gateway-servable: a
-        // Featured-tier provider with a priced catalogue entry.
-        let mut model_ids: std::collections::BTreeMap<String, (Option<u32>, bool)> =
+        // (id) -> (context, featured, context_unverified). `featured` =
+        // gateway-servable: a Featured-tier provider with a priced catalogue
+        // entry. `context_unverified` marks a window that is the provider's
+        // blanket default rather than a published figure (dev-plan/57) — the
+        // live rows appended below have no catalogue entry at all, so they
+        // carry no window and nothing to qualify.
+        let mut model_ids: std::collections::BTreeMap<String, (Option<u32>, bool, bool)> =
             std::collections::BTreeMap::new();
         let is_openrouter = matches!(kind, ProviderKind::OpenRouter);
         for (id, entry) in cat.list_models_for_provider(name) {
@@ -1322,16 +1440,23 @@ pub async fn build_all_models_payload() -> String {
                 continue;
             }
             let canonical = crate::model_catalogue::canonical_model_id(name, &id);
-            model_ids.insert(canonical, (entry.context, provider_featured && priced));
+            model_ids.insert(
+                canonical,
+                (
+                    entry.context,
+                    provider_featured && priced,
+                    entry.context_unverified(),
+                ),
+            );
         }
         if matches!(kind, ProviderKind::Ollama) {
             for id in &ollama_live {
-                model_ids.entry(id.clone()).or_insert((None, false));
+                model_ids.entry(id.clone()).or_insert((None, false, false));
             }
         }
         if matches!(kind, ProviderKind::OpenCodeGo) {
             for id in &opencodego_live {
-                model_ids.entry(id.clone()).or_insert((None, false));
+                model_ids.entry(id.clone()).or_insert((None, false, false));
             }
         }
         if model_ids.is_empty() {
@@ -1339,8 +1464,13 @@ pub async fn build_all_models_payload() -> String {
         }
         let model_rows: Vec<serde_json::Value> = model_ids
             .into_iter()
-            .map(|(id, (ctx, featured))| {
-                serde_json::json!({ "id": id, "context": ctx, "featured": featured })
+            .map(|(id, (ctx, featured, ctx_unverified))| {
+                serde_json::json!({
+                    "id": id,
+                    "context": ctx,
+                    "context_unverified": ctx_unverified,
+                    "featured": featured,
+                })
             })
             .collect();
         let tier = kind.tier();
@@ -1388,6 +1518,14 @@ pub async fn build_all_models_payload() -> String {
 /// configured provider fails to build; this picks the preferred *paid*
 /// default when nothing is configured yet.
 pub fn preferred_default_model(cfg: &crate::config::AppConfig) -> Option<String> {
+    // On a DGX Spark appliance the box *is* the provider: AI Server's
+    // gateway is already running on loopback and needs no credentials, so it
+    // outranks any cloud tier below. Read-only — the probe happened once at
+    // startup (`aiserver::bootstrap`), and only when nothing had pinned
+    // `LITELLM_BASE_URL`, so this cannot override a configured provider.
+    if let Some(d) = crate::aiserver::cached() {
+        return Some(d.model_id());
+    }
     // Ordered (provider, model) preference: the first provider the user can
     // reach — own key OR a gateway route — picks the session default. Models
     // are pinned explicitly (not `kind.default_model()`) so the credential-
@@ -1412,6 +1550,26 @@ pub fn preferred_default_model(cfg: &crate::config::AppConfig) -> Option<String>
 
 #[cfg(test)]
 mod tests {
+    /// `/models` on a user-pointed provider says which endpoint it asked,
+    /// because "no models for openai-compat" tells the user nothing about
+    /// the box they actually configured.
+    #[test]
+    fn endpoint_hint_names_the_configured_url() {
+        let _g = crate::kms::test_env_lock();
+        std::env::remove_var("OPENAI_COMPAT_BASE_URL");
+        let d = super::endpoint_hint(ProviderKind::OpenAICompat);
+        assert!(d.contains("localhost:8000"), "default shown: {d}");
+        assert!(d.contains("OPENAI_COMPAT_BASE_URL"), "names the var: {d}");
+
+        std::env::set_var("OPENAI_COMPAT_BASE_URL", "http://vllm.internal:9000/v1");
+        let set = super::endpoint_hint(ProviderKind::OpenAICompat);
+        assert!(set.contains("vllm.internal:9000"), "got: {set}");
+        std::env::remove_var("OPENAI_COMPAT_BASE_URL");
+
+        // A catalogued provider has no user endpoint — fall back to its name.
+        assert_eq!(super::endpoint_hint(ProviderKind::Anthropic), "anthropic");
+    }
+
     use super::*;
 
     // `codex/` (OpenAIResponses) models are hidden from the cross-provider
@@ -1786,6 +1944,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn litellm_is_a_self_hosted_proxy_with_optional_auth() {
+        assert_eq!(
+            ProviderKind::detect("litellm/gpt-4o-mini"),
+            Some(ProviderKind::LiteLlm)
+        );
+        assert_eq!(
+            ProviderKind::detect("litellm/azure/my-deployment"),
+            Some(ProviderKind::LiteLlm),
+            "a namespaced alias keeps its inner slashes"
+        );
+        assert_eq!(ProviderKind::LiteLlm.name(), "litellm");
+        assert_eq!(
+            ProviderKind::LiteLlm.endpoint_env(),
+            Some("LITELLM_BASE_URL")
+        );
+        assert_eq!(
+            ProviderKind::LiteLlm.default_endpoint(),
+            Some("http://localhost:4000/v1")
+        );
+        assert!(ProviderKind::LiteLlm.endpoint_user_configurable());
+        assert!(ProviderKind::ALL.contains(&ProviderKind::LiteLlm));
+        // The key is optional — usable (and buildable) with none set.
+        assert_eq!(ProviderKind::LiteLlm.api_key_env(), Some("LITELLM_API_KEY"));
+        assert!(ProviderKind::LiteLlm.has_key_available());
+        assert!(kind_has_credentials(Some(ProviderKind::LiteLlm)));
+        // A router, not local inference: masking and the org-policy gateway
+        // must keep treating its traffic as leaving the host.
+        assert!(!ProviderKind::LiteLlm.is_local());
+        assert_eq!(
+            crate::providers::thclaws_gateway::provider_segment(ProviderKind::LiteLlm),
+            None,
+            "self-hosted — never metered through the thClaws gateway"
+        );
+    }
+
     // Serialises the env-var mutation in `preferred_default_model_*`
     // tests (api-key + gateway-key vars are process-global).
     static PREF_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1996,6 +2190,90 @@ mod tests {
         assert_eq!(
             ProviderKind::AtlasCloud.default_model(),
             "atlascloud/qwen/qwen3.5-flash"
+        );
+    }
+
+    /// OpenAI's `-pro` tier answers `/v1/responses` and 404s on
+    /// `/v1/chat/completions` ("This is not a chat model"). Routing them to
+    /// the chat provider is a guaranteed failure, which is what every
+    /// `gpt-*-pro` row in the catalogue did until 2026-08-11.
+    #[test]
+    fn detect_routes_openai_pro_models_to_responses() {
+        for m in [
+            "gpt-5-pro",
+            "gpt-5-pro-2025-10-06",
+            "gpt-5.2-pro",
+            "gpt-5.4-pro-2026-03-05",
+            "gpt-5.5-pro",
+        ] {
+            assert_eq!(
+                ProviderKind::detect(m),
+                Some(ProviderKind::OpenAIResponses),
+                "{m} must go to the Responses endpoint"
+            );
+        }
+        // Non-pro OpenAI ids keep the chat path.
+        for m in ["gpt-5", "gpt-5.4-mini", "gpt-5.6-terra"] {
+            assert_eq!(ProviderKind::detect(m), Some(ProviderKind::OpenAI), "{m}");
+        }
+        // The `gpt-` guard keeps another vendor's `-pro` out of it; a
+        // prefixed id is matched by its own branch further up.
+        assert_eq!(
+            ProviderKind::detect("openrouter/openai/gpt-5.5-pro"),
+            Some(ProviderKind::OpenRouter)
+        );
+        assert_eq!(
+            ProviderKind::detect("atlascloud/deepseek-ai/deepseek-v4-pro"),
+            Some(ProviderKind::AtlasCloud)
+        );
+    }
+
+    #[test]
+    fn detect_meta_prefix_routes_to_meta_provider() {
+        assert_eq!(
+            ProviderKind::detect("meta/muse-spark-1.2"),
+            Some(ProviderKind::MetaAi)
+        );
+        assert_eq!(
+            ProviderKind::detect("meta/muse-spark-1.2-contributor"),
+            Some(ProviderKind::MetaAi)
+        );
+        assert_eq!(ProviderKind::MetaAi.api_key_env(), Some("META_API_KEY"));
+        assert_eq!(ProviderKind::MetaAi.endpoint_env(), Some("META_BASE_URL"));
+        assert_eq!(
+            ProviderKind::MetaAi.default_endpoint(),
+            Some("https://api.meta.ai/v1")
+        );
+        assert_eq!(ProviderKind::MetaAi.name(), "meta");
+        assert_eq!(ProviderKind::MetaAi.default_model(), "meta/muse-spark-1.2");
+    }
+
+    /// OpenRouter proxies the same models and the catalogue stores its ids
+    /// unprefixed (`meta/muse-spark-1.2`), so the two only stay apart because
+    /// `detect` checks `openrouter/` first. Reordering that chain would send
+    /// every OpenRouter Meta route to api.meta.ai — with a key most users
+    /// routing through OpenRouter do not have.
+    #[test]
+    fn openrouter_wrapper_wins_over_the_meta_prefix() {
+        assert_eq!(
+            ProviderKind::detect("openrouter/meta/muse-spark-1.2"),
+            Some(ProviderKind::OpenRouter)
+        );
+    }
+
+    /// Meta AI is BYOK-only on purpose: no gateway segment, so it must not
+    /// leak into the sold tier or the routed set.
+    #[test]
+    fn meta_is_byok_only() {
+        assert_eq!(ProviderKind::MetaAi.tier(), ProviderTier::Additional);
+        assert_eq!(
+            crate::providers::thclaws_gateway::provider_segment(ProviderKind::MetaAi),
+            None,
+            "Meta AI has no gateway route"
+        );
+        assert!(
+            !crate::shared::GATEWAY_ALL_PROVIDERS.contains(&ProviderKind::MetaAi.name()),
+            "Meta AI must stay out of the gateway-routed set"
         );
     }
 

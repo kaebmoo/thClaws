@@ -360,7 +360,7 @@ fn announce_key_stored(provider: &str, ok: bool, error: &str, storage: &str, ctx
             }
             let runtime_loaded = matches!(
                 provider,
-                "ollama" | "ollama-anthropic" | "lmstudio" | "vllm" | "llamacpp"
+                "ollama" | "ollama-anthropic" | "lmstudio" | "vllm" | "llamacpp" | "litellm"
             );
             if models.len() >= 3 && !runtime_loaded {
                 let _ = crate::providers::ProviderKind::detect(&new_cfg.model);
@@ -371,6 +371,11 @@ fn announce_key_stored(provider: &str, ok: bool, error: &str, storage: &str, ctx
                         serde_json::json!({
                             "id": canonical,
                             "context": e.context,
+                            // dev-plan/57: the window may be the provider's
+                            // blanket default rather than a published figure.
+                            // The picker renders those as `200k?` — printing
+                            // a floor as a specification is what #190 was.
+                            "context_unverified": e.context_unverified(),
                             "max_output": e.max_output,
                             // Plan-10: surfaced for the
                             // OpenRouter "Free only" toggle
@@ -4888,6 +4893,43 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             (ctx.dispatch)(payload.to_string());
         }
 
+        // Sensitive-data masking (`sensitive.enabled`, dev-plan/55). Nested
+        // block on disk so the later mode routing (tokenize vs gate) has a
+        // home; the GUI only flips `enabled`.
+        "sensitive_enabled_get" => {
+            let enabled = crate::config::ProjectConfig::load()
+                .and_then(|c| c.sensitive)
+                .and_then(|s| s.enabled)
+                .unwrap_or(false);
+            let payload = serde_json::json!({
+                "type": "sensitive_enabled",
+                "enabled": enabled,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        "sensitive_enabled_set" => {
+            let enabled = msg
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let mut cfg = crate::config::ProjectConfig::load().unwrap_or_default();
+            let mut block = cfg.sensitive.take().unwrap_or_default();
+            block.enabled = Some(enabled);
+            cfg.sensitive = Some(block);
+            let (ok, error) = match cfg.save() {
+                Ok(()) => (true, String::new()),
+                Err(e) => (false, e.to_string()),
+            };
+            let payload = serde_json::json!({
+                "type": "sensitive_enabled_result",
+                "enabled": enabled,
+                "ok": ok,
+                "error": error,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
         // Browser tools (`browserEnabled`) — the INVERSE of the
         // media/team toggles: opt-OUT, default ON. Same get/set shape so
         // the Settings menu can flip it; the Playwright MCP is injected at
@@ -6868,7 +6910,7 @@ mod tests {
             on_zoom: Arc::new(|_| {}),
             workflow_approver: crate::workflow::WorkflowApprover::new(),
         };
-        handle_ipc(
+        let _ = handle_ipc(
             serde_json::json!({
                 "type": "gui_shell_approval_respond",
                 "approvalId": id,
@@ -7142,7 +7184,7 @@ mod tests {
             on_zoom: Arc::new(|_| {}),
             workflow_approver: crate::workflow::WorkflowApprover::new(),
         };
-        handle_ipc(
+        let _ = handle_ipc(
             serde_json::json!({
                 "type": "schedule_cron_preview",
                 "cron": "definitely not cron",
@@ -7176,7 +7218,7 @@ mod tests {
             on_zoom: Arc::new(|_| {}),
             workflow_approver: crate::workflow::WorkflowApprover::new(),
         };
-        handle_ipc(
+        let _ = handle_ipc(
             serde_json::json!({
                 "type": "schedule_cron_preview",
                 "cron": "  ",
@@ -7272,7 +7314,7 @@ mod tests {
             on_zoom: Arc::new(|_| {}),
             workflow_approver: crate::workflow::WorkflowApprover::new(),
         };
-        handle_ipc(
+        let _ = handle_ipc(
             serde_json::json!({
                 "type": "ask_user_response",
                 "id": 1,

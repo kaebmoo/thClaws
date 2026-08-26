@@ -47,6 +47,7 @@ pub mod agent_defs;
 /// by an explicit workspace directory (see
 /// `dev-plan/25-thclaws-as-agent.md`).
 pub mod agent_runtime;
+pub mod aiserver;
 /// OpenAI-compatible HTTP API surface mounted on `--serve` (see
 /// `dev-plan/19-thclaws-openai-compat.md`).
 pub mod api_v1;
@@ -139,6 +140,7 @@ pub mod schedule;
 pub mod schedule_presets;
 pub mod sdk_mcp;
 pub mod secrets;
+pub mod sensitive;
 #[cfg(feature = "gui")]
 pub mod server;
 pub mod session;

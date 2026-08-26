@@ -96,6 +96,7 @@ const MANAGED: &[ProviderKind] = &[
     ProviderKind::OpenRouter,
     ProviderKind::TokenRouter,
     ProviderKind::AtlasCloud,
+    ProviderKind::MetaAi,
     ProviderKind::NineRouter,
     ProviderKind::Gemini,
     ProviderKind::DashScope,
@@ -104,6 +105,9 @@ const MANAGED: &[ProviderKind] = &[
     ProviderKind::ZAi,
     ProviderKind::AzureAIFoundry,
     ProviderKind::OpenAICompat,
+    // Optional master / virtual key — the proxy is usable without one, but
+    // installs that set `master_key` need somewhere to keep it.
+    ProviderKind::LiteLlm,
     ProviderKind::DeepSeek,
     ProviderKind::ThaiLLM,
     ProviderKind::Nvidia,
@@ -125,6 +129,10 @@ pub const SERVICE_KEYS: &[(&str, &str)] = &[
     ("brave-search", "BRAVE_SEARCH_API_KEY"),
     ("serpapi", "SERPAPI_API_KEY"),
     ("hal", "HAL_API_KEY"),
+    // VideoGen's native LTX path + the filmscript harness both read
+    // LTX_API_KEY off the process env (`media::provider::resolve_endpoint`),
+    // so it has to reach env the same way the search keys do.
+    ("ltx", "LTX_API_KEY"),
 ];
 
 /// Look up the env var for a non-LLM service key by account name.
@@ -468,6 +476,8 @@ mod tests {
         // Service keys (web search) surface in the same modal.
         assert!(names.contains(&"tavily"));
         assert!(names.contains(&"brave-search"));
+        // …and so do non-search runtime services like the LTX video key.
+        assert!(names.contains(&"ltx"));
     }
 
     #[test]
@@ -479,6 +489,9 @@ mod tests {
         let brave = s.iter().find(|k| k.provider == "brave-search").unwrap();
         assert_eq!(brave.kind, "service");
         assert_eq!(brave.env_var, "BRAVE_SEARCH_API_KEY");
+        let ltx = s.iter().find(|k| k.provider == "ltx").unwrap();
+        assert_eq!(ltx.kind, "service");
+        assert_eq!(ltx.env_var, "LTX_API_KEY");
         let anthropic = s.iter().find(|k| k.provider == "anthropic").unwrap();
         assert_eq!(anthropic.kind, "provider");
     }
@@ -490,6 +503,7 @@ mod tests {
             service_env_var("brave-search"),
             Some("BRAVE_SEARCH_API_KEY")
         );
+        assert_eq!(service_env_var("ltx"), Some("LTX_API_KEY"));
         assert_eq!(service_env_var("anthropic"), None);
         assert_eq!(service_env_var(""), None);
     }

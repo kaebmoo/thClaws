@@ -73,6 +73,104 @@ pub fn csv_to_markdown_table(csv: &str) -> String {
     out
 }
 
+/// `---` on its own line, 3+ dashes, unindented — the shape that is both
+/// a thematic break and a setext underline.
+fn is_rule_line(line: &str) -> bool {
+    let t = line.trim_end();
+    t.len() >= 3 && t.chars().all(|c| c == '-')
+}
+
+/// Given the index of an opening `---`, the index of the `---` that
+/// closes a YAML block — i.e. every line between the two is non-blank
+/// (a blank line means the author meant two separate rules) and the
+/// first one reads as YAML (`key:` or `- item`). `None` when the pair
+/// isn't a YAML block.
+fn yaml_block_end(lines: &[&str], open: usize) -> Option<usize> {
+    let first = lines.get(open + 1)?.trim_end();
+    let key = first.split_once(':').is_some_and(|(k, _)| {
+        !k.is_empty()
+            && k.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    });
+    if !key && !first.starts_with("- ") {
+        return None;
+    }
+    for (i, line) in lines.iter().enumerate().skip(open + 1) {
+        if line.trim().is_empty() {
+            return None;
+        }
+        if is_rule_line(line) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Pre-process markdown so `---` renders the way the author meant it.
+/// Two CommonMark traps, both of which the Files tab hits constantly:
+///
+/// - A paragraph line followed directly by `---` is a setext H2, so a
+///   section separator silently turns the line above it into a heading.
+///   Insert the blank line that makes it a thematic break instead.
+/// - A `---` pair with no blank line between the fences and their
+///   contents is YAML (frontmatter at the top of the file, metadata
+///   blocks further down) — the closing `---` underlines the last key,
+///   so `model: bar` becomes a heading. Re-emit those as a yaml code
+///   block, which also keeps one key per line.
+///
+/// Fenced code is left untouched, and so is a `---` after a list item /
+/// blockquote / table row (already a thematic break there — forcing a
+/// blank line would only loosen the list).
+fn normalize_rules(md: &str) -> String {
+    let lines: Vec<&str> = md.split('\n').collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 4);
+    let mut fence: Option<(char, usize)> = None;
+    let mut prev_blank = true;
+    let mut prev_paragraph = false;
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let body = line.trim_end_matches('\r');
+        let trimmed = body.trim_start();
+        let indent = body.len() - trimmed.len();
+        let run = |ch: char| trimmed.chars().take_while(|c| *c == ch).count();
+        if let Some((ch, len)) = fence {
+            if indent <= 3 && run(ch) >= len && trimmed.trim_end().chars().all(|c| c == ch) {
+                fence = None;
+            }
+        } else if indent <= 3 && (trimmed.starts_with("```") || trimmed.starts_with("~~~")) {
+            let ch = trimmed.as_bytes()[0] as char;
+            fence = Some((ch, run(ch)));
+        } else if indent == 0 && is_rule_line(trimmed) {
+            if prev_blank {
+                if let Some(end) = yaml_block_end(&lines, i) {
+                    out.push("```yaml".into());
+                    out.extend(lines[i + 1..end].iter().map(|l| (*l).to_string()));
+                    out.push("```".into());
+                    out.push(String::new());
+                    i = end + 1;
+                    prev_blank = true;
+                    prev_paragraph = false;
+                    continue;
+                }
+            } else if prev_paragraph {
+                out.push(String::new());
+            }
+        }
+        out.push(line.to_string());
+        prev_blank = trimmed.is_empty();
+        prev_paragraph = fence.is_none()
+            && indent == 0
+            && !trimmed.is_empty()
+            && !trimmed.starts_with(['-', '*', '+', '>', '#', '|', '='])
+            && !trimmed
+                .split_once(['.', ')'])
+                .is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+        i += 1;
+    }
+    out.join("\n")
+}
+
 /// Convert a markdown string to a full standalone HTML document
 /// (sandboxed iframe consumer). GFM extensions: tables, strikethrough,
 /// task lists, autolinks, footnotes, header ids. Raw HTML in source is
@@ -83,6 +181,28 @@ pub fn csv_to_markdown_table(csv: &str) -> String {
 /// frontend resolves `"system"` before sending so this function never
 /// inspects an OS signal. Default = dark for back-compat when caller
 /// passes anything else.
+/// Private-use codepoint standing in for a `<br>` while comrak runs.
+const BR_SENTINEL: &str = "\u{E000}";
+
+/// Swap literal `<br>` tags for a sentinel before rendering. Raw HTML is
+/// stripped for safety (`unsafe_ = false`), which is right for everything
+/// except this one tag: a markdown table cell has no other way to hold two
+/// lines, so `<br>` is how every editor and GitHub writes one — and stripping
+/// it turned those cells into "<!-- raw HTML omitted -->". Nothing else gets
+/// through; the sentinel is a private-use codepoint, and any that were already
+/// in the source are dropped first so a file can't smuggle one in.
+fn hide_line_breaks(md: &str) -> String {
+    let cleaned = md.replace(BR_SENTINEL, "");
+    regex::Regex::new(r"(?i)<br\s*/?>")
+        .unwrap()
+        .replace_all(&cleaned, BR_SENTINEL)
+        .into_owned()
+}
+
+fn restore_line_breaks(html: &str) -> String {
+    html.replace(BR_SENTINEL, "<br>")
+}
+
 pub fn render_markdown_to_html(md: &str, theme: &str) -> String {
     let mut opts = comrak::ComrakOptions::default();
     opts.extension.table = true;
@@ -92,7 +212,14 @@ pub fn render_markdown_to_html(md: &str, theme: &str) -> String {
     opts.extension.footnotes = true;
     opts.extension.header_ids = Some(String::new());
     opts.render.unsafe_ = false;
-    let body = comrak::markdown_to_html(md, &opts);
+
+    // Frontmatter is shown as a yaml block rather than dropped — the
+    // Files tab is a file viewer, so hiding part of the file is worse
+    // than showing it verbatim.
+    let body = restore_line_breaks(&comrak::markdown_to_html(
+        &normalize_rules(&hide_line_breaks(md)),
+        &opts,
+    ));
 
     let (fg, bg, muted, accent, code_bg, border, color_scheme) = if theme == "light" {
         (
@@ -151,10 +278,48 @@ pub fn render_markdown_to_html(md: &str, theme: &str) -> String {
 </style>
 </head><body>
 {body}
+{LINK_BRIDGE}
 </body></html>"##,
-        body = body
+        body = body,
+        LINK_BRIDGE = LINK_BRIDGE,
     )
 }
+
+/// Click bridge for links inside the rendered preview. The Files tab mounts
+/// this HTML in a sandboxed iframe and wants a link to a workspace file to
+/// open in the app rather than navigate the frame to the raw bytes.
+///
+/// In `--serve` the tab can intercept clicks from the outside (`srcdoc`
+/// inherits the page origin, so the parent may reach `contentDocument`).
+/// The desktop GUI serves the app from a custom scheme (`thclaws://`),
+/// where that inheritance doesn't hold and the parent is locked out — so
+/// the document reports its own clicks instead, via `postMessage`, which
+/// works regardless of origin. The frame is sandboxed WITHOUT
+/// `allow-same-origin` there, so this script can talk to the parent but
+/// can't touch it.
+///
+/// Inert when the sandbox withholds `allow-scripts` (the `--serve` case);
+/// the outside listener handles those clicks.
+const LINK_BRIDGE: &str = r##"<script>
+document.addEventListener("click", function (e) {
+  var el = e.target;
+  while (el && el.tagName !== "A") el = el.parentElement;
+  if (!el) return;
+  var href = el.getAttribute("href");
+  if (!href) return;
+  if (href.charAt(0) === "#") {
+    e.preventDefault();
+    var id = href.slice(1);
+    var t = document.getElementById(id) || document.getElementById(decodeURIComponent(id));
+    if (t) t.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+  e.preventDefault();
+  try {
+    window.parent.postMessage({ type: "thclaws-preview-link", href: href }, "*");
+  } catch (err) {}
+}, true);
+</script>"##;
 
 /// Base64-encode a binary file's bytes for the `file_content` envelope's
 /// `content` field. Pure convenience wrapper around the standard
@@ -218,6 +383,107 @@ mod tests {
         assert!(html.contains(">Hello"));
         assert!(html.contains(">world"));
         assert!(html.contains("color-scheme: light"));
+    }
+
+    /// The Files tab's desktop path can only intercept a link click if the
+    /// rendered document reports it — the preview frame is opaque there.
+    /// `<br>` is the only way a markdown table cell holds two lines (the
+    /// generated `index.md` puts a bold title above each summary that way), so
+    /// it survives the raw-HTML strip — and nothing else does.
+    #[test]
+    fn render_markdown_keeps_br_but_still_strips_other_html() {
+        let html = render_markdown_to_html(
+            "| A | B |\n|---|---|\n| x | **T**<br>body |\n\nthen <script>bad()</script> <b>bold</b>",
+            "dark",
+        );
+        assert!(html.contains("<strong>T</strong><br>body"), "{html}");
+        // The tags are gone (their text stays, escaped) — only the document's
+        // own link bridge is a live script.
+        assert!(!html.contains("<script>bad"), "script survived: {html}");
+        assert!(!html.contains("<b>bold</b>"), "raw html survived: {html}");
+    }
+
+    /// A file can't smuggle the sentinel in to forge a break.
+    #[test]
+    fn render_markdown_drops_a_planted_sentinel() {
+        let html = render_markdown_to_html(&format!("a{BR_SENTINEL}b"), "dark");
+        assert!(!html.contains(BR_SENTINEL), "{html}");
+        assert!(!html.contains("<br>"), "{html}");
+    }
+
+    #[test]
+    fn render_markdown_ships_the_link_bridge() {
+        let html = render_markdown_to_html("[a](docs/a.md)", "dark");
+        assert!(html.contains("thclaws-preview-link"), "{html}");
+        assert!(html.contains("window.parent.postMessage"), "{html}");
+        // Bridge sits after the body so it binds against a complete DOM.
+        let body = html.find("<a href=\"docs/a.md\"").expect("link rendered");
+        assert!(html.find("thclaws-preview-link").unwrap() > body);
+    }
+
+    #[test]
+    fn dashes_after_a_paragraph_render_as_a_rule_not_a_heading() {
+        let html = render_markdown_to_html("Intro line\n---\nNext line\n", "dark");
+        assert!(html.contains("<hr"), "no rule: {html}");
+        assert!(!html.contains("<h2"), "setext heading survived: {html}");
+    }
+
+    #[test]
+    fn dashes_inside_a_code_fence_are_left_alone() {
+        let html = render_markdown_to_html("```\nkey: v\n---\nkey2: v\n```\n", "dark");
+        assert!(!html.contains("<hr"), "rule leaked into code: {html}");
+        assert!(html.contains("---"), "fence content lost: {html}");
+    }
+
+    #[test]
+    fn list_items_keep_their_thematic_break() {
+        // `- a` + `---` is already a rule in CommonMark; the fix must not
+        // inject a blank line there and turn the list loose.
+        let html = render_markdown_to_html("- a\n- b\n---\n", "dark");
+        assert!(html.contains("<hr"), "no rule: {html}");
+        assert!(!html.contains("<li><p>"), "list went loose: {html}");
+    }
+
+    #[test]
+    fn frontmatter_renders_as_yaml_not_a_heading() {
+        let html = render_markdown_to_html("---\nname: foo\nmodel: bar\n---\n\nBody\n", "dark");
+        assert!(
+            !html.contains("<h2"),
+            "frontmatter became a heading: {html}"
+        );
+        assert!(html.contains("name: foo"), "frontmatter lost: {html}");
+        assert!(html.contains(">Body"), "body lost: {html}");
+    }
+
+    #[test]
+    fn mid_document_yaml_block_renders_as_yaml() {
+        // A `---` pair with no blank line against its contents is a
+        // metadata block wherever it sits, not two rules.
+        let html =
+            render_markdown_to_html("Intro\n\n---\nid: s01\nmodel: bar\n---\n\nAfter\n", "dark");
+        assert!(html.contains("<code"), "not a code block: {html}");
+        assert!(html.contains("id: s01"), "yaml lost: {html}");
+        assert!(!html.contains("<hr"), "rendered as rules: {html}");
+        assert!(html.contains(">After"), "body after the block lost: {html}");
+    }
+
+    #[test]
+    fn dashes_with_a_blank_line_stay_two_rules() {
+        let html = render_markdown_to_html("---\n\nname: foo\n\n---\n", "dark");
+        assert_eq!(html.matches("<hr").count(), 2, "not two rules: {html}");
+    }
+
+    #[test]
+    fn prose_between_dashes_is_not_treated_as_yaml() {
+        let html = render_markdown_to_html("A\n\n---\njust prose here\n---\n\nB\n", "dark");
+        assert!(!html.contains("<code"), "prose became yaml: {html}");
+        assert!(html.contains("just prose here"), "prose lost: {html}");
+    }
+
+    #[test]
+    fn setext_headings_still_work_with_a_short_underline() {
+        let html = render_markdown_to_html("Title\n-\n", "dark");
+        assert!(html.contains("<h2"), "setext heading lost: {html}");
     }
 
     #[test]
