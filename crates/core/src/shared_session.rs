@@ -1359,7 +1359,9 @@ async fn run_worker(
     // providers read on every `byte_stream.next()`. Live; subsequent
     // `/reload` paths re-apply via the same setter (see lines ~1877,
     // ~1965 where AppConfig::load is re-invoked).
-    crate::providers::set_stream_chunk_timeout_secs(config.stream_chunk_timeout_secs);
+    // Re-applied by the settings watcher below, so a Settings-menu toggle
+    // lands without a restart.
+    config.apply_process_globals();
 
     // Shared SkillTool store — we keep a handle in WorkerState so
     // `/skill install` can repopulate it without restarting.
@@ -1907,11 +1909,36 @@ async fn run_worker(
     {
         let skill_tx = events_tx.clone();
         let override_handle = agent.model_override_handle();
+        let fallback_model = config.skill_model_fallback.clone();
         crate::skills_state::set_resolver(move |spec| {
-            for candidate in spec.candidates() {
-                let Some(kind) = crate::providers::ProviderKind::detect(candidate) else {
+            // A skill's `model:` ages out — the vendor retires the id and the
+            // frontmatter still names it. Switching onto a model the
+            // catalogue no longer knows turns a working turn into a provider
+            // 400, so an unknown id is skipped like a missing key is, and the
+            // configured fallback gets its turn at the end of the list.
+            let mut candidates: Vec<String> = spec.candidates().to_vec();
+            if let Some(fb) = fallback_model.as_ref() {
+                if !candidates.iter().any(|c| c == fb) {
+                    candidates.push(fb.clone());
+                }
+            }
+            for candidate in &candidates {
+                // `provider/model` is how people write model ids in settings
+                // and skill frontmatter, but only a few prefixes are real
+                // routing prefixes (`openrouter/…`, `ollama/…`) — for the
+                // rest `detect` sees an unknown vendor and gives up. Retry on
+                // the segment after the slash so `deepseek/deepseek-v4-flash`
+                // resolves like the bare id it is.
+                let Some(kind) = crate::providers::ProviderKind::detect(candidate).or_else(|| {
+                    candidate
+                        .split_once('/')
+                        .and_then(|(_, rest)| crate::providers::ProviderKind::detect(rest))
+                }) else {
                     continue;
                 };
+                if !crate::model_catalogue::is_known_model(candidate) {
+                    continue;
+                }
                 // Usable if a local key exists OR the gateway proxy can serve
                 // this (featured) candidate — so a proxy-only user gets the
                 // skill's recommended model instead of falling through.
@@ -3438,9 +3465,7 @@ async fn run_worker(
                 let prev_model = state.config.model.clone();
                 match crate::config::AppConfig::load() {
                     Ok(new_config) => {
-                        crate::providers::set_stream_chunk_timeout_secs(
-                            new_config.stream_chunk_timeout_secs,
-                        );
+                        new_config.apply_process_globals();
                         state.config = new_config;
                     }
                     Err(e) => {
@@ -3579,9 +3604,7 @@ async fn run_worker(
                 // from the NEW workspace win.
                 match crate::config::AppConfig::load() {
                     Ok(new_config) => {
-                        crate::providers::set_stream_chunk_timeout_secs(
-                            new_config.stream_chunk_timeout_secs,
-                        );
+                        new_config.apply_process_globals();
                         state.config = new_config;
                     }
                     Err(e) => {

@@ -260,7 +260,7 @@ enum Command {
     /// pod. Sessions / memory / team-runtime on the pod side are
     /// preserved across deploys. See dev-plan/28 for the contract.
     Deploy {
-        /// Pod base URL (e.g. https://co-test.thcompany.ai). Required.
+        /// Pod base URL (e.g. https://agent.example.com). Required.
         #[arg(long)]
         pod: String,
         /// Bearer token for the pod's /v1/* API. Falls back to
@@ -722,6 +722,11 @@ async fn main() {
     secrets::load_into_env();
     endpoints::load_into_env();
     load_dotenv();
+    // Co-located AI Server (DGX Spark appliance): if the loopback discovery
+    // endpoint answers, point the `litellm` provider at its gateway. Runs
+    // after the three env layers above so it can only fill in what none of
+    // them set. A no-op (one refused loopback connection) everywhere else.
+    thclaws_core::aiserver::bootstrap().await;
     let _ = Sandbox::init();
 
     // M6.45 / #79-followup: warn if there are additional thclaws

@@ -7,6 +7,119 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.116.0] — 2026-08-25
+
+Qwen-Image 3.0 joins the media models, a co-located AI Server is auto-detected and used as the LLM gateway, and the LTX API key moves into the Settings modal. A round of OpenAI-compat, Windows file-link and Task fan-out fixes lands alongside.
+
+### Added
+- **Qwen-Image 3.0 and Qwen-Image 3.0 Pro join the media models.** The two new DashScope image models land in the catalogue alongside LTX 2.3 and LTX 2.5.
+- **A co-located AI Server is auto-detected and used as the LLM gateway.** When an AI Server sits alongside thClaws, it is found automatically and the LLM is routed through its gateway.
+- **The LTX API key is now settable in the Settings modal.** LTX can be configured from Settings alongside the other media providers.
+
+### Changed
+- **The model catalogue is refreshed with current provider pricing.** The four previously unpriced DashScope models now carry prices, and the catalogue is refreshed from the provider APIs.
+
+### Fixed
+- **Linked files render on Windows.** Path comparison is now separator-agnostic, so linked files render correctly on Windows.
+- **OpenAI-compat context-window handling follows the server and retries.** The local clamp is sized from the server, requests refused as over-context are resized and retried, and thinking is no longer forced off.
+- **OpenAI-compat answers are no longer stranded in the thinking channel.** Assembly now delivers them instead of leaving them stuck in the thinking channel.
+- **Task calls now fan out concurrently.** The prompt lets the model issue parallel Task calls instead of running them one at a time.
+
+## [0.115.0] — 2026-08-20
+
+LTX 2.5 joins the media models, third-party agent prompts import as native thClaws packages, and LiteLLM becomes a first-class self-hosted provider. A new FolderIndex tool and a round of shell, markdown-preview and OpenAI fixes land alongside.
+
+### Added
+- **LTX 2.5 now ships alongside LTX 2.3, selectable everywhere.** The new media model id sits next to 2.3 in the catalogue and is carried through to the web copy and Appendix A.
+- **FolderIndex — a deterministic, resumable index of a folder.** The new tool builds a stable index of a folder and resumes an existing index instead of rebuilding it each run.
+- **LiteLLM as a first-class self-hosted provider.** A self-hosted LiteLLM endpoint can be selected as a provider like any built-in one.
+- **Third-party agent prompts convert into thClaws packages.** The agent importer can turn a third-party agent's prompt into a native thClaws package.
+- **Thai capability summary and the full prompt in the import manual.** Agent import now shows the agent's capabilities summarised in Thai and exposes the complete prompt it will run.
+- **`/models` asks a user-pointed endpoint and names it when it fails.** The command can be pointed at a user's endpoint, and a failure now names which endpoint failed.
+
+### Changed
+- **A workspace pull is narrated instead of going quiet for minutes.** The agent narrates the pull's progress so a long update doesn't read as a hang.
+- **A skill's model recommendation survives a retired id.** Recommendations keep working when the model id they point at has been retired.
+
+### Fixed
+- **The Shell tab's PTY is told it is a 256-colour terminal.** Colour-probing programs now see a 256-colour terminal and render correctly.
+- **Stop now kills the command, not just the process it can see.** Bash's Stop terminates the actual running command rather than only the visible process.
+- **Markdown preview keeps `<br>` in table cells, and its links resolve.** Table cells no longer drop `<br>` line breaks, and preview links resolve correctly.
+- **The audit desk paints before hydrating, and Stop unwedges the pane.** It renders before loading data, and Stop can recover a stuck pane.
+- **The GUI-shell preview no longer hangs.** It answered with the wrong key — so every call hung — and handed the bridge a URL where it wants a path; both are corrected.
+- **OpenAI usage is no longer dropped on an unexpected frame shape.** Usage is preserved even when the response frame isn't the shape expected.
+
+## [0.114.0] — 2026-08-11
+
+Every OpenAI model in the picker now actually works: the `gpt-5.6` family accepts tools, the `-pro` tier reaches the endpoint that serves it, and nine models that OpenAI retired are gone for good.
+
+### Fixed
+- **`gpt-5.6-luna`, `-sol` and `-terra` refused every request that carried tools.** OpenAI defaults `reasoning_effort` to a non-'none' value for that family and then rejects the combination with function tools, so any agentic turn failed outright with an HTTP error. Nothing in thClaws sets that field — the default is OpenAI's — so the request is now retried once with `reasoning_effort: none`, which is what OpenAI's own error message asks for. The retry keys off that specific refusal rather than a list of model names, so the next model with the same behaviour is handled without a release. These models were unaffected through OpenRouter.
+- **The whole `-pro` tier failed on every turn.** `gpt-5-pro`, `gpt-5.2-pro`, `gpt-5.4-pro`, `gpt-5.5-pro` and their dated snapshots are served only by OpenAI's Responses API and answer Chat Completions with "This is not a chat model". They are now routed to the Responses endpoint, where they work.
+- **Nine retired OpenAI models are removed, and they stay removed.** The `*-chat-latest` and older `*-codex` ids answer 404 on both endpoints, but OpenAI's model listing still advertises them — so a `make catalogue` refresh kept putting them back after each removal. The refresh now excludes them by name.
+- **The OpenAI Responses provider pointed at models that no longer exist.** All three of its catalogue entries were retired ids, including the one it used as its default — selecting the provider without naming a model failed on the first turn. It now carries `gpt-5.3-codex`.
+
+## [0.113.0] — 2026-08-11
+
+46 OpenRouter models that had quietly gone missing are back in the picker, and Meta AI joins as a bring-your-own-key provider.
+
+### Added
+- **Meta AI (`api.meta.ai`) is available with your own key.** Set `META_API_KEY`, pick a `meta/muse-spark-*` model, and it works like any other provider — three models, 1M context. Bring-your-own-key only: there is no gateway route, so a hosted workspace cannot reach it without your key.
+- **46 OpenRouter models that were missing are now listed**, among them `claude-opus-5`, `claude-sonnet-5`, the `gpt-5.6` family, `grok-4.5`, `glm-5.2`, `qwen3.8-max`, `kimi-k3` and `deepseek-v4-flash-0731`. They were never unavailable — OpenRouter served them all along and typing the id worked — but they did not appear in the picker, so in practice you had to already know the name.
+
+### Fixed
+- **The catalogue can no longer fall behind OpenRouter without anyone noticing.** `make catalogue` refreshes every provider from its live API, but OpenRouter was filtered down to a single entry: the refresh could retire dead routes and never add new ones. Adding was a separate command nobody remembered to run, which is how the list drifted 46 models behind. That command is now part of `make catalogue` itself, so a release ships a current list by construction rather than by recollection. Batch-only and variant routes stay out — they are not interactive chat, and 60 of them would have buried the models people actually pick.
+- **A truncated API key can no longer be published to the gateway.** The secret-sync step copied whatever `.env` held; a two-character value made it to the live gateway and armed a 401 on every request to that provider. Implausibly short values are now refused by name before anything is written.
+
+## [0.112.0] — 2026-08-11
+
+Context windows across the catalogue are now sourced rather than guessed — including 112 rows that had been advertising eight times the space they actually have — the gateway proxies only the providers it sells, and an MCP server that installs its dependencies on first launch no longer times out doing so.
+
+### Changed
+- **The gateway proxies only the ten Featured providers.** `qwen-cloud`, `thaillm` and the Groq **LLM** segment have been withdrawn from the routed set. What the gateway sells and what it proxies had drifted apart — thirteen against ten — which meant a provider outside the sold tier was being proxied, metered and marked up without ever having been offered. **If you use these models on a hosted workspace they will stop working**; on the desktop with your own key nothing changes, since what was withdrawn is the proxy, not the provider. Groq's `/groq/audio` (Whisper) route is unaffected and still billed as before.
+- **Model pickers: a guessed context window is shown with a question mark.** Any model whose window the catalogue could not source from the provider's own documentation now renders as e.g. `200k?` rather than passing as a citation.
+
+### Fixed
+- **Catalogue: context windows are sourced at scale, and several were badly wrong.** Every remaining guess was checked against the provider's own `/v1/models`, models.dev, and — for DashScope — the published pricing tiers and console model cards. Guesses among the Featured providers fell from 70 to 3, and 340 rows across the whole catalogue gained a real source. The most consequential correction: all 112 `atlascloud` rows claimed a 1M window because that was the provider block's default, while the endpoint serves 131k for Qwen3-235B and 200k for the Claude 4 family. Overstating a window is the direction that breaks requests outright — the engine packs a prompt the endpoint then rejects — so those rows were failing rather than merely compacting early. Two models that no longer exist upstream (`openrouter/openai/gpt-5.3-chat`, `minimax/MiniMax-M2.1-highspeed`) were removed.
+- **Catalogue: the writer's context-window guesses are marked instead of hidden.** When the writer filled in a number because no source answered, that value was silently absorbed into the catalogue. It is now tagged as a guess, so the pickers and the appendix can surface the uncertainty instead of a fresh `make catalogue` quietly rebuilding the debt.
+- **MCP: the initialize handshake gets its own timeout.** A server launched through `uvx`/`npx` downloads its whole dependency tree before it can answer anything — one such server needs ~38 s on a cold cache and half a second afterwards. The handshake shared the 30-second budget used for tool calls, so that first launch always failed. It now has its own, longer budget (overridable via `THCLAWS_MCP_INIT_TIMEOUT_SECS`), while tool calls keep the short one — a handshake that takes minutes on first run is normal, a tool call that does is a hung server.
+- **Cloud sync: archive extraction is bounded in where it writes and how much.** Extraction now refuses entries that would escape the workspace root and stops reading once the decompressed stream passes its size cap, rather than after writing it.
+
+## [0.111.0] — 2026-08-10
+
+Featured-provider context windows are now sourced from real data instead of guesses, high-severity frontend vulnerabilities are patched, and the built-in manual learns to generate its own appendix from the catalogue.
+
+### Fixed
+- **Catalogue: featured-provider context windows are sourced rather than guessed.** 120 rows across nine providers were resolved from the provider's own API, LiteLLM, or OpenRouter, correcting 91 values. Rows that resisted every source now carry an explicit "context unverified" marker instead of passing silently as fact, so a floor is no longer mistaken for a specification. (The writer can still fall back to a provider default for newly-added rows; that is tracked separately.)
+- **Cloud sync: mistyped flags are refused instead of silently ignored.** A cloud command given an unrecognised flag now errors out rather than proceeding with missing intent.
+- **API: artifact snapshot outcomes are machine-readable.** `GET /v1/sessions/{id}/artifacts` used to answer 404 identically whether a run never requested artifacts, requested them and failed, or wrote an unreadable manifest — the failure itself went only to the daemon's stderr. Each outcome now has its own answer, so an orchestrator no longer has to read server logs to find out what happened. [#191](https://github.com/thClaws/thClaws/issues/191)
+- **Frontend dependencies: four high-severity advisories patched.** Vulnerable packages in the frontend lockfile were updated to their patched versions.
+
+### Changed
+- **Manual: Appendix A is generated from the model catalogue, and now lists context windows.** The hand-maintained version covered 4 of the gateway's 16 providers and had gone two months stale; it is now a view over the catalogue (652 models) carrying each model's context window beside its price. A window nobody published renders as `131k?` rather than as a citation, and a release gate fails if the appendix drifts from the catalogue again.
+- **Manual: Chapter 22 is now a tombstone instead of a deletion.** The retired chapter shows a short notice rather than breaking any existing bookmarks or links into it.
+
+## [0.110.0] — 2026-08-09
+
+Thai PII gets masked before it ever reaches the model, the dashboard shows plan expiry on every workspace card, and a stale context-window guess no longer freezes the catalogue.
+
+### Added
+- **Sensitive-data masking for Thai PII.** A new engine-wide pipeline detects, tokenizes, and masks Thai personally identifiable information — ID numbers, phone numbers, and other sensitive patterns — before the model ever sees it. A Settings toggle controls masking per workspace; when unmasked values are put back into the output, the model is briefed about what it never saw.
+- **Cloud sync numbering and revision tracking.** `/cloud push` and `/cloud pull` now assign incrementing sequence numbers, and `/cloud revision` shows the sync history.
+- **Dashboard: plan expiry on workspace cards.** Each workspace card now shows when its subscription or one-shot plan expires.
+- **Marketplace: last-30-days skill filter.** The marketplace now supports listing skills published in the last 30 days.
+
+### Fixed
+- **Model catalogue: a guessed context window no longer freezes permanently.** A one-time guess from a failed provider probe no longer hard-locks the catalogue entry. [#190](https://github.com/thClaws/thClaws/issues/190)
+- **Sensitive-data masking: false positives reduced and arming corrected.** The Thai PII rules were refined for production use and masking now arms at the correct invocation boundaries.
+- **File rendering: YAML `---` blocks detected anywhere, not just frontmatter.** Frontmatter-style `---` fences inside arbitrary files are now treated as YAML separators instead of being missed.
+- **File rendering: `---` rendered as a horizontal rule, not a setext heading.** A lone `---` line no longer turns the preceding text into an `<h2>`.
+- **Billing: lapsed one-shot plans can be renewed.** A plan that expired while still in the one-shot window is now renewable.
+- **Plugins: conventional directory layouts counted in contribution stats.** Plugin directories following conventional layouts are now tallied correctly.
+
+### Changed
+- **The retired thCompany/Paperclip product line is gone.** The `paperclip-adapter` package source, its technical-manual page, and its public-mirror sync wiring were all removed; references to it were stripped from engine comments and the rest of the manual. The `POST /agent/run` and `GET /v1/agent/info` endpoints it used are unaffected — they stay as generic orchestrator surfaces.
+
 ## [0.109.0] — 2026-08-03
 
 Spark Guru lands as a Thai-language DGX assistant that diagnoses and tunes local inference engines, vLLM and llama.cpp get first-class provider support, and the managed browser is now off by default for new workspaces.

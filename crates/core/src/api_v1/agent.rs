@@ -3,10 +3,9 @@
 //! Where `/v1/chat/completions` is the OpenAI-compatible surface for
 //! external clients (Cursor, Aider, n8n, …), `/agent/run` is the
 //! agent-shaped surface for orchestrators that treat thClaws as a
-//! sovereign agent peer (paperclip-adapter / thcompany). It takes an
-//! explicit `workspace_dir` and runs the full skill / MCP / plugin /
-//! policy bootstrap scoped to that directory — see
-//! `dev-plan/25-thclaws-as-agent.md`.
+//! sovereign agent peer. It takes an explicit `workspace_dir` and runs
+//! the full skill / MCP / plugin / policy bootstrap scoped to that
+//! directory — see `dev-plan/25-thclaws-as-agent.md`.
 //!
 //! Wire shape mirrors `/v1/chat/completions` for the parts that map
 //! cleanly (sync JSON, SSE stream, `x_callback` async) but emits
@@ -40,12 +39,10 @@ pub struct AgentRunRequest {
     /// invokes. Validated against `THCLAWS_AGENT_WORKSPACE_ROOT` when
     /// set (see [`crate::agent_runtime::validate_workspace_dir`]).
     ///
-    /// dev-plan/26 Phase B: optional. When absent or empty, the
-    /// daemon falls through to its own current working directory.
-    /// Freelancer-mode pods (dev-plan/26) omit the field so the pod's
-    /// own `/workspace` is used. Employee-mode adapters
-    /// (paperclip-adapter for `thclaws_local`, per dev-plan/25)
-    /// always supply it.
+    /// Optional. When absent or empty, the daemon falls through to its
+    /// own current working directory — which is what a single-purpose
+    /// pod wants (its own `/workspace`). An orchestrator driving many
+    /// workspaces from one daemon supplies it explicitly.
     #[serde(default)]
     pub workspace_dir: Option<String>,
     /// Optional extra system prompt. Appended to the thClaws default
@@ -471,6 +468,9 @@ fn snapshot_collect_files(
     workspace_dir: &std::path::Path,
     session_id: &str,
 ) {
+    // No patterns ⇒ nothing was requested, so nothing is written. The GET
+    // then 404s with `snapshot_not_requested`, which is how a caller tells
+    // "never asked" from "asked and it broke" (#191).
     let Some(patterns) = patterns.filter(|p| !p.is_empty()) else {
         return;
     };
@@ -481,7 +481,20 @@ fn snapshot_collect_files(
             session_id,
             m.skipped.len()
         ),
-        Err(e) => eprintln!("[api_v1] artifacts snapshot failed for {session_id}: {e}"),
+        Err(e) => {
+            // Still non-fatal to the run, but no longer stderr-only: persist
+            // a `failed` manifest so the orchestrator that dispatched this
+            // job can see the outcome over HTTP.
+            eprintln!("[api_v1] artifacts snapshot failed for {session_id}: {e}");
+            if let Err(e2) = super::artifacts::record_snapshot_failure(
+                workspace_dir,
+                session_id,
+                patterns,
+                &e.to_string(),
+            ) {
+                eprintln!("[api_v1] artifacts: couldn't record the failure for {session_id}: {e2}");
+            }
+        }
     }
 }
 

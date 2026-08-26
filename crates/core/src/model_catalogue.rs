@@ -165,7 +165,27 @@ impl ModelEntry {
         }
         self.input_per_mtok.is_some() || self.output_per_mtok.is_some()
     }
+
+    /// True when this row's `context` is the provider block's blanket
+    /// default rather than a figure anyone published.
+    ///
+    /// Both catalogue writers stamp [`CONTEXT_UNVERIFIED_MARK`] when they
+    /// have to guess, and the marker is the only reliable signal — a guess
+    /// can coincide with a real window, so the number can't tell you. Model
+    /// pickers use this to render `200k?` instead of presenting a floor as
+    /// a specification (dev-plan/57).
+    pub fn context_unverified(&self) -> bool {
+        self.source
+            .as_deref()
+            .is_some_and(|s| s.contains(CONTEXT_UNVERIFIED_MARK))
+    }
 }
+
+/// Stamped into a row's `source` by both catalogue writers
+/// (`scripts/refresh-model-catalogue.py` and `bin/catalogue_seed.rs`)
+/// whenever the context window falls back to the provider default.
+/// Changing this string means changing it in all three places.
+pub const CONTEXT_UNVERIFIED_MARK: &str = "(context unverified)";
 
 /// Per-token-type usage counts for one agent run. Fed into
 /// [`Catalogue::compute_cost_usd`]. All fields default to 0 so callers
@@ -797,6 +817,23 @@ pub fn effective_context_window(model: &str) -> u32 {
 /// `max_tokens` against this so we don't hit per-model 400 errors
 /// (e.g. gpt-4.1 = 32768). `None` means no documented limit was
 /// found — caller picks a safe default.
+/// Whether the catalogue knows this model at all (alias + vendor-prefix
+/// resolution included). Used before switching onto a *recommended*
+/// model — a skill's `model:` field ages out when the vendor retires
+/// the id, and swapping onto a dead model turns a working turn into a
+/// provider 400.
+pub fn is_known_model(model: &str) -> bool {
+    let cat = EffectiveCatalogue::load();
+    if cat.overrides.contains_key(model) {
+        return true;
+    }
+    cat.cache
+        .as_ref()
+        .and_then(|c| c.find_entry(model))
+        .or_else(|| cat.baseline.find_entry(model))
+        .is_some()
+}
+
 pub fn effective_max_output(model: &str) -> Option<u32> {
     let cat = EffectiveCatalogue::load();
     cat.lookup_max_output_override(model)
@@ -1000,6 +1037,7 @@ pub fn provider_kind_name(k: crate::providers::ProviderKind) -> &'static str {
     match k {
         ProviderKind::Anthropic => "anthropic",
         ProviderKind::AtlasCloud => "atlascloud",
+        ProviderKind::MetaAi => "meta",
         ProviderKind::NineRouter => "9router",
         // Must match `ProviderKind::name()` so a round-trip via
         // `detect_provider()` → `provider_kind_name(kind)` returns
@@ -1025,6 +1063,7 @@ pub fn provider_kind_name(k: crate::providers::ProviderKind) -> &'static str {
         ProviderKind::LMStudio => "lmstudio",
         ProviderKind::VLlm => "vllm",
         ProviderKind::LlamaCpp => "llamacpp",
+        ProviderKind::LiteLlm => "litellm",
         ProviderKind::AzureAIFoundry => "azure",
         ProviderKind::OpenAICompat => "openai-compat",
         ProviderKind::DeepSeek => "deepseek",
@@ -1259,6 +1298,54 @@ mod canonical_id_tests {
 mod tests {
     use super::*;
 
+    /// The marker is the only signal that separates a guessed window from a
+    /// sourced one — the number can't, since a guess can coincide with a real
+    /// value. Asserted against the shipped catalogue rather than a fixture so
+    /// it fails if a writer stops stamping, which is the failure that lets a
+    /// guess ossify into an apparent fact.
+    #[test]
+    fn unverified_context_is_distinguishable_in_the_shipped_catalogue() {
+        let c = Catalogue::from_json_str(BASELINE_JSON).unwrap();
+        let mut marked = 0usize;
+        let mut sourced = 0usize;
+        for pc in c.providers.values() {
+            for e in pc.models.values() {
+                if e.context.is_none() {
+                    continue;
+                }
+                if e.context_unverified() {
+                    marked += 1;
+                } else {
+                    sourced += 1;
+                }
+            }
+        }
+        assert!(marked > 0, "no row carries {CONTEXT_UNVERIFIED_MARK}");
+        assert!(
+            sourced > 0,
+            "every row reads as a guess — marker over-applied"
+        );
+
+        // A row's own source decides it; nothing infers from the value.
+        let anth = c.providers.get("anthropic").unwrap();
+        let opus = anth.models.get("claude-opus-4-8").unwrap();
+        assert!(!opus.context_unverified(), "{:?}", opus.source);
+
+        let mut guess = ModelEntry::default();
+        guess.source = Some(format!(
+            "https://example/v1/models {CONTEXT_UNVERIFIED_MARK}"
+        ));
+        assert!(guess.context_unverified());
+        // The marker survives a pricing tag being appended after it.
+        guess.source = Some(format!(
+            "https://example/v1/models {CONTEXT_UNVERIFIED_MARK} + litellm:x"
+        ));
+        assert!(guess.context_unverified());
+        // No source at all is not a claim of verification either way, but it
+        // must not read as marked.
+        assert!(!ModelEntry::default().context_unverified());
+    }
+
     #[test]
     fn baseline_parses() {
         let c = Catalogue::from_json_str(BASELINE_JSON).expect("baseline catalogue must parse");
@@ -1277,19 +1364,32 @@ mod tests {
         }
     }
 
+    /// The model used below is a live catalogue row, so its window changes
+    /// whenever upstream does — Sonnet 4.6 went 200k → 1M when its context was
+    /// sourced properly, and a pinned literal here turned that data fix into
+    /// three red tests. What these tests own is the *layering*: which layer
+    /// answered and that the id resolved at all. The number is the
+    /// catalogue's business, so read it from the catalogue.
     #[test]
     fn lookup_finds_exact_model() {
         let c = baseline_only();
+        let want = c
+            .baseline
+            .lookup_context("claude-sonnet-4-6")
+            .expect("model must exist in the shipped catalogue");
         let (n, src) = effective_context_window_with(&c, "claude-sonnet-4-6");
-        assert_eq!(n, 200_000);
+        assert_eq!(n, want);
         assert_eq!(src, ContextSource::Catalogue);
     }
 
     #[test]
     fn lookup_strips_vendor_prefix() {
         let c = baseline_only();
+        // The property is that the prefixed id resolves to the same row as the
+        // bare one — not that either equals some particular number.
+        let (bare, _) = effective_context_window_with(&c, "claude-sonnet-4-6");
         let (n, src) = effective_context_window_with(&c, "openrouter/anthropic/claude-sonnet-4-6");
-        assert_eq!(n, 200_000);
+        assert_eq!(n, bare);
         assert_eq!(src, ContextSource::Catalogue);
     }
 
@@ -1443,10 +1543,12 @@ mod tests {
 
     #[test]
     fn override_removal_falls_back_to_catalogue() {
-        // Empty override map → catalogue layer wins as before.
+        // Empty override map → catalogue layer wins as before. As above, the
+        // catalogue owns the number; this test owns which layer answered.
         let eff = baseline_only();
+        let want = eff.baseline.lookup_context("claude-sonnet-4-6").unwrap();
         let (n, src) = effective_context_window_with(&eff, "claude-sonnet-4-6");
-        assert_eq!(n, 200_000);
+        assert_eq!(n, want);
         assert_eq!(src, ContextSource::Catalogue);
     }
 
@@ -2028,6 +2130,39 @@ mod tests {
         assert!(
             Catalogue::from_json_str(v3).is_none(),
             "v3 must not load against v4 binary — falls through to compiled-in baseline"
+        );
+    }
+}
+
+#[cfg(test)]
+mod known_model_tests {
+    use super::is_known_model;
+
+    /// A skill's `model:` ages out — the vendor retires the id while the
+    /// frontmatter still names it — and switching onto an id the catalogue no
+    /// longer carries turns a working turn into a provider 400. Callers gate
+    /// on this, so it has to recognise the id in the shapes people actually
+    /// write: bare, and vendor-prefixed.
+    #[test]
+    fn known_ids_are_recognised_bare_and_vendor_prefixed() {
+        assert!(is_known_model("deepseek-v4-flash"));
+        assert!(is_known_model("deepseek/deepseek-v4-flash"));
+        assert!(is_known_model("gpt-4.1-mini"));
+        assert!(is_known_model("openai/gpt-4.1-mini"));
+        assert!(!is_known_model("gpt-4o-mini-2024-07-18-retired"));
+        assert!(!is_known_model(""));
+    }
+
+    /// The fallback is appended to the candidate list and then runs the same
+    /// gauntlet as every other candidate — so a fallback the catalogue does
+    /// not know is silently skipped, and the feature quietly does nothing.
+    #[test]
+    fn the_configured_fallback_survives_its_own_known_model_check() {
+        assert!(
+            is_known_model(crate::config::DEFAULT_SKILL_MODEL_FALLBACK),
+            "DEFAULT_SKILL_MODEL_FALLBACK ({}) is not in the catalogue, so the \
+             skill-model fallback would be skipped by is_known_model",
+            crate::config::DEFAULT_SKILL_MODEL_FALLBACK
         );
     }
 }

@@ -52,6 +52,13 @@ pub fn cli_model_override() -> Option<String> {
     CLI_MODEL_OVERRIDE.read().ok().and_then(|g| g.clone())
 }
 
+/// Where a skill's model recommendation lands when its own candidates
+/// are gone: cheap, fast, vision-capable, and — the reason it isn't a
+/// DeepSeek model — NOT a thinking model. Swapping mid-turn into one
+/// sends it a history whose earlier assistant turn carries no
+/// `reasoning_content`, which DeepSeek rejects outright.
+pub const DEFAULT_SKILL_MODEL_FALLBACK: &str = "gpt-4.1-mini";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct AppConfig {
@@ -262,6 +269,15 @@ pub struct AppConfig {
     #[serde(default, alias = "halEnabled")]
     pub hal_enabled: bool,
 
+    /// dev-plan/55: detect Thai PII (national ID, phone, plate, titled
+    /// names, user dictionary) and swap it for `[ID_1]`-style placeholders
+    /// before text leaves the machine, restoring the real values in the
+    /// reply. Off by default — the detector (`crate::sensitive`) is tuned
+    /// for precision over recall, but masking rewrites the prompt, so it
+    /// stays opt-in. settings.json `sensitive.enabled`.
+    #[serde(default)]
+    pub sensitive_enabled: bool,
+
     /// Engine-managed browser automation (docs/browser, Phase 0+1).
     /// When `true`, `AppConfig::load()` injects the official Playwright
     /// MCP server as a synthetic engine-managed stdio config named
@@ -311,6 +327,16 @@ pub struct AppConfig {
     /// skill name.
     #[serde(default)]
     pub extract_save_skill_models: Option<crate::skills::SkillModelSpec>,
+
+    /// Last-resort model for a skill's `model:` recommendation. Skills
+    /// ship a model id in their frontmatter and vendors retire ids, so
+    /// an older skill can name a model that no longer exists — swapping
+    /// onto it 400s the whole turn. When every candidate is unknown to
+    /// the catalogue (or has no usable key), this one is tried before
+    /// giving up and keeping the session's own model. Same usability
+    /// test as any candidate: unusable ⇒ skipped, never a hard failure.
+    #[serde(default)]
+    pub skill_model_fallback: Option<String>,
 
     /// Override the model for the built-in `translator` subagent.
     /// AgentDef.model is a single string (no priority list), so this
@@ -598,11 +624,13 @@ impl Default for AppConfig {
             openrouter_free_only: false,
             image_tools_enabled: false,
             hal_enabled: false,
+            sensitive_enabled: false,
             browser_enabled: default_browser_enabled(),
             browser_headless: None,
             gateway_use_for: Vec::new(),
             gateway_proxy: false,
             extract_save_skill_models: None,
+            skill_model_fallback: Some(DEFAULT_SKILL_MODEL_FALLBACK.to_string()),
             translator_subagent_model: None,
             remote_agent_url: None,
             gui_shell: None,
@@ -724,6 +752,11 @@ pub struct ProjectConfig {
     /// the small set of built-in skills with special model needs).
     #[serde(rename = "extract_save_skill_models", alias = "extractSaveSkillModels")]
     pub extract_save_skill_models: Option<crate::skills::SkillModelSpec>,
+    /// Last-resort model when a skill's recommended model is unknown or
+    /// unusable. Defaults to `gpt-4.1-mini`; set to `""`
+    /// to disable the fallback and keep the session's model instead.
+    #[serde(rename = "skill_model_fallback", alias = "skillModelFallback")]
+    pub skill_model_fallback: Option<String>,
     /// Override the model for the built-in `translator` subagent. See
     /// `AppConfig::translator_subagent_model` for design rationale.
     #[serde(
@@ -800,6 +833,10 @@ pub struct ProjectConfig {
     /// `WebScrape`). See [`AppConfig::hal_enabled`].
     #[serde(rename = "halEnabled")]
     pub hal_enabled: Option<bool>,
+    /// Sensitive-data masking — `{ "enabled": true }`. Nested (not a bare
+    /// flag) because dev-plan/55 §6 adds mode routing here later:
+    /// tokenize (mask + restore) vs gate (refuse to send).
+    pub sensitive: Option<SensitiveSettings>,
     /// Engine-managed Playwright browser automation. See
     /// [`AppConfig::browser_enabled`].
     #[serde(rename = "browserEnabled")]
@@ -950,6 +987,7 @@ impl Default for ProjectConfig {
             plan_context_strategy: None,
             skills_listing_strategy: None,
             extract_save_skill_models: None,
+            skill_model_fallback: None,
             translator_subagent_model: None,
             thinking_budget: None,
             search_engine: None,
@@ -963,6 +1001,7 @@ impl Default for ProjectConfig {
             shell_tab_enabled: Some(false),
             image_tools_enabled: Some(false),
             hal_enabled: Some(false),
+            sensitive: None,
             browser_enabled: None,
             browser_headless: None,
             sso_sign_in_enabled: None,
@@ -994,6 +1033,33 @@ pub struct KmsSettings {
     /// every name in the list gets its `index.md` spliced into the
     /// system prompt.
     pub active: Vec<String>,
+}
+
+impl AppConfig {
+    /// Push the settings that live in process-wide state, rather than being
+    /// read from an `AppConfig` at use time. Call once per surface right
+    /// after loading (REPL, `-p`, GUI/serve worker) and again whenever the
+    /// settings file is re-read.
+    ///
+    /// One function on purpose: these hooks used to be pasted per entry
+    /// point, and both had already drifted — `-p` calls
+    /// `run_print_mode_with` directly, so a hook on the `run_print_mode`
+    /// wrapper armed nothing (dev-plan/55 masking shipped off in print mode,
+    /// and `stream_chunk_timeout_secs` was never applied there at all).
+    pub fn apply_process_globals(&self) {
+        crate::providers::set_stream_chunk_timeout_secs(self.stream_chunk_timeout_secs);
+        // dev-plan/55 PII masking. The custom-dictionary term list has no
+        // settings field yet (plan step 1's CSV) — empty until it does.
+        crate::sensitive::configure(self.sensitive_enabled, Vec::new());
+    }
+}
+
+/// dev-plan/55: `sensitive` block in settings.json — PII masking before
+/// text leaves the machine. See [`AppConfig::sensitive_enabled`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SensitiveSettings {
+    pub enabled: Option<bool>,
 }
 
 /// dev-plan/49: `bash` block in settings.json — OS-level Bash confinement.
@@ -1184,6 +1250,7 @@ impl ProjectConfig {
   "windowHeight": null,
   "guiScale": null,
   "extract_save_skill_models": null,
+  "skill_model_fallback": "gpt-4.1-mini",
   "translator_subagent_model": null,
   "claude_md_compat": false,
   "openrouterFreeOnly": false,
@@ -1541,6 +1608,11 @@ impl ProjectConfig {
         if let Some(ref spec) = self.extract_save_skill_models {
             config.extract_save_skill_models = Some(spec.clone());
         }
+        // Present-but-empty disables the fallback ("" → None); absent
+        // leaves the built-in default in place.
+        if let Some(ref m) = self.skill_model_fallback {
+            config.skill_model_fallback = (!m.trim().is_empty()).then(|| m.trim().to_string());
+        }
         if let Some(ref m) = self.translator_subagent_model {
             config.translator_subagent_model = Some(m.clone());
         }
@@ -1552,6 +1624,11 @@ impl ProjectConfig {
         }
         if let Some(b) = self.hal_enabled {
             config.hal_enabled = b;
+        }
+        if let Some(ref sensitive) = self.sensitive {
+            if let Some(b) = sensitive.enabled {
+                config.sensitive_enabled = b;
+            }
         }
         if let Some(b) = self.browser_enabled {
             config.browser_enabled = b;
@@ -2695,6 +2772,37 @@ mod tests {
         assert!(absent.extract_save_skill_models.is_none());
     }
 
+    /// A retired skill recommendation must not take the turn down with
+    /// it: the fallback is on by default, and an explicit empty string
+    /// turns it off for users who'd rather keep their own model.
+    #[test]
+    fn skill_model_fallback_defaults_on_and_can_be_disabled() {
+        assert_eq!(
+            AppConfig::default().skill_model_fallback.as_deref(),
+            Some(DEFAULT_SKILL_MODEL_FALLBACK)
+        );
+
+        let set: ProjectConfig =
+            serde_json::from_str(r#"{"skill_model_fallback": "qwen3.7-plus"}"#).unwrap();
+        let mut cfg = AppConfig::default();
+        set.apply_to(&mut cfg);
+        assert_eq!(cfg.skill_model_fallback.as_deref(), Some("qwen3.7-plus"));
+
+        let off: ProjectConfig = serde_json::from_str(r#"{"skillModelFallback": ""}"#).unwrap();
+        let mut cfg = AppConfig::default();
+        off.apply_to(&mut cfg);
+        assert_eq!(cfg.skill_model_fallback, None, "empty string disables it");
+
+        let absent: ProjectConfig = serde_json::from_str("{}").unwrap();
+        let mut cfg = AppConfig::default();
+        absent.apply_to(&mut cfg);
+        assert_eq!(
+            cfg.skill_model_fallback.as_deref(),
+            Some(DEFAULT_SKILL_MODEL_FALLBACK),
+            "an absent key keeps the default"
+        );
+    }
+
     /// settings.json `translator_subagent_model` deserializes from
     /// both snake_case and camelCase. Absent → None (current
     /// behaviour preserved).
@@ -3288,5 +3396,44 @@ mod tests {
             std::fs::read_to_string(tc.join("state/workflows/run.js")).unwrap(),
             "// v2"
         );
+    }
+
+    /// The masking toggle only bites if something actually pushes it into
+    /// the process global. It shipped broken in `-p` once because the hook
+    /// sat on a wrapper both binaries skip, so pin the single hook here —
+    /// every surface calls this one function.
+    #[test]
+    fn apply_process_globals_arms_and_disarms_masking() {
+        let _pin = crate::sensitive::pin_for_test();
+        let mut cfg = AppConfig::default();
+
+        cfg.sensitive_enabled = true;
+        cfg.apply_process_globals();
+        let armed = crate::sensitive::active().is_some();
+
+        cfg.sensitive_enabled = false;
+        cfg.apply_process_globals();
+        let disarmed = crate::sensitive::active().is_none();
+
+        assert!(armed, "enabled setting did not arm the masker");
+        assert!(disarmed, "disabled setting left the masker armed");
+    }
+
+    /// dev-plan/55 masking toggle: the nested `sensitive` block reaches
+    /// `AppConfig`, and its absence leaves masking OFF. A settings file that
+    /// fails to parse silently defaults every flag off (see
+    /// `ProjectConfig::load`), so pin the wiring rather than the UI.
+    #[test]
+    fn sensitive_block_drives_the_masking_flag() {
+        let parse = |json: &str| {
+            let pc: ProjectConfig = serde_json::from_str(json).unwrap();
+            let mut cfg = AppConfig::default();
+            pc.apply_to(&mut cfg);
+            cfg.sensitive_enabled
+        };
+        assert!(parse(r#"{"sensitive":{"enabled":true}}"#));
+        assert!(!parse(r#"{"sensitive":{"enabled":false}}"#));
+        assert!(!parse(r#"{"sensitive":{}}"#), "empty block must not enable");
+        assert!(!parse("{}"), "absent block must not enable");
     }
 }
