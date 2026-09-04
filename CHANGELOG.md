@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.119.0] — 2026-09-04
+
+iApp joins the image providers as the one backend that renders Thai text properly, `/extract` now names where it wrote, and the knowledge sources grow a provenance catalogue.
+
+### Added
+- **iApp is available as an image provider — the one that gets Thai text right.** `TextToImage` / `ImageToImage` gain `text` (up to 4 lines) and `font` (19 Thai faces): iApp *typesets* those lines instead of leaving the diffusion model to draw them, which is what stops Thai script coming back as mangled glyphs. Both modes work — a fresh image, or an edit that keeps the original composition. Needs `IAPP_API_KEY`, settable in Settings alongside the other service keys; bring-your-own-key for now.
+- **Media Studio offers iApp**, with the Thai text and font fields appearing only when it's the selected model — and the `qwen-image-3.0` pair, which had been missing from the picker since it shipped.
+- **`sources/` gets a provenance catalogue and a real ingest path.** Source material is catalogued with where it came from and pulled in through a proper ingest path.
+
+### Changed
+- **The model catalogue now prices image generation across the board.** The two Gemini image models had no rows at all; they and iApp are priced from their vendors' published rates, with Appendix A regenerated to match.
+
+### Fixed
+- **`/extract` names its output folder in the chat result.** The chat only shows the first line of a background agent's result, so a run that opened with prose left you with no path — the folder is now on that line, ready to open in the Files tab.
+
+## [0.118.0] — 2026-08-29
+
+Teammates launch reliably on Windows, user-pointed providers own their model lists, and the model catalogue gets its pre-release refresh.
+
+### Changed
+- **The model catalogue is refreshed ahead of the release.** Pricing and context data are refreshed from the providers, and the online Appendix A is regenerated to match.
+
+### Fixed
+- **Teammates now spawn without a shell.** Argv, env and cwd go straight to the process, so there is nothing for `cmd.exe` to mis-quote — `SpawnTeammate` works on Windows without the `THCLAWS_SHELL` workaround. (#200)
+- **Team directories on Windows drop the verbatim UNC prefix.** The `\\?\` prefix Rust's `canonicalize()` adds is stripped from the team-dir (and `\\?\UNC\` paths stay UNC), so teammates can actually write their status and inbox files. (#200, #201 — thanks @torandben)
+- **User-pointed providers now own their model list.** For a custom endpoint the endpoint, not a fixed list, defines which models are offered.
+
+## [0.117.0] — 2026-08-29
+
+A one-slide-at-a-time PPTX preview lands, the model catalogue gets corrected context windows and pricing, and Qwen-Image 3.x stops rendering smaller images.
+
+### Added
+- **PPTX previews now page one slide at a time.** A `.pptx` preview steps through the deck with ←/→ instead of showing every slide in one long scroll; the rendered PDF stays one click away.
+
+### Changed
+- **The model catalogue is refreshed with current provider pricing.** Qwen3.8-Flash is priced and the catalogue is refreshed from the provider APIs.
+
+### Fixed
+- **Model context windows are sourced from the providers.** The windows for 47 models are pulled from the providers, stale guesses are raised, and the Qwen3.8 and GLM-5.3 values now use their real sizes instead of the provider floor.
+- **The Z.ai GLM-5.3 entry no longer inherits GLM-5's price.** The mis-inherited catalogue price is corrected.
+- **Qwen-Image 3.x no longer renders smaller images.** The size table that shrank images for free is removed.
+
 ## [0.116.0] — 2026-08-25
 
 Qwen-Image 3.0 joins the media models, a co-located AI Server is auto-detected and used as the LLM gateway, and the LTX API key moves into the Settings modal. A round of OpenAI-compat, Windows file-link and Task fan-out fixes lands alongside.
