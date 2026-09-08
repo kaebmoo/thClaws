@@ -151,6 +151,20 @@ impl OllamaCloudProvider {
             "stream": true,
             "think": Self::think_value(model)
         });
+        // ThinkingLevel overrides the per-model default: off → false;
+        // GPT-OSS takes low/medium/high strings, others a boolean.
+        if let Some(level) = super::ThinkingLevel::from_budget(req.thinking_budget) {
+            use super::ThinkingLevel as L;
+            body["think"] = if model.starts_with("gpt-oss") {
+                match level {
+                    L::Off | L::Low => json!("low"),
+                    L::Medium => json!("medium"),
+                    L::High => json!("high"),
+                }
+            } else {
+                json!(level != L::Off)
+            };
+        }
         if !req.tools.is_empty() {
             let tools: Vec<Value> = req
                 .tools

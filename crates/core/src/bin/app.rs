@@ -1076,6 +1076,9 @@ async fn main() {
     if let Some(ref mode) = cli.permission_mode {
         config.permissions = mode.clone();
     }
+    // Re-apply after the CLI flags above: a policy a `--permission-mode`
+    // flag could climb over would not be a policy.
+    config.apply_runtime_policy();
     if let Some(ref sp) = cli.system_prompt {
         config.system_prompt = sp.clone();
     }

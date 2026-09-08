@@ -36,7 +36,7 @@ Prices are **what you pay** — upstream cost with the 1.25× platform markup al
 
 A context marked **`?`** was never published by the provider — it is that provider's blanket default, kept because a missing window breaks model pickers. Treat it as a lower bound, not a specification.
 
-633 models across 14 providers.
+632 models across 14 providers.
 
 ### Anthropic
 
@@ -231,11 +231,11 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `deepseek/deepseek-v3.1-terminus` | 164k | $0.34 | — | $1.25 |
 | `deepseek/deepseek-v3.2` | 131k | $0.34 | — | $0.50 |
 | `deepseek/deepseek-v3.2-exp` | 164k | $0.34 | — | $0.51 |
-| `deepseek/deepseek-v4-flash` | 1.04858M | $0.11 | — | $0.21 |
-| `deepseek/deepseek-v4-flash-0731` | 1.04858M | $0.08 | — | $0.22 |
-| `deepseek/deepseek-v4-flash-vision-exp` | 1.04858M | $0.28 | — | $0.83 |
-| `deepseek/deepseek-v4-pro` | 1.04858M | $1.06 | — | $2.12 |
-| `deepseek/deepseek-v4-pro-0813` | 1.04858M | $0.72 | — | $2.17 |
+| `deepseek/deepseek-v4-flash` | 1.04858M | $0.11 | — | $0.22 |
+| `deepseek/deepseek-v4-flash-0731` | 1.04858M | $0.18 | — | $0.35 |
+| `deepseek/deepseek-v4-flash-vision-exp` | 1.04858M | $0.55 | — | $1.65 |
+| `deepseek/deepseek-v4-pro` | 1.04858M | $1.29 | — | $2.59 |
+| `deepseek/deepseek-v4-pro-0813` | 1.04858M | $1.40 | — | $4.20 |
 | `dots-studio/dots-3-note-preview:free` | 512k | free | — | free |
 | `google/gemini-2.5-flash` | 1.04858M | $0.38 | — | $3.12 |
 | `google/gemini-2.5-flash-lite` | 1.04858M | $0.12 | $0.01 | $0.50 |
@@ -450,8 +450,8 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `qwen/qwen3-vl-8b-thinking` | 131k | $0.22 | — | $2.62 |
 | `qwen/qwen3.5-122b-a10b` | 262k | $0.36 | — | $3.00 |
 | `qwen/qwen3.5-27b` | 262k | $0.24 | — | $1.95 |
-| `qwen/qwen3.5-35b-a3b` | 262k | $0.10 | — | $0.94 |
-| `qwen/qwen3.5-397b-a17b` | 262k | $0.69 | — | $4.38 |
+| `qwen/qwen3.5-35b-a3b` | 262k | $0.39 | — | $1.56 |
+| `qwen/qwen3.5-397b-a17b` | 262k | $0.49 | — | $2.92 |
 | `qwen/qwen3.5-9b` | 262k | $0.12 | — | $0.19 |
 | `qwen/qwen3.5-flash-02-23` | 1M | $0.08 | — | $0.33 |
 | `qwen/qwen3.5-plus-02-15` | 1M | $0.33 | — | $1.95 |
@@ -483,7 +483,7 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `tencent/hy-mt2-1.8b` | 8k | $0.05 | — | $0.22 |
 | `tencent/hy-mt2-30b-a3b` | 8k | $0.09 | — | $0.37 |
 | `tencent/hy-mt2-7b` | 8k | $0.09 | — | $0.37 |
-| `tencent/hy3` | 262k | $0.10 | — | $0.41 |
+| `tencent/hy3` | 262k | $0.17 | — | $0.66 |
 | `tencent/hy3-preview` | 262k | $0.22 | — | $0.75 |
 | `tencent/hy4-preview` | 1.04858M | $1.04 | — | $3.13 |
 | `thedrummer/cydonia-24b-v4.1` | 131k | $0.38 | — | $0.62 |
@@ -508,7 +508,7 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `z-ai/glm-4.5` | 131k | $0.75 | — | $2.75 |
 | `z-ai/glm-4.5-air` | 131k | $0.16 | — | $1.06 |
 | `z-ai/glm-4.5v` | 66k | $0.75 | — | $2.25 |
-| `z-ai/glm-4.6` | 205k | $0.69 | — | $2.75 |
+| `z-ai/glm-4.6` | 205k | $0.54 | — | $2.19 |
 | `z-ai/glm-4.6v` | 131k | $0.38 | — | $1.12 |
 | `z-ai/glm-4.7` | 203k | $0.50 | free | $2.19 |
 | `z-ai/glm-4.7-flash` | 203k | $0.07 | free | $0.50 |
@@ -516,7 +516,6 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `z-ai/glm-5-turbo` | 203k | $1.50 | — | $5.00 |
 | `z-ai/glm-5.1` | 203k | $1.21 | — | $3.79 |
 | `z-ai/glm-5.2` | 1.04858M | $1.21 | — | $3.79 |
-| `z-ai/glm-5.2:free` | 256k | free | — | free |
 | `z-ai/glm-5.3` | 1.04858M | $1.75 | — | $5.50 |
 | `z-ai/glm-5.3-flash` | 1.31072M | $0.09 | — | $0.31 |
 | `z-ai/glm-5v-turbo` | 203k | $1.50 | — | $5.00 |

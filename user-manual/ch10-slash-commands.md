@@ -97,6 +97,10 @@ tried first.
 | `/kms new [--project] NAME` | Create a new KMS (default scope is user) |
 | `/kms use NAME` | Attach a KMS to this project's chats |
 | `/kms off NAME` | Detach a KMS |
+| `/kms entry [NAME] [--set SLUG \| --clear]` | Show or set the page the KMS browser opens on. Recorded when the KMS's first page is created; inferred when nothing is recorded |
+| `/kms verify [NAME] [--llm] [--fix]` | Evidence check: citations resolve, archived sources still carry their quotes, nothing asserts a number uncited. `--llm` adds a per-page entailment audit; `--fix` unwraps links written inside URLs |
+| `/kms rename OLD NEW` | Rename a KMS folder; the attachment follows (also: right-click a KMS in the sidebar) |
+| `/kms drop NAME [--force]` | Delete a KMS; dry-run without `--force` (also: sidebar right-click → Delete…) |
 | `/kms show NAME` | Print the KMS's `index.md` |
 | `/kms maintain NAME [--apply]` | One-command maintenance: structural fixes + source reconciliation vs live sessions + stale refresh + contradiction reconciliation, in one staged pass. Dry-run by default. GUI-only. Alias: `tidy` |
 | `/kms html NAME [OUT]` | Generate a single-file interactive HTML site from a KMS (v0.8.5+). Agent reads the KMS via tools, designs components, writes `<OUT>/index.html` (default `./<NAME>-site/`) in your workspace |
@@ -111,7 +115,7 @@ See [Chapter 9](ch09-knowledge-bases-kms.md) for the full KMS concept + workflow
 | Command | What it does |
 |---|---|
 | `/research <query>` | Spawn a background research job — multi-iteration web search + multi-page KMS write |
-| `/research [--kms NAME] [--max-pages N] [--max-iter K] [--score-threshold 0.X] [--budget-time T] <query>` | Start with overrides |
+| `/research [--kms NAME] [--max-notes N] [--max-iter K] [--novelty 0.X] [--worker-model ID] [--append] [--dry-run] [--budget-time T] <query>` | Start with overrides (see ch20) |
 | `/research` (or `/research list`) | List all jobs (newest first) |
 | `/research status ID` | Detailed view (phase, iteration, score) |
 | `/research show ID` | Print synthesized result in chat |
@@ -126,7 +130,7 @@ See [Chapter 20](ch20-research.md) for the full pipeline + KMS layout + flag ref
 | Command | What it does |
 |---|---|
 | `/permissions MODE` | Switch between `auto` and `ask` mid-session |
-| `/thinking BUDGET` | Extended-thinking token budget (0 = off, only for Anthropic) |
+| `/thinking 0-3` | Thinking level for every provider: `0` off · `1` low · `2` medium · `3` high · `auto` (provider default). Also `/thinking <tokens>` for a raw budget. Same knob as the **think** pills under the model chip; persists to `thinkingBudget` |
 | `/tasks` | List tasks / todos the agent has created |
 | `/config key=val` | Override a config value for this session only |
 | `/agent NAME PROMPT` | Spawn a user-driven side-channel subagent (GUI-only, runs concurrently with main) |

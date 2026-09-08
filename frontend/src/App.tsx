@@ -1148,7 +1148,12 @@ export default function App() {
             history, phase log, accumulated source count. Renders
             nothing until at least one research job has been observed
             via `research_update`. */}
-        <ResearchSidebar />
+        <ResearchSidebar
+          onOpenResult={(target) => {
+            setGraphKms(null);
+            setViewerTarget(target);
+          }}
+        />
         {/* Background-agents sidebar. Subscribes to
             `chat_side_channel_*` envelopes and shows currently-running
             side-channel agents (/dream, /translator, etc.) with live

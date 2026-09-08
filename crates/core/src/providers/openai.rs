@@ -363,6 +363,7 @@ impl OpenAIProvider {
             "stream": true,
             "stream_options": {"include_usage": true},
         });
+        apply_thinking(&mut body, &req.model, &self.base_url, req.thinking_budget);
         let mut tools: Vec<Value> = req
             .tools
             .iter()
@@ -1381,6 +1382,141 @@ pub fn parse_chunk(raw: &str, state: &mut ParseState) -> Result<Vec<ProviderEven
 ///
 /// Matches by substring against the model id (after `strip_model_prefix`
 /// has run, so the `openrouter/` prefix is already removed). The bare id
+#[cfg(test)]
+mod thinking_off_tests {
+    use super::*;
+
+    #[test]
+    fn levels_map_per_family() {
+        let mut b = json!({});
+        apply_thinking(
+            &mut b,
+            "deepseek-v4-pro",
+            "https://api.deepseek.com",
+            Some(10_000),
+        );
+        assert_eq!(b["thinking"]["type"], "enabled");
+        let mut b = json!({});
+        apply_thinking(
+            &mut b,
+            "gpt-5.4-mini",
+            "https://api.openai.com/v1",
+            Some(32_000),
+        );
+        assert_eq!(b["reasoning_effort"], "high");
+        let mut b = json!({});
+        apply_thinking(&mut b, "gpt-5.4-mini", "https://api.openai.com/v1", Some(0));
+        assert_eq!(b["reasoning_effort"], "minimal");
+        let mut b = json!({});
+        apply_thinking(
+            &mut b,
+            "qwen3.5-flash",
+            "https://dashscope.aliyuncs.com/v1",
+            Some(2_048),
+        );
+        assert_eq!(b["enable_thinking"], true);
+        assert_eq!(b["thinking_budget"], 2048);
+        let mut b = json!({});
+        apply_thinking(
+            &mut b,
+            "qwen-max",
+            "https://dashscope.aliyuncs.com/v1",
+            Some(0),
+        );
+        assert!(
+            b.as_object().unwrap().is_empty(),
+            "non-hybrid qwen untouched"
+        );
+        let mut b = json!({});
+        apply_thinking(&mut b, "deepseek-v4-pro", "https://api.deepseek.com", None);
+        assert!(b.as_object().unwrap().is_empty(), "auto sends nothing");
+    }
+
+    #[test]
+    fn deepseek_glm_qwen_openai_get_their_switch_and_others_nothing() {
+        let mut b = json!({});
+        apply_thinking(
+            &mut b,
+            "deepseek-v4-pro",
+            "https://api.deepseek.com/chat/completions",
+            Some(0),
+        );
+        assert_eq!(b["thinking"]["type"], "disabled");
+        let mut b = json!({});
+        apply_thinking(&mut b, "glm-5.3-flash", "https://x", Some(0));
+        assert_eq!(b["thinking"]["type"], "disabled");
+        let mut b = json!({});
+        apply_thinking(
+            &mut b,
+            "qwen3.5-flash",
+            "https://dashscope.aliyuncs.com/v1",
+            Some(0),
+        );
+        assert_eq!(b["enable_thinking"], false);
+        let mut b = json!({});
+        apply_thinking(&mut b, "gpt-5.4-mini", "https://api.openai.com/v1", Some(0));
+        assert_eq!(b["reasoning_effort"], "minimal");
+        let mut b = json!({});
+        apply_thinking(&mut b, "gpt-4o", "https://api.openai.com/v1", Some(0));
+        assert!(
+            b.as_object().unwrap().is_empty(),
+            "no unknown fields for models without a switch"
+        );
+    }
+}
+
+/// Map [`super::ThinkingLevel`] (carried as a budget) onto whatever this
+/// OpenAI-compatible upstream understands. Only families with a known
+/// knob are touched — an unknown model gets no extra field (sending
+/// `reasoning_effort` to gpt-4o is a 400). `None` = leave the default.
+pub(crate) fn apply_thinking(body: &mut Value, model: &str, base_url: &str, budget: Option<u32>) {
+    let Some(level) = super::ThinkingLevel::from_budget(budget) else {
+        return;
+    };
+    use super::ThinkingLevel as L;
+    let m = model.to_ascii_lowercase();
+    let host = base_url.to_ascii_lowercase();
+    if m.contains("deepseek") || host.contains("deepseek.com") || m.contains("glm") {
+        let ty = if level == L::Off {
+            "disabled"
+        } else {
+            "enabled"
+        };
+        body["thinking"] = json!({"type": ty});
+    } else if m.contains("qwen") || host.contains("dashscope") {
+        // Only the hybrid families accept `enable_thinking`; qwen-max
+        // and friends 400 on it, so leave them alone.
+        let hybrid = m.contains("qwen3")
+            || m.contains("qwen-plus")
+            || m.contains("qwen-flash")
+            || m.contains("qwen-turbo");
+        if hybrid {
+            body["enable_thinking"] = json!(level != L::Off);
+            if level != L::Off {
+                body["thinking_budget"] = json!(level.to_budget());
+            }
+        }
+    } else if m.starts_with("o1")
+        || m.starts_with("o3")
+        || m.starts_with("o4")
+        || m.starts_with("gpt-5")
+    {
+        let effort = match level {
+            L::Off => {
+                if m.starts_with("gpt-5") {
+                    "minimal"
+                } else {
+                    "low"
+                }
+            }
+            L::Low => "low",
+            L::Medium => "medium",
+            L::High => "high",
+        };
+        body["reasoning_effort"] = json!(effort);
+    }
+}
+
 /// is what the upstream provider sees, so e.g. `deepseek/deepseek-v4-flash`
 /// is what we test against.
 pub fn model_uses_reasoning_content(model: &str) -> bool {

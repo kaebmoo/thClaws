@@ -592,7 +592,7 @@ impl Default for AppConfig {
             system_prompt: String::new(),
             // 10K thinking budget suits the "design a small component"
             // class of task without burning budget on trivial edits.
-            thinking_budget: Some(10000),
+            thinking_budget: None,
             stream_chunk_timeout_secs: default_stream_chunk_timeout_secs(),
             search_engine: "auto".to_string(),
             allowed_tools: None,
@@ -1515,6 +1515,60 @@ impl ProjectConfig {
         current.save()
     }
 
+    /// Persist `name` as attached (idempotent). Used by `/research` so a
+    /// KMS it just wrote into becomes the default target of the next run.
+    pub fn attach_kms(name: &str) -> Result<bool> {
+        let mut active = Self::load()
+            .and_then(|c| c.kms)
+            .map(|k| k.active)
+            .unwrap_or_default();
+        if active.iter().any(|n| n == name) {
+            return Ok(false);
+        }
+        active.push(name.to_string());
+        Self::set_active_kms(active)?;
+        Ok(true)
+    }
+
+    /// After `kms::rename`: swap the attached name so the attachment
+    /// follows the KMS. Returns whether anything changed.
+    pub fn rename_attached_kms(old: &str, new: &str) -> Result<bool> {
+        let mut active = Self::load()
+            .and_then(|c| c.kms)
+            .map(|k| k.active)
+            .unwrap_or_default();
+        let mut changed = false;
+        for n in active.iter_mut() {
+            if n == old {
+                *n = new.to_string();
+                changed = true;
+            }
+        }
+        if changed {
+            active.dedup();
+            Self::set_active_kms(active)?;
+        }
+        Ok(changed)
+    }
+
+    /// Names attached on disk that the in-memory config doesn't know yet
+    /// (a background `/research` attached its KMS). Merges them in and
+    /// returns the additions so the caller can refresh tools/prompt.
+    pub fn sync_kms_active(config: &mut AppConfig) -> Vec<String> {
+        let on_disk = Self::load()
+            .and_then(|c| c.kms)
+            .map(|k| k.active)
+            .unwrap_or_default();
+        let mut added = Vec::new();
+        for n in on_disk {
+            if !config.kms_active.iter().any(|a| a == &n) {
+                config.kms_active.push(n.clone());
+                added.push(n);
+            }
+        }
+        added
+    }
+
     /// Merge overrides into an AppConfig (non-None fields win).
     pub fn apply_to(&self, config: &mut AppConfig) {
         if let Some(ref m) = self.model {
@@ -1663,6 +1717,34 @@ impl ProjectConfig {
 
     pub fn set_model(&mut self, model: &str) {
         self.model = Some(model.to_string());
+    }
+
+    /// Persist the thinking level (`Some(budget)`) or clear it back to
+    /// auto (`None`). `save()`'s overlay skips nulls, so clearing has
+    /// to drop the key from the file explicitly.
+    pub fn persist_thinking_budget(budget: Option<u32>) -> Result<()> {
+        let path = Self::path();
+        let mut base = std::fs::read(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        if !base.is_object() {
+            base = serde_json::json!({});
+        }
+        let obj = base.as_object_mut().unwrap();
+        match budget {
+            Some(b) => {
+                obj.insert("thinkingBudget".into(), serde_json::json!(b));
+            }
+            None => {
+                obj.remove("thinkingBudget");
+            }
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, serde_json::to_string_pretty(&base)?)?;
+        Ok(())
     }
 
     /// Persist the `/deploy` default target URL. Pair with the
@@ -1980,6 +2062,32 @@ fn mcp_config_path(user: bool) -> Result<PathBuf> {
 }
 
 impl AppConfig {
+    /// Overwrite whatever the settings files and CLI flags decided with
+    /// what the org policy's `runtime` block requires (Phase 8).
+    ///
+    /// Called at the end of every load path, and again by the binary
+    /// after CLI flags are merged — a policy that a `--permission-mode`
+    /// flag could climb over would not be a policy. Idempotent, so
+    /// calling it twice is the intended usage.
+    pub fn apply_runtime_policy(&mut self) {
+        if let Some(mode) = crate::policy::forced_permission_mode() {
+            if self.permissions != mode {
+                eprintln!("[policy] permission mode forced to '{mode}' by org policy");
+            }
+            self.permissions = mode;
+        }
+        let denied = crate::policy::denied_tools();
+        if denied.is_empty() {
+            return;
+        }
+        let list = self.disallowed_tools.get_or_insert_with(Vec::new);
+        for name in denied {
+            if !list.iter().any(|t| t.eq_ignore_ascii_case(&name)) {
+                list.push(name);
+            }
+        }
+    }
+
     /// Load config following the documented precedence.
     /// Load order: env override → user settings.json → Claude Code fallback →
     ///             defaults → project overlay.
@@ -2165,6 +2273,7 @@ impl AppConfig {
             }
         }
 
+        config.apply_runtime_policy();
         Ok(config)
     }
 
@@ -2239,6 +2348,7 @@ impl AppConfig {
             }
         }
 
+        config.apply_runtime_policy();
         Ok(config)
     }
 
@@ -2488,6 +2598,26 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn apply_runtime_policy_is_a_noop_without_a_policy() {
+        // No policy is loaded in the unit-test process: settings and CLI
+        // keep whatever they decided, which is the open-core contract.
+        let mut c = AppConfig {
+            permissions: "auto".into(),
+            disallowed_tools: Some(vec!["Ask".into()]),
+            ..AppConfig::default()
+        };
+        c.apply_runtime_policy();
+        assert_eq!(c.permissions, "auto");
+        assert_eq!(
+            c.disallowed_tools.as_deref(),
+            Some(&["Ask".to_string()][..])
+        );
+        // Idempotent — the binary calls it twice by design.
+        c.apply_runtime_policy();
+        assert_eq!(c.disallowed_tools.as_ref().map(|v| v.len()), Some(1));
+    }
     use super::*;
 
     /// Issue #180: `hooks` in settings.json must reach `config.hooks`.

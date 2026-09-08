@@ -1,272 +1,166 @@
-# บทที่ 20 — Background research (`/research`)
+# บทที่ 20 — Research เบื้องหลัง (`/research`)
 
-`/research <query>` spawn งาน background ที่:
+`/research <query>` รันงานเบื้องหลังที่อ่านเว็บแล้วเติบโต knowledge base ของคุณแบบ **zettelkasten**: หนึ่ง note ต่อหนึ่งความคิด ทุก claim ยึดกับ quote คำต่อคำจากแหล่งที่มา note เชื่อมโยงถึงกันและถึงสิ่งที่ KMS รู้อยู่แล้ว query ที่สองในหัวข้อใกล้เคียงจะ **อัปเดต** note เดิม ไม่ใช่เขียน page ชุดใหม่ขนานกัน
 
-1. ค้นเว็บ
-2. iterate กับ LLM ดูว่าขาดอะไร
-3. จัดผลเป็น KMS pages หลายหน้าที่ cross-link กัน
-4. cache แต่ละ source ที่อ้างเป็นไฟล์ Markdown ใน `<kms>/sources/`
-
-ผลอยู่ใน knowledge base เป็น artifact ถาวร — ค้นได้ข้าม session,
-อ้างจาก chat ได้, แก้ได้เหมือน KMS page อื่น
-
-## Quick start
+## เริ่มต้นอย่างเร็ว
 
 ```
-> /research what is the LangGraph agent strategy in local-deep-research
-[research started: id=research-a3f1c2] query: what is the LangGraph …
-  /research status research-a3f1c2     check progress
-  /research show research-a3f1c2       stream result
-  /research cancel research-a3f1c2     cancel
+> /research กฎหมายแรงงานไทย ค่าจ้าง ค่าล่วงเวลา และการเลิกจ้าง
+[research started: id=research-523f9c5b] query: กฎหมายแรงงานไทย …
+  /research status research-523f9c5b     ดูความคืบหน้า
+  /research show research-523f9c5b       เปิด map of content
+  /research cancel research-523f9c5b     ยกเลิก
+…
+[research done: id=research-523f9c5b → rv2-labour/rv2-labour.md]
 ```
 
-panel "Research" ขึ้นที่ขอบขวาของ GUI แสดง phase, iteration progress,
-และ score ต่อรอบ CLI users เห็นบรรทัด completion ที่ prompt ถัดไป:
+run ทั่วไป: 3 รอบของการค้นหา + อ่าน, 25–30 แหล่ง, 10–12 note, 3–7 นาทีบน worker model ที่เร็ว GUI แสดงแผง "Research" สดๆ ที่ขอบขวา (phase, รอบ, novelty) ส่วน CLI พิมพ์บรรทัดแจ้งเสร็จเหนือ prompt ถัดไป
+
+## สิ่งที่ได้
 
 ```
-[research done: id=research-a3f1c2 → langgraph-agent-strategy/2026-05-09-…__concept.md]
-```
-
-หลังจบ, KMS เป้าหมาย auto-attach กับ session ทันที ทำให้คำถามต่อ
-อย่าง *"สรุป LangGraph approach ให้หน่อย"* ทำให้ LLM เรียก
-`KmsRead` หน้าที่เพิ่งเขียนแทนที่จะตอบจาก training data
-
-## คำสั่งย่อย
-
-```
-/research <query>                          เริ่ม run ใหม่ (default config)
-/research [flags...] <query>               เริ่มพร้อม override
-/research                                  list ทุก job (newest first)
-/research list                             เหมือนกัน
-/research status <id>                      detail (phase, iter, score)
-/research show <id>                        print synthesized page ใน chat
-/research cancel <id>                      cancel; ผลที่ทำมาทิ้ง
-/research wait <id>                        block CLI prompt จน job จบ
-```
-
-### Flags ตอน start
-
-| Flag | Default | ความหมาย |
-|---|---|---|
-| `--kms <name>` | auto จาก query | KMS เป้าหมาย ชื่อที่ derive อัตโนมัติใช้ topic slug ที่ LLM แตกออก (เช่น `obon-festival`) — ไม่มี `research-` prefix |
-| `--min-iter N` | 2 | hard floor — pipeline ต้องรันอย่างน้อย N รอบแม้ LLM scores ครบก่อน |
-| `--max-iter K` | 8 | hard ceiling |
-| `--score-threshold 0.X` | 0.80 | score ที่ LLM evaluator ต้องให้ (0.0-1.0) เพื่อ short-circuit ระหว่าง min กับ max รับทั้ง decimal (`0.85`) และ percent integer (`85`) เพิ่มจาก 0.75 → 0.80 — LLM มัก score generously หลัง iter 2 default เดิมตัด research เร็วเกินไป |
-| `--max-pages N` | 7 | cap จำนวน KMS pages ต่อ run *ceiling ไม่ใช่ target* — query แคบจะออก 1-2 pages |
-| `--budget-time SEC|2m|1h` | 15m | wall-clock budget เกินแล้วงานจบเป็น `Failed` พร้อม budget-exhausted message |
-
-## ผลที่ลง KMS
-
-โครงสร้างใน KMS เป้าหมายหลัง `/research` รัน:
-
-```
-<kms-name>/
+<kms>/
 ├── pages/
-│   ├── <YYYY-MM-DD>-<query>__<page-slug>.md    ← หนึ่งไฟล์ต่อ page ใน plan
-│   ├── <YYYY-MM-DD>-<query>__<page-slug>.md
-│   └── _summary.md                              ← per-run section index
-├── sources/
-│   ├── <url-slug>.md                            ← cache fetch body ต่อ URL ที่อ้าง
-│   └── <url-slug>.md
-├── index.md                                     ← auto-managed
-├── log.md
-└── SCHEMA.md
+│   ├── overtime-pay.md              ← หนึ่งความคิดต่อ note (kind: concept)
+│   ├── severance-pay.md
+│   ├── labour-protection-act-be-2541.md   (kind: entity)
+│   ├── thai-labour-law.md           ← map of content ของ query (kind: moc)
+│   └── …
+├── sources/<url-slug>.md            ← สำเนาของทุกแหล่งที่ถูกอ้าง
+├── runs/2026-09-06-thai-labour-law.md   ← run ทำอะไรบ้าง (รอบ, novelty, note)
+└── .research/                       ← cache ของ digest + ทะเบียน citation (ภายใน)
 ```
 
-### Pages
+### Note
 
-แต่ละหน้าครอบคลุม topic เดียว — entity (บุคคล, paper, องค์กร),
-concept, comparison (X vs Y), how-to, หรือ timeline. หน้าต่างๆ
-cross-link กันด้วย Obsidian-style `[[slug]]` wikilinks ใช้งานได้
-ทั้ง Obsidian, GitHub, และ `KmsRead`
+ทุก note คือ entity, concept หรือ claim เดียว มี slug คงที่ที่เป็นชื่อของความคิดนั้นเอง (`overtime-pay`, `wage-committee`) บรรทัดแรกเป็น abstract หนึ่งประโยค (กลายเป็น summary ใน index) ตามด้วย section สั้นๆ 2–4 หัวข้อ และ link `[[slug]]` ไปยัง note ที่เกี่ยวข้อง ทั้งจาก run นี้และที่มีอยู่แล้วใน KMS frontmatter:
 
-ทุกหน้าเริ่มด้วย abstract 1-2 ประโยคซึ่งกลายเป็น KMS index summary
-ตามด้วย `##` subsections, inline `[N]` citations, และ
-`## Sources` ที่ pipeline auto-generate listing ทุก source ที่อ้าง
-พร้อม clickable link ไปยัง cached copy:
-
-```markdown
-LLM Wiki คือ knowledge base ส่วนตัว/local ที่ LLM กับ user
-ร่วมเขียน markdown notes สะสมไปเรื่อยๆ — popular โดย
-[[andrej-karpathy|Andrej Karpathy]] [1](../sources/x-com-karpathy-status.md)
-
-## ที่มา
-
-แนวคิดเกิดต้นปี 2026 ตอนที่ …
-
-## Sources
-
-1. [Karpathy on LLM Wiki](../sources/x-com-karpathy-status.md) — https://x.com/karpathy/status/…
-2. [Comparing LLM Wiki vs RAG](../sources/medium-com-llm-wiki-vs-rag.md) — https://medium.com/…
+```yaml
+type: note
+kind: concept          # entity | concept | claim | moc
+title: ค่าล่วงเวลา
+related: ["employee", "employer", "holiday", "working-day"]
+sources: [1, 4, 18, 27]
+claims: 8
+confidence: 0.93       # ค่าเฉลี่ย confidence ของ claim ที่ใช้
 ```
 
-### Verify pass — กัน hallucinated citations
+ข้อเท็จจริงมี citation `[N]` ที่ลิงก์ไปสำเนาแหล่ง และ block `## Sources` ที่สร้างให้อัตโนมัติ ไม่มี appendix "research notes" ไม่มี section verification: ไม่มีอะไรลงใน note เว้นแต่มาจาก claim ที่ผ่าน quote check
 
-หลัง synthesize แต่ละ page เสร็จ pipeline จะรัน **verify pass** — LLM call แยกที่ audit page ที่ generate แล้วเทียบกับ source ที่อ้าง walk ทุก factual claim แล้วตัดสิน:
+### หน้า topic (map of content)
 
-- `Supported` — source ที่อ้างพูดตรงตาม claim
-- `Partial` — source แตะ topic แต่ไม่ตรง wording (เช่น claim บอก "100x faster" แต่ source บอกแค่ "significantly faster")
-- `Unsupported` — citation ผิด (source ไม่ได้พูดอย่างนั้น) ปกติคือ hallucination หรือ miscitation
-- `NoCitation` — page assert ข้อเท็จจริงโดยไม่มี `[N]` แนบ
+หนึ่ง note ต่อ run, `kind: moc`, slug มาจาก query หน้านี้คือผลลัพธ์ของ research: รายงานที่ **อธิบายหัวข้อ** — เปิดด้วยคำตอบตรง ๆ ตามด้วย 4–8 หัวข้อที่สังเคราะห์จาก claim ทั้งหมด (ภาพรวม, ผู้เล่นหลัก, ตารางเปรียบเทียบเมื่อหลาย entity มีคุณสมบัติเทียบกันได้, timeline เมื่อ claim มีวันที่, เงินทุน/นโยบาย, แนวโน้ม) และลิงก์ note ลูกในเนื้อหาตรงจุดที่เล่าถึงครั้งแรก ปิดท้ายด้วย `## Map` ของทุก note ที่ลิงก์ และ open questions ไม่เกิน 3 ข้อ `/research show <id>` เปิดหน้านี้
 
-Pass นี้เขียน 2 artifact:
+การวางแผนทำแบบ top-down: worker model ตัดสินใจก่อนว่าหน้า topic ควรอธิบายเรื่องนี้อย่างไร แล้วจึงเลือกว่าหน้านั้นต้องลิงก์ไปอะไรบ้างเพื่อลงลึก จากนั้นค่อยจ่าย claim note ลูกถูกเขียนหลังหน้า topic โดยเห็นย่อหน้าเปิดของหน้าแม่ จึงลงลึกแทนที่จะเล่าซ้ำ
 
-1. **`verification_score: 0.85`** ใน frontmatter — fraction ของ factual claim ที่ rate `Supported` Sort หรือ filter KMS ด้วย field นี้เพื่อหา page ที่ต้องตรวจซ้ำ
-2. **`## Verification` section** ท้าย page body — list **เฉพาะ** flagged items (Partial / Unsupported / NoCitation) แต่ละ item มี icon (🚫 / ⚠️ / ❓), verdict, cited `[N]`, paraphrased claim, และ note ของ verifier:
+### Claim และ quote check
 
-```markdown
-## Verification
+แต่ละแหล่งถูกอ่าน **ครั้งเดียว** แล้วกลายเป็น digest: entity ที่พูดถึงและ claim ไม่เกิน 6 ข้อ แต่ละข้อมี **quote คำต่อคำ** (≤ 60 ตัวอักษร) จากหน้านั้น pipeline ตรวจว่า quote อยู่ในข้อความที่ fetch มาจริง (ไม่สนช่องว่างและตัวพิมพ์ normalize Unicode แล้ว) และทิ้ง claim ที่ไม่ผ่าน ในทางปฏิบัติ 15–20% ของสิ่งที่โมเดลเสนอถูกทิ้งด้วยวิธีนี้ ซึ่งคือ citation ปลอมที่ verifier แบบเดิมต้องไล่ล่าทีหลัง แต่ตอนนี้ถูกจับก่อนถูกเขียน digest ถูก cache ตาม URL ใต้ `.research/digests/` การ run ซ้ำบนแหล่งเดิมจึงไม่มีค่าใช้จ่าย
 
-Auto-verification pass found 2 claim(s) that don't strictly match their cited source. Review before relying on the page for downstream decisions.
+### run อ่านแหล่งไหน
 
-- 🚫 **unsupported** [3]: X is 100x faster than Y — _[3] says faster but not "100x"_
-- ❓ **no citation** (uncited): Y was released in 2024
-```
+search engine จัดอันดับตาม engagement คำค้นเรื่องโมเดลใหม่ของผู้ผลิตรายหนึ่งจึงคืนทั้ง release note ของผู้ผลิตเอง *และ* บทความสรุปอีกห้าชิ้นที่เล่าซ้ำ ก่อน fetch ทุกรอบจะจัดอันดับผู้สมัครก่อน:
 
-Page ที่ทุก claim เป็น `Supported` ได้ `verification_score` ใน frontmatter แต่ไม่มี `## Verification` section — page ที่สะอาดอยู่สะอาดต่อไป ถ้า verifier เอง fail (parse error, provider timeout) page จะถูกเขียนโดยไม่มี `verification_score` (ขาด field = honest; ใส่ 0.0 ปลอม = misleading) แล้ว run ทำต่อ
+1. **Primary มาก่อน** — โดเมนที่สะกดชื่อเรื่องนั้น (`deepseek.com` สำหรับ DeepSeek), เอกสารทางการ และ `.gov` / `.edu` / `.ac.*` / `.go.*`
+2. **Reference ถัดมา** — Wikipedia, arXiv และสำนักข่าวใหญ่
+3. **ที่เหลือ** ตามลำดับของ search engine
 
-**ทำไมต้องมี** — critique ของ LLM-Wiki ที่ดังที่สุด ("organised persistent mistakes") ชี้ที่ synthesizer ที่ hallucinate fact แล้วอ้าง real source ที่ไม่ได้พูดอย่างนั้น Verify pass จับ class นี้ก่อน page ลง KMS ค่าใช้จ่าย: ~+25% ของ total `/research` LLM cost สำหรับ 4-page run; soft-fail จึงไม่ abort pipeline
+ไม่มีการตัดแหล่งใดทิ้ง การจัดอันดับแค่ตัดสินว่าใครถูกอ่านก่อนภายในโควตาของรอบนั้น และ **หนึ่งโดเมนให้ได้ไม่เกินสองหน้าต่อรอบ** เว็บเดียวจึงเป็นหลักฐานครึ่งหนึ่งของ run ไม่ได้ ตาราง **Evidence** ใน run log บอกว่ารอบนั้นอ่านแหล่งระดับไหนไปกี่แห่ง และ note อ้างอิงจริงกี่แห่ง
 
-### Sources
+### Citation คงที่ต่อ KMS
 
-ทุก URL ที่อ้างมี cached copy ที่ `<kms>/sources/<url-slug>.md`
-พร้อม frontmatter (URL ต้นฉบับ, citation index, fetch date)
-ชื่อไฟล์เป็น deterministic slug ของ URL — URL เดียวกันใน research
-runs ต่างๆ map ไปไฟล์เดียวกัน ดังนั้น archive ไม่ระเบิด
+URL หนึ่งได้เลข citation หนึ่งตลอดอายุของ knowledge base (`.research/sources.json`) เมื่อ run ทีหลัง merge claim ใหม่เข้า note เดิม เครื่องหมาย `[N]` ที่เขียนไว้เดือนก่อนยังชี้ถูก
 
-ถ้า `HAL_API_KEY` ตั้งไว้ (Settings → Providers → Service keys
-→ HAL Public API), `/research` fetch ผ่าน HAL headless browser
-scrape — clean Markdown รวม code blocks, tables, nested lists.
-ถ้าไม่มี key, fallback ไป `WebFetch` ที่แปลง HTML→Markdown
-(หยาบกว่าแต่ใช้ได้)
+หน้าเดียวกันที่มาด้วย URL ต่างรูปคือแหล่งเดียวกัน: tracking parameter (`?utm_source=…`), `#fragment`, `www.`, `http` เทียบ `https` และ `/` ปิดท้าย ถูกตัดก่อนค้นหา run จึงไม่จ่ายซ้ำและไม่อ้างเอกสารเดียวด้วยสองเลข
 
-### Run summary
+## รอบและการหยุดด้วย novelty
 
-`pages/_summary.md` สะสม section ต่อ `/research` run:
+1. **รอบ seed** — ค้นหา query อ่าน 5 หน้าแรก digest
+2. **รอบเติมช่องว่าง** — จากตาราง entity และ claim (ไม่ใช่หน้าดิบ) worker model เสนอการค้นหาใหม่ไม่เกิน 4 รายการ: entity ที่ยังบาง, คำถามย่อยที่ยังไม่มี claim, มุมมองตรงข้าม, แหล่งปฐมภูมิ URL ใหม่ถูก fetch และ digest แบบขนาน
+3. **หยุด** เมื่อ *entity ใหม่* ของรอบต่ำกว่าเกณฑ์ novelty (ค่าเริ่มต้น 35%) เมื่อไม่มีการค้นหาที่มีประโยชน์เหลือ หรือถึง `--max-iter` (ค่าเริ่มต้น 4) ไม่มีการให้คะแนนตัวเองโดย LLM
+4. **วางแผน** — หนึ่ง call เปลี่ยนตารางบวกรายการ note ที่มีอยู่เป็นแผน โดยเริ่มจากหน้า topic: โครงหัวข้อและ claim ที่เนื้อเรื่องต้องใช้ แล้วจึงเป็น note ที่หน้านั้นลิงก์ไป (`create` หรือ `update` ต่อ slug, entity ที่ note นั้นครอบคลุม, เหตุผลที่หน้า topic ลิงก์มา) claim ถูกผูกเข้า note ตาม entity tag โดยอัตโนมัติ — แผนไม่ต้องระบุ claim id จึงเล็กพอที่จะไม่ถูกตัด — และหน้า topic ได้รับทุก claim
+5. **เขียน** — หน้า topic ก่อน แล้วหนึ่ง call ต่อ note ลูกแบบขนาน จาก claim ของ note นั้นบวกย่อหน้าเปิดของหน้า topic การอัปเดต merge เข้า body เดิม (หรือเพิ่ม section `## Update` ที่มีวันที่ด้วย `--append`)
 
-```markdown
-## 2026-05-09 — what is the LangGraph agent strategy
+## ความเป็นปัจจุบัน
 
-- [[2026-05-09-langgraph-agent__concept-overview|Concept overview]] — Core idea …
-- [[2026-05-09-langgraph-agent__research-subtopic-tool|research_subtopic tool]] — Parallel fanout …
-- [[2026-05-09-langgraph-agent__rag-comparison|vs RAG]] — Differences in …
-```
+ทุก prompt ใน pipeline ถูกยึดกับวันที่ปัจจุบันและถูกบอกว่าความจำของโมเดลเรื่อง "เวอร์ชันล่าสุด" เก่าแล้ว ให้แหล่งข้อมูลเท่านั้นเป็นผู้ตัดสิน รอบ seed ค้นหาเพิ่มอีกหนึ่งรายการแบบกรองความสด (`<query> latest <ปี>` ผลลัพธ์ในรอบปีบน Tavily/Brave) ทุกรอบเติมช่องว่างต้องมี query "newest release <ปี>" อย่างน้อยหนึ่งรายการ และ query ที่ระบุปีปัจจุบันหรือคำว่า latest/newest จะผ่านตัวกรองความสดด้วย digest บันทึกวันที่เผยแพร่ของแต่ละหน้า เมื่อ claim ขัดกัน วันที่ใหม่กว่าชนะ และสิ่งที่เปลี่ยนตามเวลาจะถูกเขียนว่า "as of <วันที่>" ก่อนหน้านี้ run ในปี 2026 เรื่อง "Chinese AI companies" ปักการค้นหาไว้ที่ 2025 และรายงาน DeepSeek V3 กับ Qwen 3.6 เป็นรุ่นล่าสุด
 
-Wikilinks render native ใน Obsidian; ใน GitHub web view หรือ
-`KmsRead` ใช้ run-prefixed filenames เปิดได้ตรงๆ
+### run ไม่ทิ้งสิ่งที่อ่านมาแล้ว
 
-## Live progress
+body ของแต่ละ note คือ call แยกกัน ถ้าตัวหนึ่งล้มเหลว (timeout, คำตอบถูกตัด) จะเสียแค่ note นั้น note อื่น ๆ, source และ run log ยังถูกเขียนครบ และส่วน **Warnings** ใน run log จะบอกว่าข้ามอะไรไป run จะล้มเหลวทั้งหมดก็ต่อเมื่อเขียน note ไม่ได้เลยสักหน้า
 
-### GUI — right-edge sidebar
+run สองครั้งบนหัวข้อเดียวกันในวันเดียวกันได้ run log สองไฟล์ (`…-topic.md`, `…-topic-2.md`) บันทึกของครั้งแรกจึงไม่หาย
 
-panel "Research" mirror Plan / Todo sidebars ที่ขอบขวา:
-
-- **Phase** — step ปัจจุบัน (`iteration 3/8: searching 4 subtopics`,
-  `synthesizing 5 pages in parallel`, `writing pages to KMS`)
-- **Iteration progress bar** — N segments สีบอก done / in-progress /
-  pending
-- **Score history** — แถวต่อรอบที่จบ พร้อม 0-100% bar และจำนวน
-  source delta
-- **Phase log** — 10 phase ล่าสุดแบบ distinct ปัจจุบัน highlight
-- **Footer** — `Show result` / `Cancel` ตามสถานะ
-
-panel auto-focus job ล่าสุดที่ active ถ้าไม่มี job ใดๆ ก็ซ่อน
-ขอบขวากระชับ
-
-### CLI — completion line
-
-CLI print announcement เหนือ readline prompt สำหรับ job ที่จบ
-ตั้งแต่ prompt ก่อนหน้า:
+## ทำให้ note เป็นปัจจุบัน: `/research refresh`
 
 ```
-[research done: id=research-a3f1c2 → obon-festival/2026-05-09-…md]
-[research failed: id=research-x9z8] HAL request failed: HTTP 429
+/research refresh <slug>                          refresh note เดียวใน KMS ที่ attach อยู่
+/research refresh <kms> <slug> [<slug>…]          …ใน KMS ที่ระบุ
+/research refresh [<kms>] --all [--older-than 30]  ทุก note (ไม่รวม MOC) ที่ไม่ได้อัปเดตใน N วัน
 ```
 
-แต่ละ id ประกาศครั้งเดียวต่อ process ใช้ `/research show <id>`
-ดู synthesized page ใน chat, `/research wait <id>` block จน
-terminal (มีประโยชน์ใน scripts)
+refresh ใช้ชื่อ note เป็น query ค้นหาแบบสั้นสองรอบพร้อมตัวกรองความสด แล้วบังคับให้แผนเป็น `update` note นั้น: claim ใหม่ถูก merge เข้าไป ข้อเท็จจริงที่ถูกแทนที่ถูกเขียนใหม่ว่าเป็นของเก่า และวันที่ `updated` เลื่อนไป ไม่มีการเขียน map of content ใหม่ job เข้าคิวและรันทีละอัน แผง Research ตามแต่ละ job context menu ของ page ใน KMS sidebar มีคำสั่งเดียวกัน ("Refresh (research)")
 
-## Pipeline ทำงานยังไง
+## Subcommand
 
-1. **Initial broad search** — WebSearch 1 ครั้งสำหรับ raw query 10 results
-2. **Subtopic extraction** — LLM เสนอ 3-5 search queries ที่ focus จาก seed
-3. **Iteration loop** (1..max_iter):
-   - ต่อ subtopic: parallel WebSearch, top-3 fetch, accumulate
-   - Evaluate (LLM scores 0.0-1.0 + free-form notes อธิบาย gaps)
-   - Stop เมื่อ `iter ≥ min_iter AND score ≥ threshold`, หรือถึง
-     `max_iter`, หรือ LLM ตอบ "ไม่มี subtopics เพิ่ม"
-   - ไม่งั้น generate next-round subtopics จาก eval notes
-4. **Page plan** — LLM group sources เป็น ≤ `max_pages` หน้า
-   coherent. Page count เป็น *ceiling ไม่ใช่ target* — query แคบ
-   ออกหน้าน้อยลง
-5. **Parallel page synthesis** — 1 LLM call ต่อหน้า แต่ละ call เห็น
-   full plan ทำให้ cross-links resolve ได้
-6. **Cross-link rewrite** — `[[karpathy]]` กลายเป็น
-   `[[<run-prefix>__karpathy]]` ให้ resolve ไปไฟล์จริงบน disk.
-   Display text เก็บไว้ (`[[karpathy|Andrej Karpathy]]`)
-7. **Sources section + citation linkifier** — pipeline rebuild
-   `## Sources` จาก `[N]` ที่ใช้จริง และ rewrite inline `[N]` เป็น
-   clickable link ไปยัง cached source files
-8. **Write pages + update `_summary.md` + cache cited sources**
+```
+/research <query>                            เริ่ม (pipeline v2)
+/research [flags…] <query>                   เริ่มพร้อม override
+/research                                    list ทุก job (ใหม่สุดก่อน)
+/research status <id>                        phase, รอบ, แหล่ง, novelty
+/research show <id>                          พิมพ์ map of content ในแชท
+/research cancel <id>                        ยกเลิก ไม่มีอะไรเขียนครึ่งๆ กลางๆ
+/research wait <id>                          block prompt ของ CLI จนเสร็จ
+```
 
-## Cost + speed
+### Flag
 
-run typical 4-iteration พร้อม 4 subtopics และ 5 หน้า:
+| Flag | ค่าเริ่มต้น | ทำอะไร |
+|---|---|---|
+| `--kms <name>` | KMS ที่ attach ล่าสุด ไม่งั้นสร้างใหม่จากชื่อ query | KMS เป้าหมาย `--kms new` บังคับสร้าง KMS ใหม่ KMS ที่ run เขียนลงจะถูก attach กับโปรเจกต์อัตโนมัติ query ถัดๆ ไปจึงต่อ graph เดิม |
+| `--lang th\|en\|…` | `th` | ภาษาของ body ของ note, ข้อความ claim และชื่อเรื่อง ศัพท์เทคนิค ชื่อโมเดล/API และโค้ดคงเป็นภาษาอังกฤษทุกภาษา `--lang query` ใช้ภาษาเดียวกับ query |
+| `--max-notes N` | 30 (สูงสุด 50) | เพดาน note ต่อ run รวมหน้า topic entity ที่บางจะถูกรวมเข้ากับหน้าแม่แทนการตัดทิ้ง |
+| `--min-iter N` / `--max-iter N` | 2 / 4 | พื้นและเพดานของรอบ |
+| `--novelty 0.X` | 0.35 | หยุดเมื่อรอบเพิ่ม entity ใหม่น้อยกว่าสัดส่วนนี้ `1.0` = วิ่งถึง `--max-iter` เสมอ |
+| `--worker-model <id>` | โมเดลปัจจุบันของคุณ | โมเดลสำหรับ digest, gap query, แผน และ body ของ note thClaws ไม่สลับโมเดลแทนคุณ ระบุที่นี่ถ้าอยากให้ research รันบนโมเดลที่เร็วกว่าโมเดลแชท |
+| `--append` | ปิด | ไม่เขียนทับ note เดิม เพิ่ม section `## Update` ที่มีวันที่แทน สำหรับ KMS ที่ต้องมี audit trail |
+| `--dry-run` | ปิด | อ่าน digest และวางแผน แล้วเขียนแค่ run log ไม่แตะ KMS อย่างอื่น |
+| `--budget-time 20m` | 25m | เพดานเวลา เกินแล้ว job จบเป็น failed |
+| `--legacy` | ปิด | pipeline แบบ page ก่อน v0.121 (`--max-pages`, `--score-threshold`, verify pass) จะถูกลบใน release ถัดไป |
 
-| Step | LLM calls |
-|---|---|
-| extract_subtopics | 1 |
-| evaluate | 4 (1 ต่อรอบ) |
-| extract_next_subtopics | 3 |
-| plan_pages | 1 |
-| derive_topic_slug (เมื่อไม่มี `--kms`) | 1 |
-| write_research_page (parallel) | 5 |
-| **รวม** | **~15** |
+`--max-pages` รับเป็นชื่อแทนของ `--max-notes`
 
-บวก HTTP: ~17 web searches + ~12 page fetches
+## ทำไม worker model จึงสำคัญ
 
-Wall clock บน `gpt-4.1-mini`: 3-5 นาที (pages synthesize parallel
-ทำให้ multiplier ของ page-count ไม่ dominate)
+การ digest และเขียน note เป็นงานเชิงกลและรันขนาน เวลาที่ใช้จริงคือ latency ของ call เดียว ไม่ใช่จำนวน call วัดบน workspace นี้: Gemini 2.5 Flash ตอบ call ภาษาไทย 4 อันพร้อมกันใน 5–7 วินาทีต่ออัน; DeepSeek v4 Flash เข้าคิวห่างกันราว 50 วินาที; reasoning model ใช้เป็นนาที บน flash model ที่เร็ว รอบหนึ่งใช้ 30–40 วินาที บนโมเดลที่ตอบทีละ call หรือ reasoning model run เดียวกันใช้ 15–25 นาที และ engine จะ log คำแนะนำหลังรอบแรก pipeline หยุดเพิ่มรอบค้นหาเมื่อใช้ time budget ไป 60% แล้วเขียนด้วยสิ่งที่มี โมเดลช้าจึงได้ผลลัพธ์เล็กลง ไม่ใช่ล้มเหลว
 
-`/research` รัน background เต็มตัว — main chat session ไม่กระทบ
-พิมพ์ต่อได้
+## ความคืบหน้าสด
+
+**GUI** — แผง Research ขอบขวาแสดง phase (`round 2/3: reading 8 sources`, `planning notes`, `writing 11 notes`), แถบรอบ และประวัติต่อรอบที่แถบคือ novelty ของรอบนั้น
+
+**CLI** — บรรทัดแจ้งเสร็จเหนือ prompt ถัดไป:
+
+```
+[research done: id=research-523f9c5b → rv2-labour/rv2-labour.md]
+[research failed: id=research-x9z8] research time budget exhausted
+```
+
+stderr ของ engine ยัง log แต่ละรอบ (`[research] round 2: 15 sources, 64 new / 79 (71% novelty), 35.7s`), แต่ละ digest, แผน และ wave การเขียน note ซึ่งเป็นที่แรกที่ควรดูเมื่อ run ช้า
 
 ## เคล็ดลับ
 
-- **Pin KMS** — ส่ง `--kms <name>` ถ้าอยากให้ output สะสมใน knowledge
-  base เดียวข้ามหลาย runs ถ้าไม่ส่ง `--kms`, pipeline derive per-query
-  slug
-- **`/kms use <name>` ก่อนถามต่อ** ทำให้ LLM consult หน้าที่เพิ่งเขียน
-  KMS auto-activate หลัง research จบใน GUI session; CLI users อาจ
-  ต้อง activate มือ
-- **เปิด raw sources** ตอน verify claim — เปิด
-  `<kms>/sources/<slug>.md` ตรงๆ cached body มี URL ต้นฉบับใน
-  frontmatter ตามหาที่มาได้
-- **tune `--max-pages`** ตามความกว้างของ topic: 1-2 สำหรับคำถาม
-  ข้อเท็จจริงแคบ, 3-5 medium, 7+ broad overview
-- **ตั้ง HAL** ให้ source archive สะอาดกว่า — clean-Markdown ของ
-  HAL beat HTML conversion ของ `WebFetch` ชัดเจนเมื่อหน้ามี table,
-  code blocks, หรือโครงสร้างซับซ้อน
+- query ต่อเนื่องลง KMS เดียวกันโดยค่าเริ่มต้น (อันที่ attach ล่าสุด) ใช้ `--kms new` เมื่ออยากแยก graph จริงๆ และ `/kms use <name>` เพื่อเปลี่ยนว่า KMS ไหนเป็นค่าเริ่มต้น
+- เริ่มด้วย `--dry-run` บนหัวข้อใหม่เพื่อดูแผนก่อนจ่ายค่า note
+- ใช้ `--append` บน KMS ที่คนอื่นอ่าน เพราะการ merge เงียบ
+- เปิด run log ใต้ `runs/` เพื่อดูว่าค้นหาอะไรไปบ้างและ quote check ทิ้ง claim กี่ข้อ
 
-## Troubleshooting
+## แก้ปัญหา
 
-**"research time budget exhausted"** — เพิ่ม `--budget-time` หรือ
-narrow query default 15 นาที
-
-**"all WebSearch backends failed"** — เช็ค `TAVILY_API_KEY` /
-`BRAVE_SEARCH_API_KEY` ใน Settings หรือรันโดยไม่มี key (fallback
-DuckDuckGo, คุณภาพต่ำกว่า)
-
-**Pages ไม่ cross-link** — LLM link เฉพาะที่เกี่ยวข้องจริง ถ้า query
-แคบมาก (entity เดียว, concept เดียว), อาจมีหน้าเดียวจริงๆ —
-wikilinks ไม่จำเป็น
-
-**Sources section มี "(unknown source — index out of range)"** —
-LLM hallucinate citation index นอก source list. ไม่บ่อย; มัก
-หายเองหลัง retry entry ที่ resolve ไม่ได้เก็บไว้ให้เห็นว่า
-claim ไหนยังไม่มี cite
-
-**Job ค้างที่ "synthesizing N pages"** — page-synth LLM call ตัวใด
-ตัวหนึ่งช้า เช็ค `/research status <id>` ดู phase. Cancel ด้วย
-`/research cancel <id>` ถ้าเกินทน — partial results ไม่เก็บ
+| อาการ | สาเหตุ | แก้ |
+|---|---|---|
+| `research time budget exhausted` | โมเดลช้า หรือเว็บช้าหลายแห่ง | ดูเวลาใน stderr; ตั้ง `--worker-model`; `--budget-time 40m` |
+| digest ใช้เวลา 60–90 วินาทีต่อครั้งบน DeepSeek/Qwen | reasoning token บน prompt สกัดข้อมูลยาว | ไม่ต้องทำอะไร — research รัน worker call ที่ระดับ thinking `off` อยู่แล้ว (ดูบทที่ 6) ค่า `/thinking` ของแชทไม่ถูกแตะ |
+| `research found no verifiable claims` | ทุกแหล่งเป็นหน้า navigation/listing หรือ digest model ไม่คืนอะไร | ลอง query ที่เจาะจงกว่า; `--worker-model` |
+| note มี `[c:…]` ค้างในข้อความ | writer ใส่ claim id ที่ไม่อยู่ในแผน | ไม่เป็นอันตราย แก้ออกได้ build ปัจจุบันแก้แล้ว |
+| MOC ลิงก์ไป note ที่ไม่มี | แผนอ้าง slug ที่ถูกตัดเพราะไม่มี claim | build ปัจจุบันเปลี่ยน link ไป slug ที่ไม่รู้จักเป็นข้อความธรรมดา |
+| `/research show` เปิด run log | run นั้นเป็น `--dry-run` | รันใหม่โดยไม่ใส่ |

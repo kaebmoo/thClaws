@@ -91,6 +91,42 @@ provider. For prefixed providers (Ollama, Moonshot, Groq, …), IDs come
 back prefixed (e.g. `ollama/llama3.2`, `moonshot/kimi-k2.6`) so you can paste them straight
 into `/model`.
 
+## Thinking level — one knob for every provider
+
+Every provider spells "how hard should the model think" differently:
+Anthropic takes a token budget, OpenAI o-series/gpt-5 take a
+`reasoning_effort`, DeepSeek and GLM have an on/off switch, Qwen has
+`enable_thinking` + a budget, Gemini 2.5 takes a budget and Gemini 3 a
+`thinkingLevel`, Ollama takes `think: true|false`. thClaws collapses all
+of that into one level you set once:
+
+| Level | Meaning | Anthropic | OpenAI o*/gpt-5 | DeepSeek / GLM | Qwen (hybrid) | Gemini 2.5 flash / pro | Gemini 3 | Ollama |
+|---|---|---|---|---|---|---|---|---|
+| `0` off | fastest, no reasoning | no thinking block | `minimal` / `low` | `disabled` | off | budget 0 / 128 | `low` | `think: false` |
+| `1` low | short reasoning | 2 048 tokens | `low` | enabled | on, 2 048 | 2 048 | `low` | `think: true` |
+| `2` medium | balanced | 10 000 | `medium` | enabled | on, 10 000 | 10 000 | `high` | `think: true` |
+| `3` high | deepest | 32 000 | `high` | enabled | on, 32 000 | 24 576 / 32 000 | `high` | `think: true` |
+| `auto` | provider default — nothing is sent | | | | | | | |
+
+Set it either way:
+
+- **Sidebar** — the `think auto 0 1 2 3` pills under the model chip.
+- **`/thinking 0`** … `/thinking 3`, `/thinking auto`, or a raw
+  `/thinking 12000` budget for Anthropic-style providers.
+
+Both paths persist to `thinkingBudget` in `.thclaws/settings.json`, so
+the level follows the workspace, not the session. Models without a
+known knob (gpt-4o, Qwen-Max, most local models) get no extra field
+and keep behaving as before; a level is never sent to a model that
+would reject it.
+
+Frontier models still decide how much of a budget to use: on Anthropic
+and Gemini the budget is a cap, and the model spends less on an easy
+turn. `off` is the one setting that changes behaviour sharply — on
+DeepSeek v4 it is the difference between ~90 s and ~4 s for a
+long extraction prompt, which is why `/research` runs its worker calls
+(digest, plan, notes) at `off` regardless of your chat setting.
+
 ## Reasoning / "thinking" models
 
 Models in the families below emit a `reasoning_content` field

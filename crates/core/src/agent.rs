@@ -1033,6 +1033,13 @@ impl Agent {
         self
     }
 
+    /// Reasoning depth for every provider call this agent makes
+    /// (`config.thinking_budget`; see `providers::ThinkingLevel`).
+    pub fn with_thinking_budget(mut self, budget: Option<u32>) -> Self {
+        self.thinking_budget = budget;
+        self
+    }
+
     /// Force the approval gate on for these tool names regardless of the
     /// permission mode (config `askTools`). See the field docs.
     pub fn with_ask_tools(mut self, tools: Vec<String>) -> Self {
@@ -1928,6 +1935,38 @@ impl Agent {
                     // (SubmitPlan, UpdatePlanStep, EnterPlanMode,
                     // ExitPlanMode) have requires_approval=false and so
                     // sail through.
+                    // Phase 8: a denied tool is removed from every
+                    // registry, so the model normally never sees it.
+                    // Refuse again here for the registries this did not
+                    // reach — a subagent built elsewhere, a tool added
+                    // at runtime — because "the model could not call it"
+                    // is a weaker claim than "the call does not run".
+                    if !crate::policy::tool_allowed(name) {
+                        crate::audit::record_denied(
+                            &id,
+                            tool.as_ref(),
+                            input,
+                            "policy",
+                            "denied by policies.runtime.deny_tools",
+                        );
+                        let blocked = format!(
+                            "Blocked: {name} is disabled by org policy and will not run. \
+                             Do not try again; solve the task without it or tell the user."
+                        );
+                        result_blocks.push(ContentBlock::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: blocked.clone().into(),
+                            is_error: true,
+                        });
+                        yield AgentEvent::ToolCallResult {
+                            id: id.clone(),
+                            name: name.clone(),
+                            output: Err(blocked),
+                            ui_resource: None,
+                        };
+                        continue;
+                    }
+
                     if matches!(permission_mode, PermissionMode::Plan)
                         && tool.requires_approval(input)
                     {

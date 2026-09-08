@@ -280,7 +280,7 @@ runtime toggle ทั้งหมดอยู่รวมกันในไฟ�
 | `model` | string | `"claude-sonnet-4-6"` | [บทที่ 6](ch06-providers-models-api-keys.md) |
 | `maxTokens` | number | `32000` | (max output tokens ต่อ turn) |
 | `maxIterations` | number | `50` | (cap ของ tool-call loop ต่อ turn) |
-| `thinkingBudget` | number | `10000` | [บทที่ 6](ch06-providers-models-api-keys.md) (Anthropic extended-thinking) |
+| `thinkingBudget` | number | *(ไม่ตั้ง = auto)* | [บทที่ 6](ch06-providers-models-api-keys.md) — ระดับ thinking ในรูป token budget: `0` ปิด, `2048` low, `10000` medium, `32000` high; `/thinking` และ pill บน sidebar เขียนค่านี้ให้ |
 | `searchEngine` | string | `"auto"` | (`auto` / `tavily` / `brave` / `serpapi` / `duckduckgo`) |
 
 #### Permissions + tools

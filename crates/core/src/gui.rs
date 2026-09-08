@@ -1566,6 +1566,7 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                     "type": "initial_state",
                     "provider": provider_name,
                     "model": config.model,
+                    "thinking": crate::providers::ThinkingLevel::json(config.thinking_budget),
                     "provider_ready": provider_ready,
                     "mcp_servers": mcp_servers,
                     "sessions": sessions,

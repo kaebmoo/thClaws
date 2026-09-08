@@ -158,6 +158,27 @@ impl OpenAIResponsesProvider {
             "input": input,
             "stream": true,
         });
+        // ThinkingLevel → Responses API `reasoning.effort` (o-series and
+        // gpt-5 only; other models reject the field).
+        if let Some(level) = super::ThinkingLevel::from_budget(req.thinking_budget) {
+            let m = model.to_ascii_lowercase();
+            if m.starts_with('o') || m.starts_with("gpt-5") {
+                use super::ThinkingLevel as L;
+                let effort = match level {
+                    L::Off => {
+                        if m.starts_with("gpt-5") {
+                            "minimal"
+                        } else {
+                            "low"
+                        }
+                    }
+                    L::Low => "low",
+                    L::Medium => "medium",
+                    L::High => "high",
+                };
+                body["reasoning"] = json!({"effort": effort});
+            }
+        }
 
         // ChatGPT-subscription Codex (chatgpt.com/backend-api/codex) requires
         // `store: false` explicitly — server returns 400 "Store must be set to

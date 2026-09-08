@@ -322,6 +322,10 @@ export function FilesView({ active }: Props) {
   // picker (only used when more than one KMS exists). Reset when the menu
   // opens/closes so it never leaks between right-clicks.
   const [kmsPick, setKmsPick] = useState(false);
+  // Which "Add to KMS" flavour the expanded picker is for: `summary`
+  // (agent curates the stub page) or `atomic` (research job splits the
+  // document into a topic page + one note per idea).
+  const [kmsPickMode, setKmsPickMode] = useState<"summary" | "atomic">("summary");
   // New file / folder name modal. null = closed; otherwise which kind.
   const [createKind, setCreateKind] = useState<"file" | "folder" | null>(null);
   const [createName, setCreateName] = useState("");
@@ -627,7 +631,13 @@ export function FilesView({ active }: Props) {
   // alias collision (`force` false) the backend flags `collision`; we then
   // confirm and re-ingest with `force: true` to replace the existing entry.
   const addToKms = useCallback(
-    (path: string, name: string, kmsName: string, force = false) => {
+    (
+      path: string,
+      name: string,
+      kmsName: string,
+      force = false,
+      mode: "summary" | "atomic" = "summary",
+    ) => {
       const reqId = Date.now() + Math.floor(Math.random() * 100000);
       const unsub = subscribe((msg) => {
         if (msg.type !== "kms_ingest_result" || msg.id !== reqId) return;
@@ -635,12 +645,17 @@ export function FilesView({ active }: Props) {
         if (msg.ok) {
           const imgs = Number(msg.images_copied ?? 0);
           const verb = msg.overwrote ? "updated in" : "added to";
+          const tail = msg.atomic
+            ? msg.research_error
+              ? ` — atomic notes not started: ${String(msg.research_error)}`
+              : " — building atomic notes (see Research sidebar)…"
+            : " — summarizing…";
           setSaveToast(
             `${verb} ${kmsName}: ${String(msg.alias ?? name)}${
               imgs > 0 ? ` (+${imgs} image${imgs === 1 ? "" : "s"})` : ""
-            } — summarizing…`,
+            }${tail}`,
           );
-          setTimeout(() => setSaveToast(null), 3500);
+          setTimeout(() => setSaveToast(null), 4500);
           // Auto-summary: hand the backend-composed prompt to the main
           // agent as a normal chat turn so it upgrades the stub page into
           // a curated summary (KmsRead/KmsSearch/KmsWrite). Visible in chat.
@@ -657,7 +672,7 @@ export function FilesView({ active }: Props) {
             yesLabel: "Replace",
             noLabel: "Cancel",
           }).then((confirmed) => {
-            if (confirmed) addToKms(path, name, kmsName, true);
+            if (confirmed) addToKms(path, name, kmsName, true, mode);
           });
           return;
         }
@@ -666,7 +681,7 @@ export function FilesView({ active }: Props) {
         );
         setTimeout(() => setSaveToast(null), 3500);
       });
-      send({ type: "kms_ingest", id: reqId, path, kms: kmsName, force });
+      send({ type: "kms_ingest", id: reqId, path, kms: kmsName, force, mode });
     },
     [],
   );
@@ -1836,27 +1851,34 @@ export function FilesView({ active }: Props) {
                 a hint toast. */}
             {!entryMenu.isDir && /\.(md|markdown)$/i.test(entryMenu.name) && (
               <>
-                <MenuItem
-                  icon={<Library size={13} />}
-                  label={
-                    kmsList.length > 1
-                      ? `Add to KMS${kmsPick ? " ▾" : " ▸"}`
-                      : "Add to KMS"
-                  }
-                  onClick={() => {
-                    const m = entryMenu;
-                    if (kmsList.length === 0) {
-                      setEntryMenu(null);
-                      setSaveToast("no KMS yet — create one first");
-                      setTimeout(() => setSaveToast(null), 3000);
-                    } else if (kmsList.length === 1) {
-                      setEntryMenu(null);
-                      addToKms(m.path, m.name, kmsList[0].name);
-                    } else {
-                      setKmsPick((v) => !v);
-                    }
-                  }}
-                />
+                {(["summary", "atomic"] as const).map((mode) => {
+                  const open = kmsPick && kmsPickMode === mode;
+                  const base =
+                    mode === "summary" ? "Add to KMS" : "Add to KMS as atomic notes";
+                  return (
+                    <MenuItem
+                      key={`add-${mode}`}
+                      icon={<Library size={13} />}
+                      label={kmsList.length > 1 ? `${base}${open ? " ▾" : " ▸"}` : base}
+                      onClick={() => {
+                        const m = entryMenu;
+                        if (kmsList.length === 0) {
+                          setEntryMenu(null);
+                          setSaveToast("no KMS yet — create one first");
+                          setTimeout(() => setSaveToast(null), 3000);
+                        } else if (kmsList.length === 1) {
+                          setEntryMenu(null);
+                          addToKms(m.path, m.name, kmsList[0].name, false, mode);
+                        } else if (open) {
+                          setKmsPick(false);
+                        } else {
+                          setKmsPickMode(mode);
+                          setKmsPick(true);
+                        }
+                      }}
+                    />
+                  );
+                })}
                 {kmsPick &&
                   kmsList.length > 1 &&
                   kmsList.map((k) => (
@@ -1867,7 +1889,7 @@ export function FilesView({ active }: Props) {
                       onClick={() => {
                         const m = entryMenu;
                         setEntryMenu(null);
-                        addToKms(m.path, m.name, k.name);
+                        addToKms(m.path, m.name, k.name, false, kmsPickMode);
                       }}
                     />
                   ))}

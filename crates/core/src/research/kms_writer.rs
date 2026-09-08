@@ -179,6 +179,16 @@ fn escape_yaml_string(s: &str) -> String {
 /// Bridge into the system-time → date-string conversion used by the
 /// rest of KMS. Callers in tests pass an explicit date; production
 /// uses [`crate::usage::today_str`].
+/// Query → human title for the MOC note (first 80 chars, trimmed).
+pub fn title_from_query(query: &str) -> String {
+    let t = query.trim();
+    let mut s: String = t.chars().take(80).collect();
+    if t.chars().count() > 80 {
+        s.push('…');
+    }
+    s
+}
+
 pub fn today_str() -> String {
     crate::usage::today_str()
 }
@@ -242,7 +252,17 @@ pub fn write_source(
 /// URL → filesystem-safe slug. Strip protocol, lowercase, replace
 /// non-alphanumerics with `-`, collapse runs, trim, cap at 80 chars.
 /// `https://en.wikipedia.org/wiki/Obon` → `en-wikipedia-org-wiki-obon`.
-fn url_to_filename(url: &str) -> String {
+pub fn url_to_filename(url: &str) -> String {
+    // A locally ingested source is already archived as
+    // `sources/<alias>.md`; its research url is `kms://<kms>/sources/<alias>`.
+    if let Some(rest) = url.strip_prefix("kms://") {
+        if let Some((_, alias)) = rest.split_once("/sources/") {
+            let alias = alias.split('#').next().unwrap_or(alias);
+            if !alias.is_empty() {
+                return alias.to_string();
+            }
+        }
+    }
     let stripped = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
@@ -541,7 +561,7 @@ pub fn append_run_section(
 /// output. Non-numeric brackets (`[ref]`, `[link](url)`) are
 /// ignored. False positives are cheap (one extra source file);
 /// false negatives leak provenance, so the parser leans permissive.
-pub fn parse_citation_indices(markdown: &str) -> std::collections::HashSet<u32> {
+pub(crate) fn parse_citation_indices(markdown: &str) -> std::collections::HashSet<u32> {
     let mut out = std::collections::HashSet::new();
     let bytes = markdown.as_bytes();
     let mut i = 0usize;
@@ -1091,6 +1111,14 @@ mod tests {
     }
 
     // ── url_to_filename ────────────────────────────────────────────
+
+    #[test]
+    fn url_to_filename_maps_local_sources_to_their_alias() {
+        assert_eq!(
+            url_to_filename("kms://notes/sources/my-doc#part-2-1234"),
+            "my-doc"
+        );
+    }
 
     #[test]
     fn url_to_filename_strips_protocol() {

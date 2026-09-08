@@ -309,6 +309,12 @@ KMS 'archived-docs' detached (system prompt updated)
 | `https://...` URL | HTTP fetch (timeout 30s); response body ได้ banner `<!-- fetched from <url> on <date> -->` ก่อน ingest |
 | `$` | พิเศษ — "chat session ปัจจุบัน" trigger agent turn ที่สรุป conversation เป็น wiki page (200–1500 คำ, สังเคราะห์) แล้วเรียก `KmsWrite` ชื่อ page จาก `session.title` (sanitize) ถ้ามี ไม่งั้น `session.id` (`sess-<hex>`) — ดูด้านล่าง |
 
+**Atomic notes จากเอกสาร** ในแท็บ Files ของ GUI คำสั่ง *Add to KMS as atomic
+notes* รัน writer ของ `/research` บน source ที่ archive ไว้แทนการสรุปหน้าเดียว:
+digest เอกสารทีละ window ตรวจ quote ของ claim แล้วได้หน้า topic (ทับ stub) บวก
+หนึ่ง note ต่อหนึ่งความคิด ทุกหน้าอ้างอิง `../sources/<alias>.md` ดู
+[บทที่ 4](ch04-desktop-gui-tour.md) และ [บทที่ 20](ch20-research.md)
+
 flag เสริม:
 
 - `as <alias>` — override page stem ที่ระบบ derive ให้ ใช้เมื่อชื่อไฟล์หรือ URL ผลิต stem หน้าตาน่าเกลียด
@@ -383,6 +389,33 @@ filed answer → /Users/you/.config/thclaws/kms/notes/pages/oauth-debugging-reca
 ```
 
 ชื่อ page คือ `<title>` ที่ sanitize เป็น stem frontmatter pre-set เป็น `category: answer, filed_from: chat` body คือข้อความ assistant ล่าสุดทั้งดุ้น ใต้ H1 ที่ใส่ title ไว้
+
+### `/kms verify [NAME] [--llm] [--fix] [--stale-days N] [--page SLUG]`
+
+ถ้า `lint` ถามว่า **โครงสร้าง** ยังดีอยู่ไหม `verify` ถามว่า **หลักฐาน** ยังอยู่ไหม ไม่ใส่ชื่อก็ได้ จะใช้ KMS ที่ผูกอยู่
+
+pass เริ่มต้นอ่านไฟล์อย่างเดียว ไม่มีค่าใช้จ่าย:
+
+| การตรวจ | จับอะไร |
+|---|---|
+| unresolved citation | `[N]` ที่ไม่ตรงกับ source ใดใน registry ของ KMS |
+| missing archive | source ที่ถูกอ้างแต่ไม่มีสำเนาใน `sources/` |
+| quote drift | claim ที่ข้อความ verbatim ของมันไม่อยู่ใน source ที่ archive ไว้แล้ว แปลว่า archive ถูกแก้หรือถูกแทนที่หลังจากสกัด claim นั้นมา |
+| link ใน URL | linker เขียนทับคำที่อยู่ในที่อยู่เว็บ เหลือ `https://[[tracxn]].com/…` ใช้ `--fix` ถอดออก และถอดเฉพาะกรณีนี้เท่านั้น |
+| `sources:` drift | frontmatter กับ body ไม่ตรงกันว่า note ยืนอยู่บน source ไหน |
+| uncited assertion | ย่อหน้าที่อ้างตัวเลขโดยไม่มี citation เลยทั้งย่อหน้า |
+| stale | note ที่ `updated:` เก่ากว่า `--stale-days` (ค่าเริ่มต้น 90) |
+
+`--llm` เพิ่มการตรวจอย่างเดียวที่ไฟล์ตอบไม่ได้ คือประโยคแต่ละประโยคตามมาจาก claim ที่มันอ้างหรือไม่ มันส่งไปแค่ note กับ **ข้อความ claim** ที่อยู่เบื้องหลัง citation ไม่ส่ง body ของ source เพราะ claim ถูกตรวจกับ source ไปแล้ว หนึ่งหน้าจึงใช้ prompt ราว 15 KB และรันครั้งละ 8 หน้า ส่วน verifier ของ v1 ถามคำถามเดียวกันด้วยการส่ง body ของทุก source กลับไปใหม่ทีละหน้า จนใช้เวลานานกว่าการค้นหาที่สร้างหน้าเหล่านั้นเสียอีก
+
+ตัว auditor เองก็ถูกตรวจด้วยมาตรฐานเดียวกับตัวสกัด ประโยคที่ถูก flag แต่ไม่ตรงกับ note แบบตัวต่อตัวจะถูกทิ้ง โมเดลที่ paraphrase input ของตัวเองจึงสร้าง finding ปลอมไม่ได้
+
+```
+❯ /kms verify research
+KMS 'research' verify — 51 page(s), 556 claim(s) re-checked against 56 archived source(s)
+
+20 finding(s)
+```
 
 ### `/kms lint NAME`
 
@@ -589,6 +622,18 @@ link ที่หักจากการ rename, `link --apply` ทอ page ใ
 `reconcile --apply` แก้ contradiction กรณี KMS สองตัวคุย topic
 เดียวกันแบบไม่ตรงกัน แล้วค่อย `drop --force` retire KMS ต้นทาง
 
+### `/kms rename OLD NEW`
+
+เปลี่ยนชื่อโฟลเดอร์ KMS ในที่เดิม (scope เดิม) ถ้า `OLD` ผูกกับโปรเจกต์อยู่
+การผูกจะตามชื่อใหม่ไปด้วย และใน GUI จะ rebuild agent ให้ system prompt
+เรียกชื่อใหม่ page, source และ wikilink ไม่ถูกแตะ — link ชี้ไปที่ slug
+ของ page ไม่ใช่ชื่อ KMS ปฏิเสธชื่อที่มีอยู่แล้วหรือมี path separator
+Alias: `mv`
+
+ใน GUI คลิกขวาที่ KMS ในรายการ **Knowledge** ของ sidebar จะได้เมนู
+**Rename…**, **Export OKF bundle…** และ **Delete…** (Delete ถามยืนยันก่อน
+แล้วรัน `/kms drop NAME --force`)
+
 ### `/kms drop NAME [--force]`
 
 destructive — ลบ directory tree ทั้ง KMS (`<scope>/.thclaws/kms/<name>/`
@@ -616,6 +661,13 @@ section
 ไม่งั้นหายเลย แนะนำให้ pair กับ `/kms merge` ก่อน ถ้าทำ
 consolidation เพื่อให้มี copy ใน destination KMS ก่อน drop ตัว
 ต้นทาง
+
+### frontmatter ของคุณอยู่รอดการเขียนทับ
+
+`/research` เขียน note ใหม่ทุกครั้งที่ run ถัดมาเพิ่ม claim ให้ และ `write_page` แทนที่ทั้งไฟล์ มีสองข้อรับประกันที่กันไม่ให้สิ่งที่คุณดูแลไว้หายไป:
+
+- `created:` ถูกยกมาจากไฟล์บนดิสก์เสมอเมื่อผู้เขียนไม่ได้ระบุมา วันสร้างของ note จึงถูกตั้งครั้งเดียว
+- research update เก็บทุก key ที่ไม่ใช่ของตัวเองไว้ — `category`, `tags`, `aliases`, `verified` และอะไรก็ตามที่คุณเพิ่ม มันเป็นเจ้าของแค่ `title`, `type`, `kind`, `related`, `sources`, `claims`, `confidence` และ `updated` (ส่วน `status: derived` / `status: researching` จะถูกล้าง เพราะหน้านั้นถูกเขียนแล้ว)
 
 ## Schema versioning และกฎ frontmatter
 
@@ -957,13 +1009,46 @@ KMS เพิ่ม 3 surface สำหรับ browse-time ใน v0.8.5 — �
 
 ### KMS browser sidebar
 
-คลิกชื่อ KMS ใน sidebar ด้านซ้าย (ไม่ใช่ checkbox) จะมี panel ขนาด 260 px เลื่อนเข้ามาทางขวาแสดง page และ source archive ทั้งหมด คลิกไฟล์เปิด in-app viewer ทับ tab หลัก Tab ที่อยู่ใต้ยังถูก mount อยู่ จะ preserve state ของ xterm / chat ได้ ปิด browser, สลับ tab, หรือกด `ESC` จะกลับมาที่ tab เดิม
+คลิกชื่อ KMS ใน sidebar ด้านซ้าย (ไม่ใช่ checkbox) จะมี panel ขนาด 260 px เลื่อนเข้ามาทางขวาแสดง page และ source archive ทั้งหมด คลิกไฟล์เปิด in-app viewer ทับ tab หลัก
+
+**เปิดมาที่หน้าเริ่มต้นของ vault ให้เลย** และไฮไลต์ไว้ในรายการด้วย
+
+หน้าเริ่มต้นถูก **บันทึกตอนที่ page แรกของ KMS ถูกสร้าง** เพราะสิ่งที่ vault เริ่มต้นด้วยคือสิ่งที่มันพูดถึง เก็บไว้ใน `manifest.json` จึงอยู่รอดการ export/import OKF การ rename จะพามันไปด้วย ส่วนการลบหน้านั้นจะล้างค่าทิ้ง `/kms entry [NAME]` ดูค่าปัจจุบัน `--set <slug>` ปักหมุดหน้าอื่น `--clear` กลับไปใช้การอนุมาน
+
+ถ้าไม่มีค่าบันทึกไว้ engine จะอนุมานให้: ถ้ามี map of content (`kind: moc`) ใช้อันนั้น เพราะ `/research` เขียนหนึ่งอันต่อหนึ่ง query และเป็นหน้าที่อธิบายทั้งหัวข้อ ถ้าไม่มีก็ใช้หน้าที่มีคนลิงก์มาหามากที่สุด เพราะใน vault ที่ไม่มีใครวางแผนไว้ hub คือสิ่งที่ทุกอย่างชี้มา ถ้ายังไม่มีอีกก็ใช้หน้าที่อัปเดตล่าสุด ค่าที่บันทึกไว้แต่ชี้ไปหน้าที่ไม่มีแล้วจะถูกเมิน ไม่ใช่ทำตาม
+
+เปิดเฉพาะการแสดงรายการครั้งแรกเท่านั้น การ refresh ทีหลัง (research job เสร็จ หรือมีการ rename page) จะไม่ดึงคุณออกจากหน้าที่กำลังอ่าน Tab ที่อยู่ใต้ยังถูก mount อยู่ จะ preserve state ของ xterm / chat ได้ ปิด browser, สลับ tab, หรือกด `ESC` จะกลับมาที่ tab เดิม
 
 Viewer render Markdown ผ่าน `marked` พร้อม CSS แบบเอกสาร: heading ขีดเส้นใต้, blockquote tint accent, table มี border + zebra stripes, link 3 แบบ — external (underline solid), `[[wikilinks]]` ภายใน (dotted underline + accent pill), citation chip `[N]` (pill เล็ก rounded)
 
+**Linked from** ทุกหน้าจะปิดท้ายด้วยรายการ note ที่ชี้มาหาหน้านั้น edge นับสามรูปแบบที่ KMS ใช้ ได้แก่ `[[wikilink]]`, markdown link `[text](pages/x.md)` และ `related:` ใน frontmatter ซึ่งเป็นชุดเดียวกับที่ graph view วาดและ `/kms lint` นับ
+
+รายการนี้คำนวณใหม่ทุกครั้งที่อ่านและไม่ถูกเขียนลงไฟล์ เพราะ backlink เป็นคุณสมบัติของ graph ข้อเท็จจริงที่ว่า A ลิงก์ไป B อยู่ในไฟล์ A การเก็บสำเนาไว้ใน B แปลว่าต้องเขียนทับปลายทางทุกไฟล์ทุกครั้งที่แก้ และการเขียนทับแต่ละครั้งจะดัน `updated:` ของปลายทาง ซึ่งเป็นสัญญาณที่ `/research refresh --older-than` ใช้ตัดสินว่าอะไรเก่า
+
+เพราะเป็นค่าที่คำนวณได้ มันจึงถูกส่งไปยังทุกที่ที่ต้องใช้แทนการเก็บลงไฟล์:
+
+| ที่ไหน | มาถึงอย่างไร |
+|---|---|
+| KMS viewer | แถบ **Linked from** ใต้หน้า |
+| agent (`KmsRead`) | บรรทัด `Linked from (N): …` ปิดท้ายผลลัพธ์ |
+| `/kms html` | site ที่สร้างขึ้นเรนเดอร์ให้ทุกหน้า |
+| OKF export | เขียนเป็น section `## Linked from` จริง เพราะ bundle ออกจาก KMS ไปแล้ว ไม่มีใครข้างนอกคำนวณ edge ใหม่ได้ ตอน import จะถูกถอดออก เพราะ KMS ปลายทางคำนวณเองอยู่แล้ว |
+
+**เลือกข้อความ → คลิกขวา → Create page** ไฮไลต์วลีใน page (2–120 ตัวอักษร)
+แล้วคลิกขวา ทั้งสองตัวเลือกจะเปลี่ยนวลีนั้นใน page ที่อ่านอยู่เป็น link
+`[[slug|วลี]]` สร้าง stub note ที่ `pages/<slug>.md` ให้ link ใช้ได้ทันที
+แล้วเริ่ม `/research` เรื่องวลีนั้น (ใช้ชื่อ page เป็นบริบท) เขียนลง note นั้น
+ดูความคืบหน้าได้ใน Research sidebar:
+
+- **summary** — note เดียวจบในตัว (`--max-notes 1`, ค้นหา 2 รอบ) เหมาะกับคำที่แค่อยากให้อธิบาย
+- **atomic** — run แบบ topic-first เต็มรูปแบบ: note นั้นกลายเป็นหน้า topic ที่มี note ลูกหนึ่งหน้าต่อหนึ่งความคิด เหมือน `/research`
+
+ถ้ามี note ชื่อ slug นั้นอยู่แล้วจะแค่แทรก link วลีต้องอยู่ในเนื้อหาธรรมดา ถ้าเลือกคร่อม link หรือ citation chip เดิม
+จะไม่แทรก link และมีข้อความแจ้ง
+
 ### Graph view สไตล์ Obsidian
 
-Browser sidebar มีปุ่ม "Graph View" เหนือ list page คลิกแล้วจะแทน main pane ด้วย force-directed graph: page เป็นวงกลม, `[[wikilinks]]` เป็น edges, checkbox "Include sources" (default on) เพิ่ม source archive เป็น diamond node สีจางที่เชื่อมกับ page ที่อ้างถึง
+Browser sidebar มีปุ่ม "Graph View" เหนือ list page คลิกแล้วจะแทน main pane ด้วย force-directed graph: page เป็นวงกลม, `[[wikilinks]]` เป็น edges, checkbox "Include sources" (default off — แสดงเฉพาะ page) เพิ่ม source archive เป็น diamond node สีจางที่เชื่อมกับ page ที่อ้างถึง
 
 - ลาก empty space เพื่อ pan; mouse wheel zoom รอบ cursor
 - ลาก node ย้ายตำแหน่ง — pin กับ mouse, neighbors ตอบสนองด้วย spring forces

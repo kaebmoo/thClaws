@@ -206,6 +206,14 @@ struct MultiTenantState {
 /// Spin up the server. Spawns the worker, builds the Axum router,
 /// blocks until the listener returns (Ctrl-C / panic / shutdown).
 pub async fn run(config: ServeConfig) -> crate::error::Result<()> {
+    // Phase 8: `--serve` opens an HTTP port carrying the web UI and the
+    // OpenAI-compatible API. An org that forbids it needs the refusal
+    // here, before the bind, not a note in the docs.
+    if !crate::policy::serve_allowed() {
+        return Err(crate::error::Error::Tool(
+            "--serve is disabled by org policy (policies.runtime.allow_serve = false)".into(),
+        ));
+    }
     let listener = tokio::net::TcpListener::bind(&config.bind)
         .await
         .map_err(|e| crate::error::Error::Tool(format!("bind {}: {e}", config.bind)))?;
@@ -2015,6 +2023,7 @@ fn build_initial_state_payload(sessions_dir: Option<std::path::PathBuf>) -> Stri
         "type": "initial_state",
         "provider": provider_name,
         "model": config.model,
+        "thinking": crate::providers::ThinkingLevel::json(config.thinking_budget),
         "provider_ready": provider_ready,
         "mcp_servers": mcp_servers,
         "sessions": sessions,

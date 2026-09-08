@@ -1,7 +1,7 @@
 {
   "schema": 4,
   "source": "baseline 2026-06-10 — pricing synced from LiteLLM (github.com/BerriAI/litellm)",
-  "fetched_at": "2026-09-05T00:00:00Z",
+  "fetched_at": "2026-09-07T00:00:00Z",
   "providers": {
     "anthropic": {
       "list_url": "https://api.anthropic.com/v1/models",
@@ -3448,50 +3448,50 @@
           "context": 1048576,
           "max_output": 384000,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-05",
+          "verified_at": "2026-09-07",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.08442,
-          "output_per_mtok": 0.16884
+          "input_per_mtok": 0.088606,
+          "output_per_mtok": 0.177212
         },
         "deepseek/deepseek-v4-flash-0731": {
           "context": 1048576,
           "max_output": 384000,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-04",
+          "verified_at": "2026-09-07",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.065,
-          "output_per_mtok": 0.18
+          "input_per_mtok": 0.14,
+          "output_per_mtok": 0.28
         },
         "deepseek/deepseek-v4-flash-vision-exp": {
           "context": 1048576,
           "max_output": 384000,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-05",
+          "verified_at": "2026-09-07",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.22,
-          "output_per_mtok": 0.66
+          "input_per_mtok": 0.44,
+          "output_per_mtok": 1.32
         },
         "deepseek/deepseek-v4-pro": {
           "context": 1048576,
           "max_output": 384000,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-05",
+          "verified_at": "2026-09-07",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.849816,
-          "output_per_mtok": 1.699632
+          "input_per_mtok": 1.0353,
+          "output_per_mtok": 2.0706
         },
         "deepseek/deepseek-v4-pro-0813": {
           "context": 1048576,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-05",
+          "verified_at": "2026-09-07",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.57948,
-          "output_per_mtok": 1.73844
+          "input_per_mtok": 1.12068,
+          "output_per_mtok": 3.36204
         },
         "dots-studio/dots-3-note-preview:free": {
           "context": 512000,
@@ -5731,21 +5731,21 @@
           "context": 262144,
           "max_output": 65536,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-05",
+          "verified_at": "2026-09-07",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.08,
-          "output_per_mtok": 0.75
+          "input_per_mtok": 0.3125,
+          "output_per_mtok": 1.25
         },
         "qwen/qwen3.5-397b-a17b": {
           "context": 262144,
           "max_output": 65536,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-04",
+          "verified_at": "2026-09-07",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.55,
-          "output_per_mtok": 3.5
+          "input_per_mtok": 0.39,
+          "output_per_mtok": 2.34
         },
         "qwen/qwen3.5-9b": {
           "context": 262144,
@@ -6059,11 +6059,11 @@
           "context": 262144,
           "max_output": 128000,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-05",
+          "verified_at": "2026-09-07",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.0825,
-          "output_per_mtok": 0.33
+          "input_per_mtok": 0.132,
+          "output_per_mtok": 0.528
         },
         "tencent/hy3-preview": {
           "context": 262144,
@@ -6306,11 +6306,11 @@
           "context": 204800,
           "max_output": 204800,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-04",
+          "verified_at": "2026-09-07",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.55,
-          "output_per_mtok": 2.2
+          "input_per_mtok": 0.43,
+          "output_per_mtok": 1.75
         },
         "z-ai/glm-4.6v": {
           "context": 131072,
@@ -6382,16 +6382,6 @@
           "chat": true,
           "input_per_mtok": 0.966,
           "output_per_mtok": 3.036
-        },
-        "z-ai/glm-5.2:free": {
-          "context": 256000,
-          "max_output": 256000,
-          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-08-22",
-          "free": true,
-          "chat": true,
-          "input_per_mtok": 0.0,
-          "output_per_mtok": 0.0
         },
         "z-ai/glm-5.3": {
           "context": 1048576,

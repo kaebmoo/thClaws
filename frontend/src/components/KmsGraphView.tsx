@@ -63,7 +63,11 @@ export function KmsGraphView({ kmsName, onClose, onOpenFile }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [hover, setHover] = useState<string | null>(null);
   const [view, setView] = useState({ tx: 0, ty: 0, scale: 1 });
-  const [includeSources, setIncludeSources] = useState(true);
+  // Pages-only by default: research notes now link each other densely,
+  // and a 50-note KMS carries ~50 source nodes + ~700 citation edges on
+  // top — a hairball that hides the structure. The toggle brings them
+  // back.
+  const [includeSources, setIncludeSources] = useState(false);
   const [hideOrphanSources, setHideOrphanSources] = useState(true);
   const [_, force] = useState(0); // re-render trigger from rAF loop
 

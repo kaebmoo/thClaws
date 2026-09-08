@@ -187,6 +187,27 @@ impl OllamaProvider {
             "messages": messages,
             "stream": true,
         });
+        // ThinkingLevel: Ollama's chat API takes a boolean `think`, but
+        // rejects it (400) on models without the thinking capability, so
+        // only send it to families known to have it.
+        if let Some(level) = super::ThinkingLevel::from_budget(req.thinking_budget) {
+            let m = model.to_ascii_lowercase();
+            let thinking_capable = [
+                "qwen3",
+                "deepseek-r1",
+                "deepseek-v3.1",
+                "gpt-oss",
+                "magistral",
+                "glm",
+                "phi4-reasoning",
+                "nemotron",
+            ]
+            .iter()
+            .any(|f| m.contains(f));
+            if thinking_capable {
+                body["think"] = json!(level != super::ThinkingLevel::Off);
+            }
+        }
         if !req.tools.is_empty() {
             let tools: Vec<Value> = req
                 .tools

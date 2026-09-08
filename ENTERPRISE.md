@@ -189,10 +189,31 @@ Create `policy.json`:
       "issuer_url": "https://acme.okta.com",
       "client_id": "thclaws-internal",
       "audience": "thclaws"
+    },
+    "runtime": {
+      "enabled": true,
+      "permission_mode": "ask",
+      "deny_tools": ["Bash", "WebFetch"],
+      "allow_remote": false,
+      "allow_serve": false
     }
   }
 }
 ```
+
+The `runtime` block is the one that says *no*:
+
+| Field | Effect |
+|---|---|
+| `permission_mode` | Forces `ask`, `auto` or `plan`. Applied after `settings.json` **and** after CLI flags, so `--permission-mode auto` and `--accept-all` cannot climb over it. Omit to leave the user's choice. |
+| `deny_tools` | Tool names the agent may not use. Removed from every registry so the model never sees them, and refused again at dispatch — a subagent that built its own registry still cannot call one. Case-insensitive. |
+| `allow_remote` | `false` blocks thClaws Remote, the tunnel that makes this machine's agent reachable from the cloud. Every path that starts a session refuses. Default `true`. |
+| `allow_serve` | `false` makes `--serve` refuse to bind, closing the HTTP surface that carries the web UI and the OpenAI-compatible API. Default `true`. |
+
+The two booleans default to **true** on purpose: a policy cannot switch
+off Remote by forgetting a field, only by saying so. `audit` records what
+happened; `runtime` decides what may happen — deploy both, and a denied
+tool call is still audited with `decided_by: "policy"`.
 
 Each `policies.<feature>.enabled` flag controls whether that feature
 applies. Disabled or omitted blocks fall back to open-source default
@@ -249,8 +270,9 @@ become enforceable as their respective phase ships:
 | `gateway` (HTTP routing, fail-closed, identity injection) | 3 | ✅ Shipped | v0.5.0 |
 | `sso` (OIDC discovery, PKCE, token storage, gateway identity) | 4 | ✅ Shipped (Google smoke verified) | v0.6.0 |
 | `audit` (client-side tool-call records, file + http sinks) | 5 | ✅ Implemented — [RFC 0001](docs/rfc/0001-tool-call-audit.md), [#203](https://github.com/thClaws/thClaws/issues/203) | v0.120.0 |
+| `runtime` (forced permission mode, tool deny-list, Remote + `--serve` switches) | 8 | ✅ Implemented | next release |
 
-A policy file with all four blocks present is valid against any v0.5.x+
+A policy file with every block present is valid against any v0.5.x+
 build; blocks for unimplemented phases are accepted but inert. Once
 the corresponding phase ships, the same policy file gains enforcement
 without re-signing.

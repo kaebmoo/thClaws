@@ -327,10 +327,31 @@ pub enum SlashCommand {
         /// (NaN). Converted to `f32` at dispatch time when applying to
         /// `JobConfig`.
         score_threshold_pct: Option<u32>,
-        /// M6.39.6: cap on KMS pages emitted per research run.
+        /// M6.39.6: cap on KMS pages emitted per research run (legacy).
         max_pages: Option<u32>,
         budget_tokens: Option<u64>,
+        /// v2 (dev-plan/58): ceiling on notes incl. the MOC.
+        max_notes: Option<u32>,
+        /// v2: novelty stop threshold as integer percent.
+        novelty_pct: Option<u32>,
+        append: bool,
+        dry_run: bool,
+        legacy: bool,
         budget_time_secs: Option<u64>,
+        /// v2: model for the per-source digest calls.
+        digest_model: Option<String>,
+        /// v2: `--lang th|en|…` for note bodies, claims and titles.
+        language: Option<String>,
+    },
+    /// `/research refresh [<kms>] <slug>…` or `--all [--older-than N]`:
+    /// re-research existing notes and merge what is new into them.
+    ResearchRefresh {
+        kms: Option<String>,
+        slugs: Vec<String>,
+        all: bool,
+        older_than_days: Option<u32>,
+        digest_model: Option<String>,
+        language: Option<String>,
     },
     /// `/research list` — show all running + recently completed jobs.
     ResearchList,
@@ -612,6 +633,12 @@ pub enum SlashCommand {
         name: String,
         force: bool,
     },
+    /// `/kms rename OLD NEW` — rename the KMS directory; the attachment
+    /// follows if it was attached.
+    KmsRename {
+        old: String,
+        new: String,
+    },
     /// Auto-link a KMS by inserting `[[<slug>]]` wikilinks at the first
     /// literal mention of every page's title / aliases / slug inside
     /// other pages' bodies. Dry-run by default; `--apply` writes the
@@ -640,6 +667,25 @@ pub enum SlashCommand {
     /// M6.25 BUG #3: lint a KMS for orphans / broken links / index drift /
     /// missing frontmatter. Pure-read; no mutation.
     KmsLint(String),
+    /// `/kms entry [NAME] [--set SLUG | --clear]` — show or set the
+    /// page the KMS browser opens on.
+    KmsEntry {
+        name: Option<String>,
+        set: Option<String>,
+        clear: bool,
+    },
+    /// `/kms verify [NAME] [--llm] [--stale-days N] [--page SLUG]` —
+    /// evidence check: do citations resolve, do archived sources still
+    /// carry the quotes their claims were built on, and (with `--llm`)
+    /// does each sentence follow from the claims it cites.
+    KmsVerify {
+        name: Option<String>,
+        llm: bool,
+        stale_days: Option<i64>,
+        page: Option<String>,
+        /// Repair wikilinks a linker wrote inside a URL.
+        fix: bool,
+    },
     /// dev-plan/36 Tier 3.B: drop `<kms_root>/.index/` and rebuild
     /// from `pages/` on disk. Used after a `merge_into` /
     /// `auto_link` (which mutate many pages without firing per-page
@@ -1228,6 +1274,7 @@ fn parse_research_subcommand(args: &str) -> SlashCommand {
                 }
             }
         }
+        "refresh" | "update" => parse_research_refresh(rest),
         "cancel" | "stop" | "kill" => {
             if rest.trim().is_empty() {
                 SlashCommand::Unknown("usage: /research cancel <id>".into())
@@ -1250,6 +1297,61 @@ fn parse_research_subcommand(args: &str) -> SlashCommand {
     }
 }
 
+/// `/research refresh [<kms>] <slug>… | --all [--older-than N] [--worker-model ID] [--lang X]`.
+/// With one positional and no `--all` it is a slug in the attached KMS.
+fn parse_research_refresh(args: &str) -> SlashCommand {
+    let mut positional: Vec<String> = Vec::new();
+    let mut all = false;
+    let mut older_than_days: Option<u32> = None;
+    let mut digest_model: Option<String> = None;
+    let mut language: Option<String> = None;
+    let mut it = args.split_whitespace().peekable();
+    while let Some(t) = it.next() {
+        match t {
+            "--all" => all = true,
+            "--older-than" => {
+                let v = it.next().unwrap_or("");
+                match v.trim_end_matches('d').parse::<u32>() {
+                    Ok(n) => older_than_days = Some(n),
+                    Err(_) => {
+                        return SlashCommand::Unknown(
+                            "usage: /research refresh --all [--older-than <days>]".into(),
+                        )
+                    }
+                }
+            }
+            "--digest-model" | "--worker-model" => digest_model = it.next().map(str::to_string),
+            "--lang" | "--language" => language = it.next().map(str::to_string),
+            other if other.starts_with("--") => {
+                return SlashCommand::Unknown(format!("unknown /research refresh flag: {other}"))
+            }
+            other => positional.push(other.to_string()),
+        }
+    }
+    let (kms, slugs) = if all {
+        (positional.first().cloned(), Vec::new())
+    } else {
+        match positional.len() {
+            0 => {
+                return SlashCommand::Unknown(
+                    "usage: /research refresh [<kms>] <slug>… | /research refresh [<kms>] --all [--older-than 30]"
+                        .into(),
+                )
+            }
+            1 => (None, positional),
+            _ => (Some(positional[0].clone()), positional[1..].to_vec()),
+        }
+    };
+    SlashCommand::ResearchRefresh {
+        kms,
+        slugs,
+        all,
+        older_than_days,
+        digest_model,
+        language,
+    }
+}
+
 /// Parse `/research [flags...] <query>` into a ResearchStart command.
 /// Flags eaten greedily from the head of the arg list; the remainder is
 /// the query. Unknown `--flag` tokens fall through into the query (so
@@ -1263,9 +1365,68 @@ fn parse_research_start(args: &str) -> SlashCommand {
     let mut max_pages: Option<u32> = None;
     let mut budget_tokens: Option<u64> = None;
     let mut budget_time_secs: Option<u64> = None;
+    let mut max_notes: Option<u32> = None;
+    let mut novelty_pct: Option<u32> = None;
+    let mut append = false;
+    let mut dry_run = false;
+    let mut legacy = false;
+    let mut digest_model: Option<String> = None;
+    let mut language: Option<String> = None;
 
     while let Some(t) = tokens.first().copied() {
+        if (t == "--lang" || t == "--language") && tokens.len() >= 2 {
+            language = Some(tokens[1].to_string());
+            tokens.drain(0..2);
+            continue;
+        }
+        if (t == "--digest-model" || t == "--worker-model") && tokens.len() >= 2 {
+            digest_model = Some(tokens[1].to_string());
+            tokens.drain(0..2);
+            continue;
+        }
         match t {
+            "--append" => {
+                append = true;
+                tokens.remove(0);
+            }
+            "--dry-run" => {
+                dry_run = true;
+                tokens.remove(0);
+            }
+            "--legacy" => {
+                legacy = true;
+                tokens.remove(0);
+            }
+            "--max-notes" if tokens.len() >= 2 => {
+                if let Ok(v) = tokens[1].parse::<u32>() {
+                    if (1..=20).contains(&v) {
+                        max_notes = Some(v);
+                        tokens.drain(0..2);
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            "--novelty" if tokens.len() >= 2 => {
+                let raw = tokens[1];
+                let pct = raw.parse::<f32>().ok().and_then(|f| {
+                    if (0.0..=1.0).contains(&f) {
+                        Some((f * 100.0).round() as u32)
+                    } else if (0.0..=100.0).contains(&f) {
+                        Some(f.round() as u32)
+                    } else {
+                        None
+                    }
+                });
+                if let Some(p) = pct {
+                    novelty_pct = Some(p);
+                    tokens.drain(0..2);
+                } else {
+                    break;
+                }
+            }
             "--kms" if tokens.len() >= 2 => {
                 kms_target = Some(tokens[1].to_string());
                 tokens.drain(0..2);
@@ -1313,6 +1474,8 @@ fn parse_research_start(args: &str) -> SlashCommand {
                 if let Ok(v) = tokens[1].parse::<u32>() {
                     if v >= 1 && v <= 20 {
                         max_pages = Some(v);
+                        // v2 alias: pages → notes
+                        max_notes.get_or_insert(v);
                         tokens.drain(0..2);
                     } else {
                         break;
@@ -1343,7 +1506,7 @@ fn parse_research_start(args: &str) -> SlashCommand {
     let query = tokens.join(" ").trim().to_string();
     if query.is_empty() {
         return SlashCommand::Unknown(
-            "usage: /research [--kms <name>] [--min-iter N] [--max-iter K] [--score-threshold 0.X] [--max-pages N] [--budget-time SEC] <query>"
+            "usage: /research [--kms <name>] [--lang th|en] [--min-iter N] [--max-iter K] [--max-notes N] [--novelty 0.X] [--append] [--dry-run] [--budget-time SEC] [--legacy] <query>"
                 .into(),
         );
     }
@@ -1356,6 +1519,13 @@ fn parse_research_start(args: &str) -> SlashCommand {
         score_threshold_pct,
         budget_tokens,
         budget_time_secs,
+        max_notes,
+        novelty_pct,
+        append,
+        dry_run,
+        legacy,
+        digest_model,
+        language,
     }
 }
 
@@ -3165,6 +3335,58 @@ fn parse_kms_subcommand(args: &str) -> SlashCommand {
                 ),
             }
         }
+        "entry" | "home" => {
+            let mut name: Option<String> = None;
+            let (mut set, mut clear) = (None, false);
+            let mut it = rest.split_whitespace();
+            while let Some(tok) = it.next() {
+                match tok {
+                    "--set" => set = it.next().map(|s| s.trim_end_matches(".md").to_string()),
+                    "--clear" => clear = true,
+                    other if !other.starts_with("--") => {
+                        if name.is_none() {
+                            name = Some(other.to_string());
+                        }
+                    }
+                    other => {
+                        return SlashCommand::Unknown(format!(
+                            "unknown flag '{other}' — usage: /kms entry [<name>] [--set <slug> | --clear]"
+                        ));
+                    }
+                }
+            }
+            SlashCommand::KmsEntry { name, set, clear }
+        }
+        "verify" | "audit" => {
+            let mut name: Option<String> = None;
+            let (mut llm, mut stale_days, mut page, mut fix) = (false, None, None, false);
+            let mut it = rest.split_whitespace();
+            while let Some(tok) = it.next() {
+                match tok {
+                    "--llm" => llm = true,
+                    "--fix" => fix = true,
+                    "--stale-days" => stale_days = it.next().and_then(|v| v.parse::<i64>().ok()),
+                    "--page" => page = it.next().map(|s| s.trim_end_matches(".md").to_string()),
+                    other if !other.starts_with("--") => {
+                        if name.is_none() {
+                            name = Some(other.to_string());
+                        }
+                    }
+                    other => {
+                        return SlashCommand::Unknown(format!(
+                            "unknown flag '{other}' — usage: /kms verify [<name>] [--llm] [--fix] [--stale-days N] [--page <slug>]"
+                        ));
+                    }
+                }
+            }
+            SlashCommand::KmsVerify {
+                name,
+                llm,
+                stale_days,
+                page,
+                fix,
+            }
+        }
         "lint" | "check" | "doctor" => {
             // M6.25 BUG #3: pure-read health check.
             if rest.is_empty() {
@@ -3411,6 +3633,16 @@ fn parse_kms_subcommand(args: &str) -> SlashCommand {
                 }
             }
             SlashCommand::KmsLink { name, apply, min_len, llm }
+        }
+        "rename" | "mv" => {
+            let mut it = rest.split_whitespace();
+            match (it.next(), it.next()) {
+                (Some(o), Some(n)) => SlashCommand::KmsRename {
+                    old: o.to_string(),
+                    new: n.to_string(),
+                },
+                _ => SlashCommand::Unknown("usage: /kms rename <old> <new>".into()),
+            }
         }
         "drop" | "delete" | "rm" => {
             // `/kms drop <name> [--force]` — destructive. Dry-run by
@@ -3897,7 +4129,7 @@ pub fn built_in_commands() -> &'static [BuiltInCommand] {
         BuiltInCommand { name: "schedule", description: "Manage scheduled (cron) tasks",             category: "Automation", usage: "list | show <id> | run <id> | pause|resume <id> | rm <id>" },
 
         // Research
-        BuiltInCommand { name: "research", description: "Background research → KMS",                  category: "Research", usage: "<query> | list | status <id> | show <id> | cancel <id> | wait <id>" },
+        BuiltInCommand { name: "research", description: "Background research → KMS",                  category: "Research", usage: "[--lang th|en] [--max-notes N] [--novelty 0.X] [--worker-model ID] [--append] [--dry-run] [--kms NAME] [--legacy] <query> | refresh [<kms>] <slug>… | refresh [<kms>] --all [--older-than N] | list | status <id> | show <id> | cancel <id> | wait <id>" },
 
         // Enterprise
         BuiltInCommand { name: "policy", description: "Active org policy + audit sinks",              category: "Enterprise", usage: "status" },
@@ -5357,6 +5589,7 @@ pub async fn run_print_mode_with(
     let agent = Agent::new(provider, tool_registry, config.model.clone(), system)
         .with_max_iterations(config.max_iterations)
         .with_max_tokens(config.max_tokens)
+        .with_thinking_budget(config.thinking_budget)
         .with_permission_mode(perm_mode)
         .with_ask_tools(config.ask_tools.clone().unwrap_or_default())
         .with_hooks(hooks_arc.clone());
@@ -6152,6 +6385,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     )
     .with_max_iterations(config.max_iterations)
     .with_max_tokens(config.max_tokens)
+    .with_thinking_budget(config.thinking_budget)
     .with_permission_mode(perm_mode)
     .with_ask_tools(config.ask_tools.clone().unwrap_or_default())
     .with_approver(approver.clone())
@@ -7055,6 +7289,9 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         // M6.39.2: announce any research jobs that finished since the
         // last prompt (Done / Cancelled / Failed). Each id announced
         // once; subsequent prompts skip already-notified jobs.
+        // A finished run may have attached its KMS on disk; pick that up so
+        // the next /research and the system prompt see it.
+        let _ = crate::config::ProjectConfig::sync_kms_active(&mut config);
         for j in crate::research::manager().list() {
             if !j.status.is_terminal() {
                 continue;
@@ -7536,6 +7773,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     )
                     .with_max_iterations(config.max_iterations)
                     .with_max_tokens(config.max_tokens)
+                    .with_thinking_budget(config.thinking_budget)
                     .with_permission_mode(perm_mode)
                     .with_approver(approver.clone())
                     .with_hooks(std::sync::Arc::new(config.hooks.clone()));
@@ -7631,6 +7869,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     )
                     .with_max_iterations(config.max_iterations)
                     .with_max_tokens(config.max_tokens)
+                    .with_thinking_budget(config.thinking_budget)
                     .with_permission_mode(perm_mode)
                     .with_approver(approver.clone())
                     .with_hooks(std::sync::Arc::new(config.hooks.clone()));
@@ -8247,24 +8486,27 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     );
                 }
                 SlashCommand::Thinking(budget_str) => {
+                    use crate::providers::ThinkingLevel;
                     if budget_str.is_empty() {
-                        let current = config.thinking_budget.unwrap_or(0);
                         println!(
-                            "{COLOR_DIM}thinking budget: {current} tokens (0 = off){COLOR_RESET}"
+                            "{COLOR_DIM}thinking: {}{COLOR_RESET}",
+                            ThinkingLevel::describe(config.thinking_budget)
                         );
                     } else {
-                        match budget_str.parse::<u32>() {
-                            Ok(0) => {
-                                config.thinking_budget = None;
-                                println!("{COLOR_DIM}thinking disabled{COLOR_RESET}");
-                            }
-                            Ok(n) => {
-                                config.thinking_budget = Some(n);
-                                println!("{COLOR_DIM}thinking budget → {n} tokens{COLOR_RESET}");
-                            }
-                            Err(_) => {
+                        match ThinkingLevel::parse(&budget_str) {
+                            Some(b) => {
+                                config.thinking_budget = b;
+                                agent.thinking_budget = b;
+                                let _ =
+                                    crate::config::ProjectConfig::persist_thinking_budget(b);
                                 println!(
-                                    "{COLOR_YELLOW}usage: /thinking BUDGET (integer){COLOR_RESET}"
+                                    "{COLOR_DIM}thinking → {}{COLOR_RESET}",
+                                    ThinkingLevel::describe(b)
+                                );
+                            }
+                            None => {
+                                println!(
+                                    "{COLOR_YELLOW}usage: /thinking 0|1|2|3 | off|low|medium|high | auto | <tokens>{COLOR_RESET}"
                                 );
                             }
                         }
@@ -8686,6 +8928,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 )
                                 .with_max_iterations(config.max_iterations)
                                 .with_max_tokens(config.max_tokens)
+                                .with_thinking_budget(config.thinking_budget)
                                 .with_permission_mode(perm_mode)
                                 .with_approver(approver.clone())
                                 .with_hooks(std::sync::Arc::new(config.hooks.clone()));
@@ -8772,6 +9015,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 )
                                 .with_max_iterations(config.max_iterations)
                                 .with_max_tokens(config.max_tokens)
+                                .with_thinking_budget(config.thinking_budget)
                                 .with_permission_mode(perm_mode)
                                 .with_approver(approver.clone())
                                 .with_hooks(std::sync::Arc::new(config.hooks.clone()));
@@ -10274,6 +10518,73 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     }
                 }
                 // M6.25 BUG #3: lint (CLI).
+                SlashCommand::KmsEntry { name, set, clear } => {
+                    let Some(kname) = name.or_else(|| config.kms_active.last().cloned()) else {
+                        println!(
+                            "{COLOR_YELLOW}/kms entry: no KMS attached — run `/kms use <name>` or pass a name.{COLOR_RESET}"
+                        );
+                        continue;
+                    };
+                    match crate::kms::apply_entry(&kname, set.as_deref(), clear) {
+                        Ok(msg) => println!("{COLOR_DIM}{msg}{COLOR_RESET}"),
+                        Err(e) => println!("{COLOR_YELLOW}/kms entry: {e}{COLOR_RESET}"),
+                    }
+                }
+                SlashCommand::KmsVerify {
+                    name,
+                    llm,
+                    stale_days,
+                    page,
+                    fix,
+                } => {
+                    let Some(kname) = name.or_else(|| config.kms_active.last().cloned()) else {
+                        println!(
+                            "{COLOR_YELLOW}/kms verify: no KMS attached — run `/kms use <name>` or pass a name.{COLOR_RESET}"
+                        );
+                        continue;
+                    };
+                    let opts = crate::kms_verify::VerifyOptions {
+                        stale_days: stale_days
+                            .unwrap_or(crate::kms_verify::DEFAULT_STALE_DAYS),
+                        page,
+                        llm,
+                        fix,
+                    };
+                    // Same reason as `/kms link --llm`: the CLI's boot
+                    // provider moved into the Agent, so re-derive one.
+                    let verify_provider: Option<Arc<dyn Provider>> = if llm {
+                        match build_provider(&config) {
+                            Ok(p) => Some(p),
+                            Err(e) => {
+                                println!(
+                                    "{COLOR_YELLOW}/kms verify --llm: provider unavailable: {e}{COLOR_RESET}"
+                                );
+                                continue;
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    if llm {
+                        println!(
+                            "{COLOR_DIM}/kms verify {kname} --llm: auditing with `{}`…{COLOR_RESET}",
+                            config.model
+                        );
+                    }
+                    match crate::kms_verify::run(
+                        &kname,
+                        &opts,
+                        verify_provider,
+                        &config.model,
+                        std::time::Duration::from_secs(180),
+                        &crate::cancel::CancelToken::new(),
+                    )
+                    .await
+                    {
+                        Ok(msg) => println!("{msg}"),
+                        Err(e) => println!("{COLOR_YELLOW}/kms verify failed: {e}{COLOR_RESET}"),
+                    }
+                }
                 SlashCommand::KmsLint(name) => {
                     let Some(k) = crate::kms::resolve(&name) else {
                         println!("{COLOR_YELLOW}no KMS named '{name}'{COLOR_RESET}");
@@ -10437,6 +10748,20 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         }
                     }
                 }
+                SlashCommand::KmsRename { old, new } => match crate::kms::rename(&old, &new) {
+                    Ok(r) => {
+                        for n in config.kms_active.iter_mut() {
+                            if *n == old {
+                                *n = new.clone();
+                            }
+                        }
+                        println!(
+                            "{COLOR_DIM}renamed KMS '{old}' → '{new}' ({}){COLOR_RESET}",
+                            r.root.display()
+                        );
+                    }
+                    Err(e) => println!("{COLOR_YELLOW}/kms rename failed: {e}{COLOR_RESET}"),
+                },
                 SlashCommand::KmsDrop { name, force } => {
                     let Some(k) = crate::kms::resolve(&name) else {
                         println!("{COLOR_YELLOW}no KMS named '{name}'{COLOR_RESET}");
@@ -10800,24 +11125,47 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     max_pages,
                     budget_tokens: _,
                     budget_time_secs,
+                    max_notes,
+                    novelty_pct,
+                    append,
+                    dry_run,
+                    legacy,
+                    digest_model,
+                    language,
                 } => {
-                    let mut cfg = crate::research::JobConfig::default();
-                    cfg.kms_target = kms_target;
-                    if let Some(v) = min_iter {
-                        cfg.min_iter = v;
-                    }
-                    if let Some(v) = max_iter {
-                        cfg.max_iter = v;
-                    }
-                    if let Some(pct) = score_threshold_pct {
-                        cfg.score_threshold = (pct as f32 / 100.0).clamp(0.0, 1.0);
-                    }
-                    if let Some(v) = max_pages {
-                        cfg.max_pages = v;
-                    }
-                    if let Some(secs) = budget_time_secs {
-                        cfg.time_budget = std::time::Duration::from_secs(secs);
-                    }
+                    let cfg = crate::research::JobConfig::from_flags(crate::research::StartFlags {
+                        kms_target,
+                        min_iter,
+                        max_iter,
+                        score_threshold_pct,
+                        max_pages,
+                        budget_time_secs,
+                        max_notes,
+                        novelty_pct,
+                        append,
+                        dry_run,
+                        legacy,
+                        digest_model,
+                        // Disk is what the sidebar checkbox writes; memory is what `/kms use`
+                        // updates. Prefer disk so a checkbox tick counts, fall back to memory.
+                        language,
+                        attached_kms: crate::config::ProjectConfig::load()
+                            .and_then(|c| c.kms.map(|k| k.active))
+                            .unwrap_or_else(|| config.kms_active.clone()),
+                    });
+                    let target_desc = match &cfg.kms_target {
+                        Some(k) => format!("into KMS '{k}'"),
+                        None => "into a new KMS named from the query (attach one or pass --kms to build on an existing graph)".to_string(),
+                    };
+                    let target_desc = format!(
+                        "{target_desc} · worker model: {}",
+                        cfg.digest_model.as_deref().unwrap_or("(your current model)")
+                    );
+                    let digest_provider = cfg.digest_model.as_ref().and_then(|dm| {
+                        let mut c2 = config.clone();
+                        c2.model = dm.clone();
+                        build_provider(&c2).ok()
+                    });
                     let provider = match build_provider(&config) {
                         Ok(p) => p,
                         Err(e) => {
@@ -10826,10 +11174,10 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         }
                     };
                     let model = config.model.clone();
-                    match crate::research::start(query.clone(), cfg, provider, model).await {
+                    match crate::research::start(query.clone(), cfg, provider, model, digest_provider).await {
                         Ok(id) => {
                             println!(
-                                "{COLOR_DIM}[research started: id={id}] {COLOR_RESET}query: {query}\n  \
+                                "{COLOR_DIM}[research started: id={id}] {COLOR_RESET}query: {query}\n  {target_desc}\n  \
                                  check progress: /research status {id}\n  \
                                  stream result:  /research show {id}\n  \
                                  block till done: /research wait {id}\n  \
@@ -10839,6 +11187,65 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         Err(e) => println!("{COLOR_YELLOW}/research start failed: {e}{COLOR_RESET}"),
                     }
                 }
+                SlashCommand::ResearchRefresh {
+                    kms,
+                    slugs,
+                    all,
+                    older_than_days,
+                    digest_model,
+                    language,
+                } => {
+                    let attached: Vec<String> = crate::config::ProjectConfig::load()
+                        .and_then(|c| c.kms.map(|k| k.active))
+                        .unwrap_or_else(|| config.kms_active.clone());
+                    let Some(kms) = kms.or_else(|| attached.last().cloned()) else {
+                        println!("{COLOR_YELLOW}/research refresh: no KMS given and none attached — /research refresh <kms> <slug>{COLOR_RESET}");
+                        continue;
+                    };
+                    let cfg = crate::research::JobConfig::from_flags(crate::research::StartFlags {
+                        kms_target: Some(kms.clone()),
+                        digest_model,
+                        language,
+                        ..Default::default()
+                    });
+                    let digest_provider = cfg.digest_model.as_ref().and_then(|dm| {
+                        let mut c2 = config.clone();
+                        c2.model = dm.clone();
+                        build_provider(&c2).ok()
+                    });
+                    let provider = match build_provider(&config) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            println!("{COLOR_YELLOW}/research refresh: provider unavailable: {e}{COLOR_RESET}");
+                            continue;
+                        }
+                    };
+                    let _ = all;
+                    match crate::research::start_refresh(
+                        kms.clone(),
+                        slugs,
+                        older_than_days.unwrap_or(30),
+                        cfg,
+                        provider,
+                        config.model.clone(),
+                        digest_provider,
+                        None,
+                    )
+                    .await
+                    {
+                        Ok(ids) => {
+                            println!(
+                                "{COLOR_DIM}[research refresh queued: {} note(s) in KMS '{kms}']{COLOR_RESET}",
+                                ids.len()
+                            );
+                            for (id, slug) in ids {
+                                println!("  {id}  → {slug}");
+                            }
+                            println!("{COLOR_DIM}  runs one after another; /research list to follow{COLOR_RESET}");
+                        }
+                        Err(e) => println!("{COLOR_YELLOW}/research refresh failed: {e}{COLOR_RESET}"),
+                    }
+                }
                 SlashCommand::ResearchList => {
                     let jobs = crate::research::manager().list();
                     if jobs.is_empty() {
@@ -10846,10 +11253,11 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     } else {
                         for j in jobs {
                             println!(
-                                "{}  {} {}  iter={}/{}  src={}  score={}  query={}",
+                                "{}  {} {}  ⏱{}  iter={}/{}  src={}  score={}  query={}",
                                 j.id,
                                 j.status.as_str(),
                                 j.phase,
+                                j.elapsed_str(),
                                 j.iterations_done,
                                 j.kms_target.as_deref().unwrap_or("(auto)"),
                                 j.source_count,
@@ -10874,9 +11282,12 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 let parts: Vec<&str> = path.splitn(2, '/').collect();
                                 if parts.len() == 2 {
                                     if let Some(kref) = crate::kms::resolve(parts[0]) {
-                                        let page_path = kref
-                                            .pages_dir()
-                                            .join(parts[1]);
+                                        // v2 `--dry-run` reports `runs/<file>` (KMS root).
+                                        let page_path = if parts[1].starts_with("runs/") {
+                                            kref.root.join(parts[1])
+                                        } else {
+                                            kref.pages_dir().join(parts[1])
+                                        };
                                         match std::fs::read_to_string(&page_path) {
                                             Ok(body) => println!("{body}"),
                                             Err(e) => println!(
@@ -12529,6 +12940,34 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn parse_kms_verify_reads_every_flag() {
+        let SlashCommand::KmsVerify {
+            name,
+            llm,
+            stale_days,
+            page,
+            fix,
+        } = parse_kms_subcommand("verify notes --llm --fix --stale-days 30 --page deepseek.md")
+        else {
+            panic!("not a verify command");
+        };
+        assert_eq!(name.as_deref(), Some("notes"));
+        assert!(llm && fix);
+        assert_eq!(stale_days, Some(30));
+        assert_eq!(page.as_deref(), Some("deepseek"), "the .md is dropped");
+
+        // Bare form: the name falls back to the attached KMS, flags off.
+        let SlashCommand::KmsVerify { name, llm, fix, .. } = parse_kms_subcommand("verify") else {
+            panic!("not a verify command");
+        };
+        assert!(name.is_none() && !llm && !fix);
+        assert!(matches!(
+            parse_kms_subcommand("verify --nope"),
+            SlashCommand::Unknown(_)
+        ));
+    }
+
     /// The agent/* SDK bridge is a SECOND registry, built fresh in
     /// `build_provider`. The operator's lists were only ever applied to
     /// the agent's own registry, so a run restricted to `Read` still
@@ -13197,6 +13636,13 @@ mod tests {
                 max_pages: None,
                 budget_tokens: None,
                 budget_time_secs: None,
+                max_notes: None,
+                novelty_pct: None,
+                append: false,
+                dry_run: false,
+                legacy: false,
+                digest_model: None,
+                language: None,
             })
         );
 
@@ -13212,6 +13658,13 @@ mod tests {
                 max_pages: None,
                 budget_tokens: None,
                 budget_time_secs: None,
+                max_notes: None,
+                novelty_pct: None,
+                append: false,
+                dry_run: false,
+                legacy: false,
+                digest_model: None,
+                language: None,
             })
         );
 
@@ -13229,6 +13682,13 @@ mod tests {
                 max_pages: None,
                 budget_tokens: None,
                 budget_time_secs: None,
+                max_notes: None,
+                novelty_pct: None,
+                append: false,
+                dry_run: false,
+                legacy: false,
+                digest_model: None,
+                language: None,
             })
         );
 
@@ -13244,6 +13704,13 @@ mod tests {
                 max_pages: None,
                 budget_tokens: None,
                 budget_time_secs: None,
+                max_notes: None,
+                novelty_pct: None,
+                append: false,
+                dry_run: false,
+                legacy: false,
+                digest_model: None,
+                language: None,
             })
         );
 
@@ -13259,6 +13726,13 @@ mod tests {
                 max_pages: None,
                 budget_tokens: None,
                 budget_time_secs: Some(300),
+                max_notes: None,
+                novelty_pct: None,
+                append: false,
+                dry_run: false,
+                legacy: false,
+                digest_model: None,
+                language: None,
             })
         );
 
@@ -13303,6 +13777,29 @@ mod tests {
             parse_slash("/research --kms foo"),
             Some(SlashCommand::Unknown(_))
         ));
+        // refresh: one positional = slug in the attached KMS; two = kms + slug
+        assert_eq!(
+            parse_slash("/research refresh overtime-pay"),
+            Some(SlashCommand::ResearchRefresh {
+                kms: None,
+                slugs: vec!["overtime-pay".into()],
+                all: false,
+                older_than_days: None,
+                digest_model: None,
+                language: None,
+            })
+        );
+        assert_eq!(
+            parse_slash("/research refresh labour --all --older-than 14d --lang en"),
+            Some(SlashCommand::ResearchRefresh {
+                kms: Some("labour".into()),
+                slugs: vec![],
+                all: true,
+                older_than_days: Some(14),
+                digest_model: None,
+                language: Some("en".into()),
+            })
+        );
 
         // Unicode query (Thai) preserved
         if let Some(SlashCommand::ResearchStart { query, .. }) =

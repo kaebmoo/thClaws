@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { CtxMenuItem } from "./CtxMenuItem";
 import { X, ArrowLeft, Loader2, Pencil, Save } from "lucide-react";
 import { marked } from "marked";
 import { send, subscribe } from "../hooks/useIPC";
@@ -41,6 +42,9 @@ export function KmsViewerOverlay({ initial, onClose }: Props) {
   // resolve relative markdown image links to `/file-asset` URLs so KMS
   // source images render here the same way they do in the Files tab.
   const [assetBase, setAssetBase] = useState<string>("");
+  // Pages that link here, computed by the engine on every read. A note
+  // is only navigable both ways if it can show who points at it.
+  const [backlinks, setBacklinks] = useState<{ slug: string; title: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   // Edit mode (pages only): YAML frontmatter edited in a modal, the
@@ -52,6 +56,10 @@ export function KmsViewerOverlay({ initial, onClose }: Props) {
   const [showFm, setShowFm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Right-click on selected text (pages, preview mode): "Create page"
+  // researches the phrase into a new note linked from the selection.
+  const [selMenu, setSelMenu] = useState<{ x: number; y: number; text: string } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const current = stack[stack.length - 1];
 
@@ -72,6 +80,7 @@ export function KmsViewerOverlay({ initial, onClose }: Props) {
   useEffect(() => {
     setContent(null);
     setError(null);
+    setBacklinks([]);
     const unsub = subscribe((msg) => {
       if (
         msg.type === "kms_file_content" &&
@@ -82,6 +91,11 @@ export function KmsViewerOverlay({ initial, onClose }: Props) {
         if (msg.ok) {
           setContent(msg.content as string);
           setAssetBase(String(msg.asset_base ?? ""));
+          setBacklinks(
+            Array.isArray(msg.backlinks)
+              ? (msg.backlinks as { slug: string; title: string }[])
+              : [],
+          );
         } else {
           setError((msg.error as string) ?? "read failed");
         }
@@ -100,15 +114,48 @@ export function KmsViewerOverlay({ initial, onClose }: Props) {
   // (discarding unsaved edits), then close the overlay. Avoids an
   // accidental overlay-close losing in-progress edits.
   useEffect(() => {
+    const close = () => setSelMenu(null);
+    document.addEventListener("click", close);
+    return () => document.removeEventListener("click", close);
+  }, []);
+
+  useEffect(() => {
+    const unsub = subscribe((msg) => {
+      if (msg.type !== "kms_create_page_result" || msg.kms !== current.kms) return;
+      if (msg.ok) {
+        const slug = String(msg.slug ?? "");
+        const linkNote = msg.linked ? "" : " (phrase not found in plain prose — link not inserted)";
+        setNotice(
+          msg.existed
+            ? `Linked to existing page ${slug}${linkNote}`
+            : `Created ${slug} — research running, see the Research sidebar${linkNote}`,
+        );
+        if (msg.page === current.name) {
+          setContent(null);
+          send({ type: "kms_read_file", kms: current.kms, kind: current.kind, name: current.name });
+        }
+      } else {
+        setNotice(`Create page failed: ${String(msg.error ?? "unknown error")}`);
+      }
+      setTimeout(() => setNotice(null), 6000);
+    });
+    return unsub;
+  }, [current.kms, current.kind, current.name]);
+
+  useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
+      if (selMenu) {
+        setSelMenu(null);
+        return;
+      }
       if (showFm) setShowFm(false);
       else if (editing) setEditing(false);
       else onClose();
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [onClose, showFm, editing]);
+  }, [onClose, showFm, editing, selMenu]);
 
   // Save-result round-trip: on success, exit edit mode and re-fetch
   // (the fetch effect's subscription is still mounted — deps unchanged
@@ -330,7 +377,74 @@ export function KmsViewerOverlay({ initial, onClose }: Props) {
         ref={containerRef}
         className="flex-1 overflow-auto kms-viewer-prose"
         style={{ color: "var(--text-primary)" }}
+        onContextMenu={(e) => {
+          if (editing || current.kind !== "page") return;
+          const text = (window.getSelection()?.toString() ?? "").replace(/\s+/g, " ").trim();
+          if (text.length < 2 || text.length > 120) return;
+          e.preventDefault();
+          setSelMenu({ x: e.clientX, y: e.clientY, text });
+        }}
       >
+        {notice && (
+          <div
+            className="mx-auto max-w-4xl mt-2 px-3 py-1.5 rounded text-xs"
+            style={{
+              background: "var(--bg-secondary)",
+              border: "1px solid var(--border)",
+              color: "var(--text-primary)",
+            }}
+          >
+            {notice}
+          </div>
+        )}
+        {selMenu && (
+          <div
+            className="fixed z-50 rounded border shadow-lg py-1 text-xs"
+            style={{
+              left: selMenu.x,
+              top: selMenu.y,
+              background: "var(--bg-primary)",
+              borderColor: "var(--border)",
+              color: "var(--text-primary)",
+              minWidth: 200,
+              maxWidth: 360,
+            }}
+            onClick={(e) => e.stopPropagation()}
+            onContextMenu={(e) => e.preventDefault()}
+          >
+            <div
+              className="px-3 py-0.5 truncate"
+              style={{ color: "var(--text-secondary)", fontSize: "9px" }}
+              title={selMenu.text}
+            >
+              “{selMenu.text}”
+            </div>
+            {(["summary", "atomic"] as const).map((mode) => (
+              <CtxMenuItem
+                key={mode}
+                onClick={() => {
+                  const text = selMenu.text;
+                  setSelMenu(null);
+                  setNotice(`Creating page for “${text}”…`);
+                  send({
+                    type: "kms_create_page_from_selection",
+                    kms: current.kms,
+                    page: current.name,
+                    text,
+                    mode,
+                  });
+                }}
+              >
+                {mode === "summary"
+                  ? "Create page — summary (one note, linked here)"
+                  : "Create page — atomic (topic page + one note per idea)"}
+              </CtxMenuItem>
+            ))}
+            <CtxMenuItem muted onClick={() => setSelMenu(null)}>
+              Cancel
+            </CtxMenuItem>
+          </div>
+        )}
         <div className="max-w-4xl mx-auto px-4 sm:px-8 py-6">
           {error && (
             <div
@@ -353,7 +467,41 @@ export function KmsViewerOverlay({ initial, onClose }: Props) {
             </div>
           )}
           {content !== null && !editing && (
-            <div dangerouslySetInnerHTML={{ __html: html }} />
+            <>
+              <div dangerouslySetInnerHTML={{ __html: html }} />
+              {backlinks.length > 0 && (
+                <div
+                  className="mt-8 pt-3"
+                  style={{ borderTop: "1px solid var(--border)" }}
+                >
+                  <div
+                    className="uppercase tracking-wider mb-1.5"
+                    style={{ color: "var(--text-secondary)", fontSize: "10px" }}
+                  >
+                    Linked from ({backlinks.length})
+                  </div>
+                  <div className="flex flex-wrap gap-x-3 gap-y-1">
+                    {backlinks.map((b) => (
+                      <button
+                        key={b.slug}
+                        type="button"
+                        className="text-left hover:underline"
+                        style={{ color: "var(--accent)", fontSize: "12px" }}
+                        title={b.slug}
+                        onClick={() =>
+                          setStack((s) => [
+                            ...s,
+                            { kms: current.kms, kind: "page", name: b.slug },
+                          ])
+                        }
+                      >
+                        {b.title}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
           )}
           {content !== null && editing && (
             <>

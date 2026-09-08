@@ -91,6 +91,20 @@ A filesystem browser rooted at the working directory. Click a file in the tree t
 - Images and PDFs — inline preview.
 - Plain text / config files (`.txt`, `.log`, `.env`, `.conf`, `.ini`, `.toml`, `.sh`, `Dockerfile`, …) — plain `<pre>` block.
 
+**Right-click a `.md` file** for the KMS actions. Both archive the file
+verbatim as `sources/<alias>.md` first; they differ in what becomes the
+page:
+
+- **Add to KMS** — the main agent curates the stub page into one summary
+  (visible as a chat turn).
+- **Add to KMS as atomic notes** — a research job (Research sidebar shows
+  progress) digests the whole document in ~10 k-character windows,
+  extracts quote-checked claims and entities, then writes the topic page
+  over `pages/<alias>.md` plus **one note per idea** linked from it —
+  the same zettelkasten output as `/research`, cited to
+  `../sources/<alias>.md`. Pick this for long documents you want to
+  navigate by concept; pick the plain summary for short notes.
+
 ![Files-tab preview mode — `script.js` rendered through CodeMirror with line numbers and syntax highlighting; the Edit button on the top-right switches to edit mode](../user-manual-img/ch-04/thClaws-gui-file-viewer.png)
 
 `.html` files render live in the sandboxed iframe, so you see the page as a browser would — styles, images, and interactive JS intact:

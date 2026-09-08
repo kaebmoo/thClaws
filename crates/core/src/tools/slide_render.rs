@@ -15,6 +15,13 @@
 //!      `<gateway>/slide-render/slides` (Bearer gateway key; metered).
 //!   3. else error.
 //!
+//! Branch 1 can only ever reach a service the caller runs themselves:
+//! the hosted `slide-render` has no public Ingress, so thClaws's own
+//! render compute is reachable through the gateway alone — and the
+//! gateway bills it per rendered page against the caller's credit
+//! (`proxy::passthrough::slide_render`). There is no unbilled route to
+//! it, by construction rather than by policy.
+//!
 //! Output is text-only (paths + a slide count). The rendered pages are
 //! artifacts for the user — the GUI shows them from disk — so the bytes
 //! are never shipped back into the model's context (same rationale as
@@ -77,9 +84,10 @@ fn resolve_slide_endpoint_for(endpoint: &str) -> Result<SlideEndpoint> {
         });
     }
     Err(Error::Tool(
-        "no slide-render endpoint — set SLIDE_RENDER_API to a self-hosted service, or enable the \
-         thClaws Gateway (sign in to thClaws.cloud, add a `gateway` key, or set \
-         THCLAWS_GATEWAY_API_KEY)"
+        "no slide-render endpoint — enable the thClaws Gateway (sign in to thClaws.cloud, add a \
+         `gateway` key, or set THCLAWS_GATEWAY_API_KEY); rendering is billed per page against \
+         your credit. To render on your own hardware instead, run the slide-render service and \
+         point SLIDE_RENDER_API at it."
             .into(),
     ))
 }
@@ -361,7 +369,14 @@ impl Tool for RenderSlidesTool {
                 "slide-render returned no pdf or png — check the deck / theme".into(),
             ));
         }
-        let via = if ep.via_gateway { "gateway" } else { "direct" };
+        // Name the billing path in the result: a gateway render costs
+        // the user credit, a self-hosted one costs them nothing, and
+        // the agent driving this should be able to say which.
+        let via = if ep.via_gateway {
+            "gateway, billed per page"
+        } else {
+            "direct"
+        };
         Ok(format!(
             "Rendered {pngs} slide(s){} → {} ({} theme, {img_count} image(s) sent, via {via})",
             if pdf { " + deck.pdf" } else { "" },

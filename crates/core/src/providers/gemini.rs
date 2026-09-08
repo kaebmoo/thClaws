@@ -234,6 +234,30 @@ impl GeminiProvider {
                 "maxOutputTokens": req.max_tokens,
             },
         });
+        // ThinkingLevel → Gemini. 2.5 takes a token budget (Pro's
+        // minimum is 128, so "off" clamps there); 3.x takes
+        // `thinkingLevel: low|high`. Gemma has no thinking config.
+        if let Some(level) = super::ThinkingLevel::from_budget(req.thinking_budget) {
+            let m = req.model.to_ascii_lowercase();
+            if m.starts_with("gemini-3") {
+                let lvl = if matches!(level, super::ThinkingLevel::Off | super::ThinkingLevel::Low)
+                {
+                    "low"
+                } else {
+                    "high"
+                };
+                body["generationConfig"]["thinkingConfig"] = json!({"thinkingLevel": lvl});
+            } else if m.starts_with("gemini") {
+                let mut budget = level.to_budget();
+                if m.contains("pro") && budget < 128 {
+                    budget = 128;
+                }
+                if m.contains("flash") && budget > 24_576 {
+                    budget = 24_576;
+                }
+                body["generationConfig"]["thinkingConfig"] = json!({"thinkingBudget": budget});
+            }
+        }
         // Gemma open-weights models are served via the same API but don't
         // support `systemInstruction` ("Developer instruction is not enabled")
         // or function calling ("Function calling is not enabled"). For Gemma

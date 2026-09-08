@@ -1,36 +1,42 @@
-//! Background research pipeline (M6.39).
+//! Background research: `/research <query>` turns the open web into
+//! zettelkasten notes inside a KMS, outside the agent loop.
 //!
-//! `/research <query>` spawns a background tokio task that:
-//! 1. runs an initial broad WebSearch
-//! 2. asks the LLM to extract subtopics from query + seed
-//! 3. iterates: parallel search per subtopic → fetch top-3 → accumulate
-//! 4. asks the LLM to score completeness (0.0-1.0) + free-form notes
-//! 5. if score < threshold (default 0.80) and iter < max, generate
-//!    next-round subtopics from notes, loop
-//! 6. on exit (score reached / max_iter / cancel), synthesize markdown
-//!    with `[N]` citations, write to KMS as a timestamped note + update
-//!    a `_summary.md` consolidated view
+//! One run (`pipeline_v2`, dev-plan/58):
+//! 1. **Search** the query and a freshness-filtered variant of it, then
+//!    rank the hits — the subject's own site and reference works first,
+//!    at most two pages per domain ([`source_quality`]).
+//! 2. **Digest** each page exactly once ([`digest`]): entities plus
+//!    claims, every claim anchored to a verbatim quote that must appear
+//!    in the fetched body or the claim is dropped. Cached per URL under
+//!    `<kms>/.research/digests/`.
+//! 3. **Gap rounds** ask the worker model for searches that would close
+//!    what the entity table is missing, and stop when a round's share of
+//!    new entities falls below `novelty_threshold` (deterministic — no
+//!    LLM self-scoring), when nothing productive is left, at `max_iter`,
+//!    or when 60% of the time budget is gone.
+//! 4. **Plan** top-down ([`plan`]): the topic page's outline, then the
+//!    notes it must link for depth, then claims attached by entity tag.
+//! 5. **Write** ([`write`]) the topic page first, then one call per
+//!    child note in parallel, each seeing the topic page's opening.
+//!    Links are then made deterministically, citations resolved against
+//!    the per-KMS registry, and cited sources archived.
 //!
-//! Hard floor (`min_iter`, default 2) prevents the LLM from saying "good
-//! enough" too early; hard ceiling (`max_iter`, default 8) prevents
-//! runaway. Score threshold lives between the two as the LLM-driven
-//! middle condition.
-//!
-//! Pipeline runs entirely outside the agent loop — direct
-//! `Provider::stream()` calls, direct `WebSearchTool::call`. No tool
-//! approval prompts (user authorized at `/research start`); no goal_state
-//! singleton (avoids the M6.29 scope problem); no agent context
-//! pollution (results land in KMS, not chat).
-//!
-//! Phase split: this module ships in M6.39.1 with mocked LLM/search
-//! tests. M6.39.2 wires `/research` slash + REPL surface; M6.39.3 adds
-//! the GUI sidebar panel.
+//! Everything lands in the KMS — pages, `sources/`, a `runs/` log —
+//! never in the chat context. `pipeline` is the retired M6.39 page
+//! pipeline, still reachable with `--legacy`.
 
+pub mod digest;
+pub mod graph;
 pub mod kms_writer;
 pub mod llm_calls;
 pub mod pipeline;
+pub mod pipeline_v2;
+pub mod plan;
+pub mod registry;
+pub mod source_quality;
 #[cfg(test)]
 pub(crate) mod test_helpers;
+pub mod write;
 
 use crate::cancel::CancelToken;
 use crate::error::Result;
@@ -87,46 +93,197 @@ pub struct JobConfig {
     pub min_iter: u32,
     /// Maximum iterations regardless of score. Hard ceiling. Default 8.
     pub max_iter: u32,
-    /// LLM-reported completeness score that ends the loop early
-    /// (between `min_iter` and `max_iter`). Range 0.0-1.0. Default 0.80.
+    /// `--legacy` only: LLM-reported completeness score that ends the
+    /// v1 loop early. v2 stops on `novelty_threshold` instead.
     pub score_threshold: f32,
     /// Subtopics per iteration. Default 4 — balances breadth vs cost.
     pub subtopics_per_iter: u32,
     /// Top-N pages per subtopic to read in detail (WebFetch). Default 3.
     pub fetch_top_n: u32,
-    /// M6.39.6: cap on KMS pages emitted per research run. Plan step
-    /// asks the LLM to group sources into ≤ this many pages. Default
-    /// 7 — enough granularity for entity / concept / comparison
-    /// pages without exploding LLM cost (each page is one LLM call).
-    /// Override via `/research --max-pages N`.
+    /// `--legacy` only: cap on pages the v1 pipeline emits. v2 uses
+    /// `max_notes`.
     pub max_pages: u32,
-    /// Per-LLM-call timeout. Default 900s (15 min) — research
+    /// Per-LLM-call timeout (default 180s in v2). Research
     /// synthesis is a known long-running feature; this also feeds the
     /// provider's per-chunk idle ceiling via
     /// `StreamRequest::stream_chunk_timeout_override`, so it bypasses
     /// the user's normal `stream_chunk_timeout_secs` setting.
     pub llm_timeout: Duration,
-    /// Total wall-clock budget. Pipeline aborts as `Failed` with a
-    /// budget-exhausted message past this. Default 15 minutes.
+    /// Total wall-clock budget. Search rounds stop once 60% of it is
+    /// spent; the plan/write phases then run to completion rather than
+    /// throwing away everything the run already read. Default 25 min.
     pub time_budget: Duration,
     /// Target KMS name. `None` = auto-derive a slug from the query and
     /// create the KMS if missing.
     pub kms_target: Option<String>,
+    /// v2: ceiling on notes per run incl. the topic page. Clamped to
+    /// [`plan::HARD_MAX_NOTES`]; default 30.
+    pub max_notes: u32,
+    /// v2: stop when a round's share of new entities falls below this
+    /// (after `min_iter`). Default 0.35.
+    pub novelty_threshold: f32,
+    /// v2: never rewrite an existing note — add a dated `## Update`.
+    pub append: bool,
+    /// v2: digest + plan, write only the run log.
+    pub dry_run: bool,
+    /// Route to the M6.39 page pipeline instead of v2.
+    pub legacy: bool,
+    /// v2: model for the per-source digests (mechanical extraction —
+    /// a fast non-reasoning model is right here). `None` = same model.
+    pub digest_model: Option<String>,
+    /// v2: language of note bodies, claim text and titles (BCP-47-ish
+    /// code such as `th`, `en`, `ja`). Technical terms stay English.
+    pub language: String,
+    /// v2 refresh mode: the existing note this run must `update`; no
+    /// MOC is written and the result path is that note.
+    pub refresh_slug: Option<String>,
+    /// Files-tab "Add to KMS as atomic notes": the alias of an archived
+    /// `sources/<alias>.md` in `kms_target`. The run digests that one
+    /// document (in windows) instead of searching the web, and writes
+    /// the topic page over the ingest stub `pages/<alias>.md`.
+    pub local_source: Option<String>,
+    /// Fix the topic page's slug instead of deriving one from the query
+    /// (viewer "Create page": the link `[[slug|text]]` is written into the
+    /// source page before the run starts, so the run must land there).
+    pub topic_slug: Option<String>,
+}
+
+/// Date anchor for every research prompt. The worker model's own
+/// sense of "latest" is frozen at its training cutoff; without this it
+/// writes search queries for last year's releases and reports them as
+/// current (a 2026 run on "Chinese AI companies" pinned every query to
+/// 2025 and never found DeepSeek V4 / Qwen 3.8).
+pub fn today_context() -> String {
+    let today = kms_writer::today_str();
+    let year = today.get(..4).unwrap_or("");
+    format!(
+        "Today is {today}. Your training knowledge may be out of date: never \
+         assume a version, release, price or leader you remember is still the \
+         latest — only the sources say what is current. Prefer newer sources \
+         when claims conflict, and treat {year} as the current year."
+    )
+}
+
+/// Prompt sentence for the output language. Thai is the product default;
+/// technical vocabulary is kept in English in every language so notes
+/// stay searchable and don't transliterate model / API names.
+pub fn language_rule(lang: &str) -> String {
+    let keep = "Keep technical terms, product and model names, API and \
+                code identifiers, and units in English — do not translate \
+                or transliterate them.";
+    match lang.trim().to_ascii_lowercase().as_str() {
+        "th" | "thai" => format!("Write in Thai (ภาษาไทย). {keep}"),
+        "en" | "english" => "Write in English.".to_string(),
+        "query" | "auto" => "Write in the same language as the query.".to_string(),
+        other => format!("Write in the language with code `{other}`. {keep}"),
+    }
 }
 
 impl Default for JobConfig {
     fn default() -> Self {
         Self {
             min_iter: 2,
-            max_iter: 8,
+            max_iter: 4,
             score_threshold: 0.80,
             subtopics_per_iter: 4,
             fetch_top_n: 3,
             max_pages: 7,
-            llm_timeout: Duration::from_secs(900),
-            time_budget: Duration::from_secs(15 * 60),
+            llm_timeout: Duration::from_secs(180),
+            time_budget: Duration::from_secs(25 * 60),
             kms_target: None,
+            max_notes: 30,
+            novelty_threshold: 0.35,
+            append: false,
+            dry_run: false,
+            legacy: false,
+            digest_model: None,
+            language: "th".into(),
+            refresh_slug: None,
+            local_source: None,
+            topic_slug: None,
         }
+    }
+}
+
+/// Default digest model when none is given: the fast sibling of a
+/// reasoning model when one is known, else the main model (`None`).
+/// Product rule (2026-09-07): research runs on the model the user
+/// chose. We never pick a different provider on their behalf — a
+/// worker model is used only when `--worker-model` names one. The
+/// speed difference is real (gemini-2.5-flash answers 4 concurrent
+/// Thai calls in 5–7 s; deepseek-v4-flash queues them ~50 s apart) and
+/// is surfaced as a log hint, not a silent switch.
+pub fn default_digest_model(_main_model: &str) -> Option<String> {
+    None
+}
+
+/// Flags shared by the REPL and GUI `/research` dispatchers.
+#[derive(Debug, Clone, Default)]
+pub struct StartFlags {
+    pub kms_target: Option<String>,
+    pub min_iter: Option<u32>,
+    pub max_iter: Option<u32>,
+    pub score_threshold_pct: Option<u32>,
+    pub max_pages: Option<u32>,
+    pub budget_time_secs: Option<u64>,
+    pub max_notes: Option<u32>,
+    pub novelty_pct: Option<u32>,
+    pub append: bool,
+    pub dry_run: bool,
+    pub legacy: bool,
+    pub digest_model: Option<String>,
+    /// `--lang`; `None` keeps the default (`th`).
+    pub language: Option<String>,
+    /// KMSs attached to the session (`config.kms_active`), most
+    /// recently attached last. Zettelkasten default: research goes into
+    /// the last attached KMS unless `--kms <name>` or `--kms new`.
+    pub attached_kms: Vec<String>,
+}
+
+impl JobConfig {
+    pub fn from_flags(f: StartFlags) -> Self {
+        let mut cfg = Self::default();
+        cfg.kms_target = match f.kms_target.as_deref().map(str::trim) {
+            Some("new") | Some("-") => None,
+            Some(name) if !name.is_empty() => Some(name.to_string()),
+            _ => f.attached_kms.last().cloned(),
+        };
+        if let Some(v) = f.min_iter {
+            cfg.min_iter = v;
+        }
+        if let Some(v) = f.max_iter {
+            cfg.max_iter = v;
+        }
+        if let Some(pct) = f.score_threshold_pct {
+            cfg.score_threshold = (pct as f32 / 100.0).clamp(0.0, 1.0);
+        }
+        if let Some(v) = f.max_pages {
+            cfg.max_pages = v;
+        }
+        if let Some(secs) = f.budget_time_secs {
+            cfg.time_budget = Duration::from_secs(secs);
+        }
+        if let Some(v) = f.max_notes {
+            cfg.max_notes = v.clamp(1, plan::HARD_MAX_NOTES);
+        }
+        if let Some(pct) = f.novelty_pct {
+            cfg.novelty_threshold = (pct as f32 / 100.0).clamp(0.0, 1.0);
+        }
+        cfg.append = f.append;
+        cfg.dry_run = f.dry_run;
+        cfg.legacy = f.legacy;
+        cfg.digest_model = f.digest_model;
+        if let Some(l) = f
+            .language
+            .map(|l| l.trim().to_ascii_lowercase())
+            .filter(|l| !l.is_empty())
+        {
+            cfg.language = l;
+        }
+        if cfg.legacy && f.max_iter.is_none() {
+            cfg.max_iter = 8;
+        }
+        cfg
     }
 }
 
@@ -149,6 +306,23 @@ pub struct JobView {
     /// `2026-05-09-obon-festival.md`). `None` until completion.
     pub result_page: Option<String>,
     pub error: Option<String>,
+}
+
+impl JobView {
+    /// `mm:ss` (or `h:mm:ss`) since the job started, frozen at finish.
+    pub fn elapsed_str(&self) -> String {
+        let end = self.finished_at.unwrap_or_else(std::time::SystemTime::now);
+        let s = end
+            .duration_since(self.started_at)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let (h, m, sec) = (s / 3600, (s % 3600) / 60, s % 60);
+        if h > 0 {
+            format!("{h}:{m:02}:{sec:02}")
+        } else {
+            format!("{m:02}:{sec:02}")
+        }
+    }
 }
 
 /// Thread-safe registry of running + recently-completed jobs.
@@ -417,36 +591,200 @@ pub async fn start(
     config: JobConfig,
     provider: Arc<dyn crate::providers::Provider>,
     model: String,
+    digest_provider: Option<Arc<dyn crate::providers::Provider>>,
 ) -> Result<JobId> {
     let (id, cancel) = manager().register(query.clone(), &config);
     let id_for_task = id.clone();
-    let cfg_for_task = config.clone();
     tokio::spawn(async move {
-        let outcome = pipeline::run(
-            &id_for_task,
+        run_job(
+            id_for_task,
+            cancel,
             query,
-            cfg_for_task,
+            config,
+            provider,
+            model,
+            digest_provider,
+            None,
+        )
+        .await;
+    });
+    Ok(id)
+}
+
+/// Files-tab "Add to KMS as atomic notes": turn one archived source
+/// (`<kms>/sources/<alias>.md`) into a topic page plus atomic child
+/// notes through the research v2 digest → plan → write path. The job
+/// shows in the Research sidebar like any run.
+pub async fn start_ingest(
+    kms: String,
+    alias: String,
+    base: JobConfig,
+    provider: Arc<dyn crate::providers::Provider>,
+    model: String,
+    digest_provider: Option<Arc<dyn crate::providers::Provider>>,
+) -> Result<JobId> {
+    let kref = crate::kms::resolve(&kms)
+        .ok_or_else(|| crate::error::Error::Tool(format!("no KMS named '{kms}'")))?;
+    let path = kref.root.join("sources").join(format!("{alias}.md"));
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| crate::error::Error::Tool(format!("read {}: {e}", path.display())))?;
+    let title = pipeline_v2::local_source_title(&raw, &alias);
+    let mut cfg = base;
+    cfg.kms_target = Some(kms);
+    cfg.local_source = Some(alias);
+    cfg.legacy = false;
+    let (id, cancel) = manager().register(title.clone(), &cfg);
+    let id_for_task = id.clone();
+    tokio::spawn(async move {
+        run_job(
+            id_for_task,
+            cancel,
+            title,
+            cfg,
+            provider,
+            model,
+            digest_provider,
+            None,
+        )
+        .await;
+    });
+    Ok(id)
+}
+
+/// One job to completion, finalizing the manager entry either way.
+async fn run_job(
+    id: JobId,
+    cancel: CancelToken,
+    query: String,
+    config: JobConfig,
+    provider: Arc<dyn crate::providers::Provider>,
+    model: String,
+    digest_provider: Option<Arc<dyn crate::providers::Provider>>,
+    tools: Option<Arc<dyn pipeline::ResearchTools>>,
+) {
+    let mut cfg = config;
+    if cfg.legacy {
+        // v1 prompts carry whole source bodies; keep its old ceiling.
+        cfg.llm_timeout = cfg.llm_timeout.max(Duration::from_secs(900));
+    }
+    let outcome = if cfg.legacy {
+        pipeline::run(&id, query, cfg, provider, model, cancel.clone()).await
+    } else {
+        let tools = tools.unwrap_or_else(pipeline::production_tools);
+        let digest = digest_provider.map(|p| {
+            let m = cfg.digest_model.clone().unwrap_or_else(|| model.clone());
+            (p, m)
+        });
+        pipeline_v2::run_with_tools(
+            &id,
+            query,
+            cfg,
             provider,
             model,
             cancel.clone(),
+            tools,
+            digest,
         )
-        .await;
-        match outcome {
-            Ok(result_page) => {
-                manager().finalize(&id_for_task, JobStatus::Done, Some(result_page), None);
-            }
-            Err(e) => {
-                let s = format!("{e}");
-                let status = if cancel.is_cancelled() {
-                    JobStatus::Cancelled
-                } else {
-                    JobStatus::Failed
-                };
-                manager().finalize(&id_for_task, status, None, Some(s));
-            }
+        .await
+    };
+    match outcome {
+        Ok(result_page) => {
+            manager().finalize(&id, JobStatus::Done, Some(result_page), None);
+        }
+        Err(e) => {
+            let s = format!("{e}");
+            let status = if cancel.is_cancelled() {
+                JobStatus::Cancelled
+            } else {
+                JobStatus::Failed
+            };
+            manager().finalize(&id, status, None, Some(s));
+        }
+    }
+}
+
+/// `/research refresh`: re-research existing notes of `kms` and merge
+/// what is new into them. Jobs are registered up front (so `/research
+/// list` shows the queue) and run one after another in a single task.
+/// `slugs` empty ⇒ every non-MOC note whose `updated` is older than
+/// `older_than_days` (or has none).
+pub async fn start_refresh(
+    kms: String,
+    slugs: Vec<String>,
+    older_than_days: u32,
+    base: JobConfig,
+    provider: Arc<dyn crate::providers::Provider>,
+    model: String,
+    digest_provider: Option<Arc<dyn crate::providers::Provider>>,
+    tools: Option<Arc<dyn pipeline::ResearchTools>>,
+) -> Result<Vec<(JobId, String)>> {
+    let kref = crate::kms::resolve(&kms)
+        .ok_or_else(|| crate::error::Error::Tool(format!("no KMS named '{kms}'")))?;
+    let known = graph::load_known(&kref);
+    let today = kms_writer::today_str();
+    let targets: Vec<&graph::KnownNote> = if slugs.is_empty() {
+        known
+            .iter()
+            .filter(|k| k.kind != "moc" && !k.slug.starts_with('_'))
+            .filter(|k| match &k.updated {
+                Some(u) => days_between(u, &today) >= older_than_days as i64,
+                None => true,
+            })
+            .collect()
+    } else {
+        let mut v = Vec::new();
+        for s in &slugs {
+            let k = known.iter().find(|k| &k.slug == s).ok_or_else(|| {
+                crate::error::Error::Tool(format!("no note '{s}' in KMS '{kms}'"))
+            })?;
+            v.push(k);
+        }
+        v
+    };
+    if targets.is_empty() {
+        return Err(crate::error::Error::Tool(format!(
+            "nothing to refresh in '{kms}' (no note older than {older_than_days} days)"
+        )));
+    }
+    let mut queue = Vec::new();
+    for k in &targets {
+        let mut cfg = base.clone();
+        cfg.kms_target = Some(kms.clone());
+        cfg.refresh_slug = Some(k.slug.clone());
+        cfg.max_iter = cfg.max_iter.min(2);
+        let query = k.title.clone();
+        let (id, cancel) = manager().register(format!("refresh: {query}"), &cfg);
+        queue.push((id, cancel, query, cfg, k.slug.clone()));
+    }
+    let ids: Vec<(JobId, String)> = queue
+        .iter()
+        .map(|(id, _, _, _, s)| (id.clone(), s.clone()))
+        .collect();
+    tokio::spawn(async move {
+        for (id, cancel, query, cfg, _) in queue {
+            run_job(
+                id,
+                cancel,
+                query,
+                cfg,
+                provider.clone(),
+                model.clone(),
+                digest_provider.clone(),
+                tools.clone(),
+            )
+            .await;
         }
     });
-    Ok(id)
+    Ok(ids)
+}
+
+fn days_between(from_ymd: &str, to_ymd: &str) -> i64 {
+    use chrono::NaiveDate;
+    let p = |s: &str| NaiveDate::parse_from_str(s.get(..10).unwrap_or(s), "%Y-%m-%d").ok();
+    match (p(from_ymd), p(to_ymd)) {
+        (Some(a), Some(b)) => (b - a).num_days(),
+        _ => i64::MAX,
+    }
 }
 
 #[cfg(test)]
@@ -549,10 +887,55 @@ mod tests {
         // we tune them.
         let c = JobConfig::default();
         assert_eq!(c.min_iter, 2);
-        assert_eq!(c.max_iter, 8);
+        assert_eq!(c.max_iter, 4, "v2: seed + 3 gap rounds");
         assert!((c.score_threshold - 0.80).abs() < f32::EPSILON);
         assert_eq!(c.subtopics_per_iter, 4);
         assert_eq!(c.fetch_top_n, 3);
         assert_eq!(c.max_pages, 7);
+        assert_eq!(c.max_notes, 30);
+        assert!((c.novelty_threshold - 0.35).abs() < f32::EPSILON);
+        assert_eq!(c.llm_timeout.as_secs(), 180);
+        assert_eq!(c.time_budget.as_secs(), 25 * 60);
+        assert!(!c.legacy && !c.append && !c.dry_run);
+        assert_eq!(c.language, "th");
+        let en = JobConfig::from_flags(StartFlags {
+            language: Some(" EN ".into()),
+            ..Default::default()
+        });
+        assert_eq!(en.language, "en");
+        assert!(language_rule("th").contains("Thai") && language_rule("th").contains("English"));
+        assert_eq!(language_rule("en"), "Write in English.");
+        // legacy keeps its old ceiling when the flag is set without --max-iter
+        let l = JobConfig::from_flags(StartFlags {
+            legacy: true,
+            ..Default::default()
+        });
+        assert_eq!(l.max_iter, 8);
+    }
+
+    /// Zettelkasten default: no `--kms` ⇒ the most recently attached KMS;
+    /// `--kms new` forces a fresh, query-derived KMS; an explicit name wins.
+    #[test]
+    fn kms_target_defaults_to_last_attached_kms() {
+        let attached = vec!["labour".to_string(), "z-image-model".to_string()];
+        let c = JobConfig::from_flags(StartFlags {
+            attached_kms: attached.clone(),
+            ..Default::default()
+        });
+        assert_eq!(c.kms_target.as_deref(), Some("z-image-model"));
+        let c = JobConfig::from_flags(StartFlags {
+            attached_kms: attached.clone(),
+            kms_target: Some("new".into()),
+            ..Default::default()
+        });
+        assert_eq!(c.kms_target, None);
+        let c = JobConfig::from_flags(StartFlags {
+            attached_kms: attached,
+            kms_target: Some("other".into()),
+            ..Default::default()
+        });
+        assert_eq!(c.kms_target.as_deref(), Some("other"));
+        let c = JobConfig::from_flags(StartFlags::default());
+        assert_eq!(c.kms_target, None);
     }
 }

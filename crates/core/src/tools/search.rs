@@ -158,16 +158,25 @@ impl WebSearchTool {
         out
     }
 
-    async fn search_tavily(&self, query: &str, max: usize, key: &str) -> Result<String> {
+    async fn search_tavily(
+        &self,
+        query: &str,
+        max: usize,
+        key: &str,
+        freshness: Option<&str>,
+    ) -> Result<String> {
         // Gateway mode: `key` is the gateway bearer, sent in the
         // Authorization header; the gateway injects the real `api_key`.
         // Direct mode: `key` is the Tavily api_key, sent in the body.
         let resp = if let Some(gw) = &self.gateway {
-            let body = json!({
+            let mut body = json!({
                 "query": query,
                 "max_results": max,
                 "include_answer": true,
             });
+            if let Some(f) = freshness {
+                body["time_range"] = json!(f);
+            }
             self.client
                 .post(format!("{}/tavily/search", gw.base))
                 .header("authorization", format!("Bearer {key}"))
@@ -176,12 +185,15 @@ impl WebSearchTool {
                 .await
                 .map_err(|e| Error::Tool(format!("tavily: {e}")))?
         } else {
-            let body = json!({
+            let mut body = json!({
                 "api_key": key,
                 "query": query,
                 "max_results": max,
                 "include_answer": true,
             });
+            if let Some(f) = freshness {
+                body["time_range"] = json!(f);
+            }
             self.client
                 .post("https://api.tavily.com/search")
                 .header("content-type", "application/json")
@@ -226,14 +238,32 @@ impl WebSearchTool {
         }
     }
 
-    async fn search_brave(&self, query: &str, max: usize, key: &str) -> Result<String> {
+    async fn search_brave(
+        &self,
+        query: &str,
+        max: usize,
+        key: &str,
+        freshness: Option<&str>,
+    ) -> Result<String> {
+        // Brave: pd / pw / pm / py = past day / week / month / year.
+        let brave_fresh = freshness.map(|f| match f {
+            "day" => "pd",
+            "week" => "pw",
+            "month" => "pm",
+            _ => "py",
+        });
+        let count = max.to_string();
+        let mut params: Vec<(&str, &str)> = vec![("q", query), ("count", &count)];
+        if let Some(bf) = brave_fresh {
+            params.push(("freshness", bf));
+        }
         // Gateway mode: `key` is the gateway bearer; the gateway injects
         // the real `X-Subscription-Token`. Direct mode: `key` IS the
         // Brave token, sent in that header.
         let resp = if let Some(gw) = &self.gateway {
             self.client
                 .get(format!("{}/brave/res/v1/web/search", gw.base))
-                .query(&[("q", query), ("count", &max.to_string())])
+                .query(&params)
                 .header("authorization", format!("Bearer {key}"))
                 .header("Accept", "application/json")
                 .send()
@@ -242,7 +272,7 @@ impl WebSearchTool {
         } else {
             self.client
                 .get("https://api.search.brave.com/res/v1/web/search")
-                .query(&[("q", query), ("count", &max.to_string())])
+                .query(&params)
                 .header("X-Subscription-Token", key)
                 .header("Accept", "application/json")
                 .send()
@@ -428,7 +458,8 @@ impl Tool for WebSearchTool {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Search query"},
-                "max_results": {"type": "integer", "description": "Max results (default 5)"}
+                "max_results": {"type": "integer", "description": "Max results (default 5)"},
+                "freshness": {"type": "string", "description": "Only recent results: day | week | month | year (Tavily/Brave; ignored elsewhere)"}
             },
             "required": ["query"]
         })
@@ -444,6 +475,11 @@ impl Tool for WebSearchTool {
             .get("max_results")
             .and_then(Value::as_u64)
             .unwrap_or(5) as usize;
+        let freshness = input
+            .get("freshness")
+            .and_then(Value::as_str)
+            .map(|f| f.trim().to_ascii_lowercase())
+            .filter(|f| matches!(f.as_str(), "day" | "week" | "month" | "year"));
 
         let candidates = self.resolve_candidates();
         debug_assert!(
@@ -463,8 +499,14 @@ impl Tool for WebSearchTool {
         let mut errors: Vec<String> = Vec::new();
         for backend in &candidates {
             let result = match backend {
-                Backend::Tavily(key) => self.search_tavily(query, max, key).await,
-                Backend::Brave(key) => self.search_brave(query, max, key).await,
+                Backend::Tavily(key) => {
+                    self.search_tavily(query, max, key, freshness.as_deref())
+                        .await
+                }
+                Backend::Brave(key) => {
+                    self.search_brave(query, max, key, freshness.as_deref())
+                        .await
+                }
                 Backend::SerpApi(key) => self.search_serpapi(query, max, key).await,
                 Backend::Ddg => self.search_ddg(query, max).await,
             };
