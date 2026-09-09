@@ -292,6 +292,9 @@ mod tests {
 
     #[tokio::test]
     async fn cache_returns_same_instance_within_ttl() {
+        let _guard = super::super::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         _reset_cache_for_tests().await;
 
         let first = get_info(AuthOk).await;

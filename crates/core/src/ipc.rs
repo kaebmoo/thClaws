@@ -344,6 +344,7 @@ fn announce_key_stored(provider: &str, ok: bool, error: &str, storage: &str, ctx
                 "type": "provider_update",
                 "provider": provider_name,
                 "model": new_cfg.model,
+                "thinking": crate::providers::ThinkingLevel::json(new_cfg.thinking_budget),
                 "provider_ready": ready,
             });
             (ctx.dispatch)(broadcast.to_string());
@@ -365,6 +366,7 @@ fn announce_key_stored(provider: &str, ok: bool, error: &str, storage: &str, ctx
                 "type": "provider_update",
                 "provider": provider_name,
                 "model": cfg.model,
+                "thinking": crate::providers::ThinkingLevel::json(cfg.thinking_budget),
                 "provider_ready": ready,
             });
             (ctx.dispatch)(broadcast.to_string());
@@ -2676,6 +2678,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         "type": "provider_update",
                         "provider": provider_name,
                         "model": new_cfg.model,
+                        "thinking": crate::providers::ThinkingLevel::json(new_cfg.thinking_budget),
                         "provider_ready": ready,
                     })
                     .to_string(),
@@ -3118,6 +3121,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                     "kms": listing.kms,
                     "pages": listing.pages,
                     "sources": listing.sources,
+                    "entry": listing.entry,
                     "ok": true,
                 }),
                 None => serde_json::json!({
@@ -3201,6 +3205,19 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                             k.root.join(sub).to_string_lossy().to_string()
                         })
                         .unwrap_or_default();
+                    // Who points here. Computed on read, never stored:
+                    // a backlink is a property of the graph, and a page
+                    // that carried its own list would go stale the
+                    // moment another note linked or unlinked it.
+                    let backlinks: Vec<serde_json::Value> = if kind == "source" {
+                        Vec::new()
+                    } else {
+                        let stem = file.trim_end_matches(".md");
+                        crate::kms::backlinks(&kms_name, stem)
+                            .into_iter()
+                            .map(|(slug, title)| serde_json::json!({"slug": slug, "title": title}))
+                            .collect()
+                    };
                     serde_json::json!({
                         "type": "kms_file_content",
                         "kms": kms_name,
@@ -3210,6 +3227,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         "total_bytes": read.total_bytes,
                         "truncated": read.truncated,
                         "asset_base": asset_base,
+                        "backlinks": backlinks,
                         "ok": true,
                     })
                 }
@@ -4292,6 +4310,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                     "type": "provider_update",
                     "provider": provider_name,
                     "model": new_cfg.model,
+                    "thinking": crate::providers::ThinkingLevel::json(new_cfg.thinking_budget),
                     "provider_ready": ready,
                 });
                 (ctx.dispatch)(broadcast.to_string());
@@ -4299,6 +4318,32 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                     .shared
                     .input_tx
                     .send(crate::shared_session::ShellInput::ReloadConfig);
+            }
+        }
+
+        // Sidebar thinking selector. Persist first, then let the
+        // worker's ReloadConfig rebuild the agent from the saved value
+        // (rebuild_agent reads `config.thinking_budget`).
+        "thinking_set" => {
+            let raw = msg
+                .get("level")
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::Null => "auto".to_string(),
+                    other => other.to_string(),
+                })
+                .unwrap_or_else(|| "auto".to_string());
+            match crate::providers::ThinkingLevel::parse(&raw) {
+                Some(b) => {
+                    let _ = crate::config::ProjectConfig::persist_thinking_budget(b);
+                    (ctx.dispatch)(crate::providers::ThinkingLevel::update_payload(b).to_string());
+                    let _ = ctx
+                        .shared
+                        .input_tx
+                        .send(crate::shared_session::ShellInput::ReloadConfig);
+                }
+                None => eprintln!("[thinking_set] unknown level {raw:?}"),
             }
         }
 
@@ -4310,6 +4355,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 "type": "provider_update",
                 "provider": provider,
                 "model": cfg.model,
+                "thinking": crate::providers::ThinkingLevel::json(cfg.thinking_budget),
                 "provider_ready": has_key,
             });
             (ctx.dispatch)(payload.to_string());
@@ -5190,6 +5236,44 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
         }
 
         // ── KMS sidebar mutators (M6.36 SERVE9f) ───────────────────
+        // Sidebar context menu. Both go through the shell so the
+        // config/agent bookkeeping and the chat feedback are the same
+        // as typing the command.
+        "kms_rename" => {
+            let name = msg
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            let new_name = msg
+                .get("new_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if !name.is_empty() && !new_name.is_empty() {
+                let _ = ctx
+                    .shared
+                    .input_tx
+                    .send(crate::shared_session::ShellInput::Line(format!(
+                        "/kms rename {name} {new_name}"
+                    )));
+            }
+        }
+        "kms_drop" => {
+            let name = msg
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if !name.is_empty() {
+                let _ = ctx
+                    .shared
+                    .input_tx
+                    .send(crate::shared_session::ShellInput::Line(format!(
+                        "/kms drop {name} --force"
+                    )));
+            }
+        }
         "kms_toggle" => {
             let name = msg
                 .get("name")
@@ -5197,31 +5281,25 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 .unwrap_or("")
                 .trim();
             let active = msg.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+            // The checkbox IS `/kms use` / `/kms off`: route through the
+            // worker's slash handler so the live session (system prompt,
+            // KMS tools, in-memory `kms_active`) changes together with the
+            // persisted settings — a direct settings.json write left the
+            // running chat and the next `/research` unaware of the tick.
+            // The handler broadcasts `kms_update` itself when done.
             let (ok, error) = if name.is_empty() {
                 (false, "name required".to_string())
+            } else if active && crate::kms::resolve(name).is_none() {
+                (false, format!("no KMS named '{name}'"))
             } else {
-                let mut current: Vec<String> = crate::config::ProjectConfig::load()
-                    .and_then(|c| c.kms.map(|k| k.active))
-                    .unwrap_or_default();
-                let already = current.iter().any(|n| n == name);
-                if active && !already {
-                    if crate::kms::resolve(name).is_none() {
-                        (false, format!("no KMS named '{name}'"))
-                    } else {
-                        current.push(name.to_string());
-                        match crate::config::ProjectConfig::set_active_kms(current) {
-                            Ok(()) => (true, String::new()),
-                            Err(e) => (false, e.to_string()),
-                        }
-                    }
-                } else if !active && already {
-                    current.retain(|n| n != name);
-                    match crate::config::ProjectConfig::set_active_kms(current) {
-                        Ok(()) => (true, String::new()),
-                        Err(e) => (false, e.to_string()),
-                    }
+                let line = if active {
+                    format!("/kms use {name}")
                 } else {
-                    (true, String::new())
+                    format!("/kms off {name}")
+                };
+                match ctx.shared.input_tx.send(ShellInput::Line(line)) {
+                    Ok(_) => (true, String::new()),
+                    Err(_) => (false, "session input closed".to_string()),
                 }
             };
             let payload = serde_json::json!({
@@ -5232,8 +5310,6 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 "error": error,
             });
             (ctx.dispatch)(payload.to_string());
-            // Follow up with a fresh list so the UI reflects persisted state.
-            (ctx.dispatch)(crate::kms::build_update_payload().to_string());
         }
 
         "kms_new" => {
@@ -5290,6 +5366,10 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 .trim()
                 .to_string();
             let force = msg.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+            // `summary` (default): the main agent upgrades the stub page.
+            // `atomic`: a research job digests the document and writes a
+            // topic page + one note per idea (zettelkasten).
+            let atomic = msg.get("mode").and_then(|v| v.as_str()) == Some("atomic");
 
             let (ok, alias, images_copied, overwrote, error): (bool, String, usize, bool, String) =
                 (|| {
@@ -5353,7 +5433,46 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             // stub into a real curated page (summary + takeaways + wikilinks).
             // The tab relays it as a normal chat turn so the main agent authors
             // it with KmsRead/KmsSearch/KmsWrite. Empty when the ingest failed.
-            let summarize_prompt = if ok {
+            let mut research_id = String::new();
+            let mut research_err = String::new();
+            if ok && atomic {
+                let cfg = crate::config::AppConfig::load().unwrap_or_default();
+                match crate::repl::build_provider(&cfg) {
+                    Ok(provider) => {
+                        let model = cfg.model.clone();
+                        let kms = kms_name.clone();
+                        let alias_c = alias.clone();
+                        let dispatch = ctx.dispatch.clone();
+                        tokio::spawn(async move {
+                            match crate::research::start_ingest(
+                                kms.clone(),
+                                alias_c.clone(),
+                                crate::research::JobConfig::default(),
+                                provider,
+                                model,
+                                None,
+                            )
+                            .await
+                            {
+                                Ok(id) => {
+                                    dispatch(
+                                        serde_json::json!({
+                                            "type": "research_focus", "id": id,
+                                        })
+                                        .to_string(),
+                                    );
+                                }
+                                Err(e) => {
+                                    eprintln!("[kms_ingest] atomic notes failed to start: {e}")
+                                }
+                            }
+                        });
+                        research_id = "pending".to_string();
+                    }
+                    Err(e) => research_err = format!("provider unavailable: {e}"),
+                }
+            }
+            let summarize_prompt = if ok && !atomic {
                 crate::kms::resolve(&kms_name)
                     .map(|k| {
                         let src = k.root.join("sources").join(format!("{alias}.md"));
@@ -5380,6 +5499,9 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                     "overwrote": overwrote,
                     "collision": collision,
                     "summarize_prompt": summarize_prompt,
+                    "atomic": atomic,
+                    "research": research_id,
+                    "research_error": research_err,
                     "error": error,
                 })
                 .to_string(),
@@ -5474,6 +5596,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                             "kms": listing.kms,
                             "pages": listing.pages,
                             "sources": listing.sources,
+                            "entry": listing.entry,
                             "ok": true,
                         })
                         .to_string(),
@@ -5522,6 +5645,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                             "kms": listing.kms,
                             "pages": listing.pages,
                             "sources": listing.sources,
+                            "entry": listing.entry,
                             "ok": true,
                         })
                         .to_string(),
@@ -5536,6 +5660,125 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
         // write_page re-stamps `updated:`, preserves `created:`, and is
         // idempotent on the canonical header. Edit never renames — the
         // filename stays `name` even if the frontmatter title changed.
+        // Viewer selection → "Create page": link the phrase in the source
+        // page, create a stub at the slug so the link resolves at once,
+        // and research the phrase into that page (topic slug fixed).
+        "kms_create_page_from_selection" => {
+            let kms = msg
+                .get("kms")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let page = msg
+                .get("page")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let text: String = msg
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let slug = crate::research::digest::sanitize_slug(&text);
+            // `summary` = one page only (no child notes, fewer rounds);
+            // `atomic` = the full topic-first run with one note per idea.
+            let atomic = msg.get("mode").and_then(|v| v.as_str()) == Some("atomic");
+            let mut linked = false;
+            let mut existed = false;
+            let mut started = false;
+            let result: Result<(), String> = (|| {
+                if text.chars().count() < 2 || text.chars().count() > 120 || slug.is_empty() {
+                    return Err("select a short phrase (2–120 characters)".into());
+                }
+                let kref =
+                    crate::kms::resolve(&kms).ok_or_else(|| format!("KMS '{kms}' not found"))?;
+                existed = kref.pages_dir().join(format!("{slug}.md")).is_file();
+                linked = crate::kms::link_phrase(&kref, &page, &text, &slug)
+                    .map_err(|e| e.to_string())?;
+                if existed {
+                    return Ok(());
+                }
+                let page_title =
+                    std::fs::read_to_string(kref.page_path(&page).map_err(|e| e.to_string())?)
+                        .ok()
+                        .map(|raw| crate::research::pipeline_v2::local_source_title(&raw, &page))
+                        .unwrap_or_else(|| page.clone());
+                let stub = format!(
+                    "---\ntitle: \"{}\"\ntype: note\nkind: concept\nstatus: researching\nrelated: [\"{page}\"]\n---\n\n\
+                     Researching \"{text}\" — this page is being written by `/research`, linked from [[{page}|{page_title}]].\n",
+                    text.replace('"', "'")
+                );
+                crate::kms::write_page(&kref, &slug, &stub).map_err(|e| e.to_string())?;
+                let cfg = crate::config::AppConfig::load().unwrap_or_default();
+                let provider = crate::repl::build_provider(&cfg)
+                    .map_err(|e| format!("provider unavailable: {e}"))?;
+                let model = cfg.model.clone();
+                let mut rcfg = crate::research::JobConfig::default();
+                rcfg.kms_target = Some(kms.clone());
+                rcfg.topic_slug = Some(slug.clone());
+                if !atomic {
+                    rcfg.max_notes = 1;
+                    rcfg.max_iter = rcfg.max_iter.min(2);
+                }
+                let query = if page_title.to_lowercase().contains(&text.to_lowercase()) {
+                    text.clone()
+                } else {
+                    format!("{text} ({page_title})")
+                };
+                let dispatch = ctx.dispatch.clone();
+                tokio::spawn(async move {
+                    match crate::research::start(query, rcfg, provider, model, None).await {
+                        Ok(id) => dispatch(
+                            serde_json::json!({"type": "research_focus", "id": id}).to_string(),
+                        ),
+                        Err(e) => eprintln!("[kms_create_page] research failed to start: {e}"),
+                    }
+                });
+                started = true;
+                Ok(())
+            })();
+            let (ok, error) = match result {
+                Ok(()) => (true, String::new()),
+                Err(e) => (false, e),
+            };
+            (ctx.dispatch)(
+                serde_json::json!({
+                    "type": "kms_create_page_result",
+                    "kms": kms,
+                    "page": page,
+                    "slug": slug,
+                    "text": text,
+                    "linked": linked,
+                    "existed": existed,
+                    "research_started": started,
+                    "atomic": atomic,
+                    "ok": ok,
+                    "error": error,
+                })
+                .to_string(),
+            );
+            if ok {
+                (ctx.dispatch)(crate::kms::build_update_payload().to_string());
+                if let Some(listing) = crate::kms::browse(&kms) {
+                    (ctx.dispatch)(
+                        serde_json::json!({
+                            "type": "kms_browse_result",
+                            "kms": listing.kms,
+                            "pages": listing.pages,
+                            "sources": listing.sources,
+                            "entry": listing.entry,
+                            "ok": true,
+                        })
+                        .to_string(),
+                    );
+                }
+            }
+        }
+
         "kms_write_page" => {
             let kms = msg.get("kms").and_then(|v| v.as_str()).unwrap_or("");
             let name = msg.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -5569,6 +5812,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                             "kms": listing.kms,
                             "pages": listing.pages,
                             "sources": listing.sources,
+                            "entry": listing.entry,
                             "ok": true,
                         })
                         .to_string(),
@@ -5610,6 +5854,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                             "kms": listing.kms,
                             "pages": listing.pages,
                             "sources": listing.sources,
+                            "entry": listing.entry,
                             "ok": true,
                         })
                         .to_string(),

@@ -75,6 +75,12 @@ const SEED_SEARCH_RESULTS: u32 = 10;
 pub trait ResearchTools: Send + Sync {
     async fn search(&self, query: &str, max_results: u32) -> Result<Vec<SearchHit>>;
     async fn fetch(&self, url: &str) -> Result<String>;
+    /// Same as `search` but restricted to the past year where the
+    /// backend supports it (Tavily `time_range`, Brave `freshness`).
+    /// Default: plain search, so mocks need no change.
+    async fn search_recent(&self, query: &str, max_results: u32) -> Result<Vec<SearchHit>> {
+        self.search(query, max_results).await
+    }
 }
 
 /// Minimal search-result shape the pipeline actually uses. Real
@@ -595,6 +601,18 @@ impl ResearchTools for ProductionTools {
             .await?;
         Ok(parse_websearch_markdown(&raw))
     }
+    async fn search_recent(&self, query: &str, max_results: u32) -> Result<Vec<SearchHit>> {
+        use crate::tools::Tool;
+        let raw = self
+            .search
+            .call(serde_json::json!({
+                "query": query,
+                "max_results": max_results,
+                "freshness": "year",
+            }))
+            .await?;
+        Ok(parse_websearch_markdown(&raw))
+    }
     async fn fetch(&self, url: &str) -> Result<String> {
         use crate::tools::Tool;
         // M6.39.8: HAL-first with WebFetch fallback. Research is for
@@ -905,6 +923,7 @@ mod tests {
             llm_timeout: std::time::Duration::from_secs(5),
             time_budget: std::time::Duration::from_secs(60),
             kms_target: None,
+            ..JobConfig::default()
         };
         let cancel = CancelToken::new();
         let (id, _) = manager().register("test query".into(), &cfg);
@@ -962,6 +981,7 @@ mod tests {
             llm_timeout: std::time::Duration::from_secs(5),
             time_budget: std::time::Duration::from_secs(60),
             kms_target: None,
+            ..JobConfig::default()
         };
         let cancel = CancelToken::new();
         let (id, _) = manager().register("query".into(), &cfg);
@@ -1012,6 +1032,7 @@ mod tests {
             llm_timeout: std::time::Duration::from_secs(5),
             time_budget: std::time::Duration::from_secs(60),
             kms_target: None,
+            ..JobConfig::default()
         };
         let cancel = CancelToken::new();
         let (id, _) = manager().register("query".into(), &cfg);
@@ -1077,6 +1098,7 @@ mod tests {
             llm_timeout: std::time::Duration::from_secs(5),
             time_budget: std::time::Duration::from_secs(60),
             kms_target: None,
+            ..JobConfig::default()
         };
         let cancel = CancelToken::new();
         let (id, _) = manager().register("q".into(), &cfg);

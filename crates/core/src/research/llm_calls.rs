@@ -1057,7 +1057,21 @@ fn parse_page_plan(raw: &str, max_pages: u32, source_count: u32) -> Vec<PagePlan
 /// for `TextDelta` events into a String, return. Cancellation (via
 /// `CancelToken`) and timeout are honored; both produce
 /// `Error::Tool("…cancelled" / "…timed out")`.
-async fn oneshot(
+/// Public alias for callers outside this module that need `oneshot`
+/// inside a spawned future (same body; keeps `oneshot` itself
+/// private-ish). Used by `kms_verify`'s entailment pass, which wants
+/// the same thinking-off, timeout-override shape.
+pub async fn oneshot_pub(
+    provider: &dyn Provider,
+    model: &str,
+    prompt: String,
+    timeout: Duration,
+    cancel: &CancelToken,
+) -> Result<String> {
+    oneshot(provider, model, prompt, timeout, cancel).await
+}
+
+pub(super) async fn oneshot(
     provider: &dyn Provider,
     model: &str,
     prompt: String,
@@ -1069,8 +1083,11 @@ async fn oneshot(
         system: None,
         messages: vec![Message::user(prompt)],
         tools: Vec::new(),
-        max_tokens: 4096,
-        thinking_budget: None,
+        max_tokens: 16384,
+        // Extraction / planning / note writing are mechanical: on
+        // deepseek-v4 a digest spent 5–13k reasoning tokens (77–89 s)
+        // with thinking on versus 4–7 s off. See StreamRequest docs.
+        thinking_budget: Some(0),
         // Research synthesizes long pages — the model may go silent
         // for minutes mid-stream. Force the per-chunk idle ceiling to
         // the pipeline's `llm_timeout` (default 900s) regardless of

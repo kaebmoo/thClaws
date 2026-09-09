@@ -912,7 +912,7 @@ pub struct ActiveLoop {
 impl WorkerState {
     /// Rebuild `agent` with a freshly-built provider from `self.config`,
     /// reusing the current tool registry + system prompt. Preserves
-    /// `permission_mode` and `thinking_budget`.
+    /// `permission_mode`; `thinking_budget` follows `self.config`.
     ///
     /// `preserve_history = true` carries the current conversation into
     /// the new Agent (used by mutations that change the tool roster or
@@ -965,7 +965,9 @@ impl WorkerState {
             self.tool_registry.remove("WebScrape");
         }
         let prev_perm = self.agent.permission_mode;
-        let prev_thinking = self.agent.thinking_budget;
+        // `/thinking` and the sidebar selector both persist to settings
+        // before ReloadConfig, so the reloaded config is the truth.
+        let prev_thinking = self.config.thinking_budget;
         let prev_ask_tools = self.agent.ask_tools.clone();
         let new_agent = Agent::new(
             provider,
@@ -1855,6 +1857,7 @@ async fn run_worker(
     }
     let mut agent = Agent::new(provider, tools.clone(), &config.model, &system)
         .with_max_tokens(config.max_tokens)
+        .with_thinking_budget(config.thinking_budget)
         .with_approver(approver.clone())
         .with_cancel(cancel.clone())
         .with_hooks(hooks_arc.clone());
@@ -4023,6 +4026,7 @@ async fn handle_isolated_line(
     // Restore the real agent + session; drop the throwaway.
     state.agent = saved_agent;
     state.session = saved_session;
+    crate::audit::set_session(&state.session.id);
     if let Some(store) = state.session_store.as_ref() {
         let _ = store.delete(&throwaway_id);
     }

@@ -328,6 +328,13 @@ Optional flags:
 - `as <alias>` — override the auto-derived page stem. Useful when the filename or URL produces something ugly.
 - `--force` — replace the existing page with the same alias, AND mark all pages whose frontmatter `sources:` references this alias with a `> ⚠ STALE` marker (the **re-ingest cascade**). Pages flagged STALE need refresh against the new source content; `/kms wrap-up` surfaces them.
 
+**Atomic notes from a document.** In the GUI's Files tab, *Add to KMS as
+atomic notes* runs the `/research` writer over the archived source
+instead of a one-page summary: the document is digested in windows,
+claims are quote-checked, and the result is a topic page (over the
+stub) plus one note per idea, all citing `../sources/<alias>.md`. See
+[chapter 4](ch04-desktop-gui-tour.md) and [chapter 20](ch20-research.md).
+
 ```
 ❯ /kms ingest notes ~/Downloads/oauth-spec.pdf
 ingested oauth-spec → pages/oauth-spec.md (12 KB extracted)
@@ -398,9 +405,48 @@ filed answer → /Users/you/.config/thclaws/kms/notes/pages/oauth-debugging-reca
 
 Page name is `<title>` sanitized to a stem. Frontmatter pre-set to `category: answer, filed_from: chat`. Body is the latest assistant message verbatim under an H1 with the title.
 
+### `/kms verify [NAME] [--llm] [--fix] [--stale-days N] [--page SLUG]`
+
+Where `lint` asks whether the **structure** holds, `verify` asks whether
+the **evidence** does. Name is optional — the attached KMS is used.
+
+The default pass reads files only and costs nothing:
+
+| Check | What it catches |
+|---|---|
+| unresolved citation | a `[N]` that names no source in the KMS's registry |
+| missing archive | a cited source with no copy under `sources/` |
+| quote drift | a claim whose verbatim quote is no longer in the archived source — the archive was edited or replaced since the claim was extracted |
+| links inside a URL | a linker that rewrote a word inside an address, leaving `https://[[tracxn]].com/…`. `--fix` unwraps them, and only them |
+| `sources:` drift | frontmatter and body disagreeing about which sources the note stands on |
+| uncited assertion | a paragraph asserting a number with no citation anywhere in it |
+| stale | a note whose `updated:` is older than `--stale-days` (default 90) |
+
+`--llm` adds the one check a file cannot make: does each sentence follow
+from the claims it cites? It sends the note and the **claim texts**
+behind its citations — not the source bodies, which the claims were
+already checked against — so a page costs about 15 KB of prompt and the
+pages run eight at a time. The v1 research verifier asked the same
+question by re-sending every source body, one page at a time, and took
+longer than the search that produced the pages.
+
+The auditor is held to the same standard as the extractor: a flagged
+sentence that is not in the note character for character is dropped, so
+a model that paraphrases its own input cannot invent a finding.
+
+```
+❯ /kms verify research
+KMS 'research' verify — 51 page(s), 556 claim(s) re-checked against 56 archived source(s)
+
+20 finding(s)
+
+`sources:` disagreeing with the body (9):
+  - deepseek: body cites [10], [11], [12], … but `sources:` does not list them
+```
+
 ### `/kms lint NAME`
 
-Pure-read health check. Walks `pages/` and reports six categories of issue: broken markdown links to other pages, pages with no inbound links (orphans), index entries pointing at missing files, pages on disk missing from the index, pages without YAML frontmatter, and (when `manifest.json` declares `frontmatter_required`) missing required fields per page category.
+Pure-read health check. Walks `pages/` and reports six categories of issue: broken links to other pages, pages with no inbound links (orphans), index entries pointing at missing files, pages on disk missing from the index, pages without YAML frontmatter, and (when `manifest.json` declares `frontmatter_required`) missing required fields per page category. An inbound link is anything the graph view would draw — a `[text](pages/x.md)` markdown link, a `[[wikilink]]`, or a `related:` entry — so a note wired up by `/research` or `/kms link` is not reported as an orphan.
 
 ```
 ❯ /kms lint notes
@@ -610,6 +656,18 @@ suggested workflow now:
 
 The output suggests the natural cleanup sequence — `wrap-up --fix` patches broken links from the rename pass, `link --apply` weaves new pages into the graph, `reconcile --apply` resolves contradictions where two KMSes covered the same topic differently, then `drop --force` retires the source KMS.
 
+### `/kms rename OLD NEW`
+
+Renames the KMS folder in place (same scope). If `OLD` is attached to the
+project the attachment follows, and in the GUI the agent is rebuilt so
+the system prompt names the new KMS. Pages, sources and wikilinks are
+untouched — links point at page slugs, not at the KMS name. Refuses a
+name that already exists or contains path separators. Alias: `mv`.
+
+In the GUI, right-click a KMS in the sidebar's **Knowledge** list for
+**Rename…**, **Export OKF bundle…** and **Delete…** (Delete asks for
+confirmation, then runs `/kms drop NAME --force`).
+
 ### `/kms drop NAME [--force]`
 
 Destructive — removes the entire KMS directory tree (`<scope>/.thclaws/kms/<name>/` or `~/.config/thclaws/kms/<name>/`). Aliases: `delete`, `rm`.
@@ -628,6 +686,20 @@ deleted KMS 'archived-notes' (12 page(s), 3 source(s)) from /Users/you/.config/t
 `--force` also detaches the KMS from this session's `kms_active` list (otherwise the next system-prompt rebuild would fail trying to resolve a dangling name). The GUI sidebar refreshes immediately so the dropped KMS disappears from the Knowledge section.
 
 No undo — the directory is gone after `--force`. If the KMS is in git (project-scope, committed), recover via `git checkout`; otherwise it's gone. Pair with `/kms merge` first when consolidating to keep a copy in the destination KMS before dropping the source.
+
+### Your frontmatter survives a rewrite
+
+`/research` rewrites a note whenever a later run adds claims to it, and
+`write_page` replaces the file. Two guarantees keep that from eating
+your curation:
+
+- `created:` is carried over from the file on disk whenever the writer
+  does not supply one, so a note's creation date is set once.
+- A research update keeps every frontmatter key it does not own —
+  `category`, `tags`, `aliases`, `verified`, anything you added. It owns
+  only `title`, `type`, `kind`, `related`, `sources`, `claims`,
+  `confidence` and `updated`. (`status: derived` / `status: researching`
+  are cleared, since the page has now been written.)
 
 ## Schema versioning and frontmatter rules
 
@@ -971,13 +1043,58 @@ KMS gained three browse-time surfaces in v0.8.5 — all in the Desktop GUI, none
 
 ### KMS browser sidebar
 
-Click the title of any KMS in the left sidebar (not the checkbox) and a 260-px panel slides in on the right edge listing every page and source archive. Clicking a file opens the in-app viewer over the main content tab. Tabs underneath stay mounted so xterm / chat state is preserved. Closing the browser, switching tabs, or hitting `ESC` returns you to the active tab.
+Click the title of any KMS in the left sidebar (not the checkbox) and a 260-px panel slides in on the right edge listing every page and source archive. Clicking a file opens the in-app viewer over the main content tab.
+
+**It opens on the vault's entry page**, and highlights it in the list.
+
+The entry page is **recorded when the KMS's first page is created** — whatever a vault starts with is what it is about — and kept in `manifest.json`, so it survives an OKF round trip. A rename carries it; deleting that page clears it. `/kms entry [NAME]` shows it, `--set <slug>` pins a different one, `--clear` goes back to inference.
+
+With nothing recorded the engine infers one: the map of content (`kind: moc`) if there is one — `/research` writes exactly one per query, and it is the page that describes the whole topic — otherwise the most linked-to page, since in a vault nobody planned, the hub is whatever everything else points at. Failing both, the most recently updated page. A recorded entry that no longer exists is ignored rather than obeyed.
+
+Only the first listing of a session opens it; a later refresh (a research job finishing, a page renamed) never moves you off what you are reading. Tabs underneath stay mounted so xterm / chat state is preserved. Closing the browser, switching tabs, or hitting `ESC` returns you to the active tab.
 
 The viewer renders Markdown via `marked`, with custom CSS for editorial-style typography: heading borders, accent-tinted blockquotes, bordered tables with zebra stripes, and three link styles — external (solid underline), internal `[[wikilinks]]` (dotted underline + accent pill), and inline citation chips `[N]` (small rounded pill).
 
+**Linked from.** Every page ends with the notes that point at it. An
+edge is any of the three forms a KMS carries — a `[[wikilink]]`, a
+`[text](pages/x.md)` markdown link, or a `related:` frontmatter entry —
+the same set the graph view draws and `/kms lint` counts.
+
+The list is computed on every read and never written into the file. A
+backlink is a property of the graph: the fact that A links to B lives in
+A, so storing a copy in B would mean rewriting every target of every
+edit, and each rewrite would bump that target's `updated:` — the signal
+`/research refresh --older-than` uses to decide what has gone stale.
+
+Because it is derived, it is delivered wherever it is needed rather than
+persisted:
+
+| Where | How it arrives |
+|---|---|
+| KMS viewer | a **Linked from** strip under the page |
+| The agent (`KmsRead`) | a `Linked from (N): …` line closing the result |
+| `/kms html` | the generated site renders it per page |
+| OKF export | materialised as a `## Linked from` section — a bundle leaves the KMS behind, and nothing outside it can recompute the edges. Import strips the section again, since the importing KMS derives its own. |
+
+**Select text → right-click → Create page.** Highlight a phrase in a page
+(2–120 characters) and right-click it. Both choices turn that phrase
+into a `[[slug|phrase]]` link in the page you are reading, create a stub
+note at `pages/<slug>.md` so the link resolves immediately, and start a
+`/research` run on the phrase (with the page title as context) that
+writes into that note — progress shows in the Research sidebar:
+
+- **summary** — one self-contained note (`--max-notes 1`, two search
+  rounds): the right pick for a term you just want explained.
+- **atomic** — the full topic-first run: the note becomes a topic page
+  with one child note per idea, like `/research`.
+
+If a note with that slug already exists, only the link is inserted. The phrase
+must occur in plain prose; a selection that crosses an existing link or
+citation chip is linked nowhere and the notice says so.
+
 ### Obsidian-style graph view
 
-The browser sidebar has a "Graph View" button above the page list. Clicking it replaces the main pane with a force-directed graph: pages are circles, `[[wikilinks]]` are edges, and an "Include sources" checkbox (default on) adds source archives as muted diamond nodes connected to the pages that cite them.
+The browser sidebar has a "Graph View" button above the page list. Clicking it replaces the main pane with a force-directed graph: pages are circles, `[[wikilinks]]` are edges, and an "Include sources" checkbox (default off — pages only) adds source archives as muted diamond nodes connected to the pages that cite them.
 
 - Drag empty space to pan; mouse wheel to zoom around the cursor.
 - Drag a node to reposition it — it pins to the mouse, neighbors react via spring forces.

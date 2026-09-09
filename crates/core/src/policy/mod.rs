@@ -95,6 +95,90 @@ pub struct Policies {
     pub gateway: Option<GatewayPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sso: Option<SsoPolicy>,
+    /// Phase 5 — client-side tool-call audit (RFC 0001).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit: Option<AuditPolicy>,
+    /// Phase 8 — what the agent and the binary may do on this machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<RuntimePolicy>,
+}
+
+/// Phase 8 — the block that says *no*.
+///
+/// Every other block configures where thClaws points: which brand,
+/// which gateway, which IdP, which audit sink. This one restricts what
+/// it may do at all, which is the question an admin actually asks
+/// first. Before it existed, `audit` could record that a user opened a
+/// cloud tunnel or ran `Bash`, but nothing could prevent either — and a
+/// user editing their own `settings.json` could always return to
+/// auto-approve.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RuntimePolicy {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Force the permission mode: `ask`, `auto` or `plan`. Applied
+    /// after settings and after CLI flags, so `--permission-mode auto`
+    /// cannot climb over it. Unset leaves the user's own choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+    /// Tool names the agent may not use. Removed from every registry
+    /// so the model never sees them, and refused again at dispatch in
+    /// case a registry was built somewhere this did not reach.
+    #[serde(default)]
+    pub deny_tools: Vec<String>,
+    /// thClaws Remote — the tunnel that makes this machine's agent
+    /// reachable from the cloud. Default true (today's behaviour); set
+    /// false and no pairing or reconnect can start.
+    #[serde(default = "default_true")]
+    pub allow_remote: bool,
+    /// `--serve`: the HTTP server exposing the web UI and the
+    /// OpenAI-compatible API. Default true; set false and the binary
+    /// refuses to bind.
+    #[serde(default = "default_true")]
+    pub allow_serve: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AuditPolicy {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub sinks: Vec<AuditSinkConfig>,
+    /// Emit the bounded `summary` field. Default true.
+    #[serde(default = "default_true")]
+    pub include_summary: bool,
+    /// Add `x-thclaws-session` / `x-thclaws-turn` to provider requests
+    /// so gateway-side logs join on the same keys. Default true.
+    #[serde(default = "default_true")]
+    pub correlate_gateway: bool,
+}
+
+fn default_batch() -> usize {
+    50
+}
+
+fn default_flush_secs() -> u64 {
+    5
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum AuditSinkConfig {
+    File {
+        /// strftime tokens allowed (`%Y-%m-%d`). `None` → daily file
+        /// under the data dir.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    Http {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth_header_template: Option<String>,
+        #[serde(default = "default_batch")]
+        batch: usize,
+        #[serde(default = "default_flush_secs")]
+        flush_secs: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -232,6 +316,44 @@ pub fn active() -> Option<&'static ActivePolicy> {
     ACTIVE.get().and_then(|opt| opt.as_ref())
 }
 
+/// The active `runtime` block, or `None` when no policy is loaded or
+/// the block is absent / disabled. Every accessor below funnels through
+/// this, so "no policy" and "policy without this block" behave
+/// identically to open-core.
+pub fn runtime() -> Option<&'static RuntimePolicy> {
+    active()
+        .and_then(|a| a.policy.policies.runtime.as_ref())
+        .filter(|r| r.enabled)
+}
+
+/// Permission mode the org forces, lowercased. `None` = user's choice.
+pub fn forced_permission_mode() -> Option<String> {
+    runtime()
+        .and_then(|r| r.permission_mode.as_deref())
+        .map(|m| m.trim().to_ascii_lowercase())
+        .filter(|m| matches!(m.as_str(), "ask" | "auto" | "plan"))
+}
+
+/// Tool names the org denies. Empty when unrestricted.
+pub fn denied_tools() -> Vec<String> {
+    runtime().map(|r| r.deny_tools.clone()).unwrap_or_default()
+}
+
+/// Whether a given tool may run at all under the active policy.
+pub fn tool_allowed(name: &str) -> bool {
+    !denied_tools().iter().any(|d| d.eq_ignore_ascii_case(name))
+}
+
+/// Whether thClaws Remote may connect.
+pub fn remote_allowed() -> bool {
+    runtime().map(|r| r.allow_remote).unwrap_or(true)
+}
+
+/// Whether `--serve` may bind.
+pub fn serve_allowed() -> bool {
+    runtime().map(|r| r.allow_serve).unwrap_or(true)
+}
+
 /// Convenience: which `KeySource` label the active policy was verified
 /// against. `"none"` when no policy is active.
 pub fn key_source_label() -> String {
@@ -356,7 +478,83 @@ fn validate_policies(policy: &Policy, path: &PathBuf) -> Result<(), PolicyError>
             }
         }
     }
+    if let Some(a) = &policy.policies.audit {
+        if a.enabled {
+            if a.sinks.is_empty() {
+                return Err(PolicyError::InvalidConfig {
+                    path: path.clone(),
+                    message: "audit.enabled but audit.sinks is empty — nothing would record".into(),
+                });
+            }
+            for s in &a.sinks {
+                if let AuditSinkConfig::Http { url, .. } = s {
+                    if url.trim().is_empty() {
+                        return Err(PolicyError::InvalidConfig {
+                            path: path.clone(),
+                            message: "audit http sink has an empty url".into(),
+                        });
+                    }
+                }
+            }
+        }
+    }
     Ok(())
+}
+
+/// Multi-line summary for `/policy status` (REPL + GUI).
+pub fn status_text() -> String {
+    let Some(a) = active() else {
+        return "no org policy active (open-core defaults)".to_string();
+    };
+    let p = &a.policy;
+    let on = |b: bool| if b { "on" } else { "off" };
+    let mut lines = vec![
+        format!(
+            "policy: {} (issuer {}, key {})",
+            a.source_path.display(),
+            p.issuer,
+            a.key_source_label
+        ),
+        format!("expires: {}", p.expires_at.as_deref().unwrap_or("never")),
+        format!(
+            "branding={} plugins={} gateway={} sso={}",
+            on(p.policies
+                .branding
+                .as_ref()
+                .map(|b| b.enabled)
+                .unwrap_or(false)),
+            on(p.policies
+                .plugins
+                .as_ref()
+                .map(|b| b.enabled)
+                .unwrap_or(false)),
+            on(p.policies
+                .gateway
+                .as_ref()
+                .map(|b| b.enabled)
+                .unwrap_or(false)),
+            on(p.policies.sso.as_ref().map(|b| b.enabled).unwrap_or(false)),
+        ),
+        crate::audit::status_line(),
+    ];
+    if let Some(g) = p.policies.gateway.as_ref().filter(|g| g.enabled) {
+        lines.push(format!("gateway url: {}", g.url));
+    }
+    if let Some(r) = runtime() {
+        let mut parts = vec![format!(
+            "remote={} serve={}",
+            on(r.allow_remote),
+            on(r.allow_serve)
+        )];
+        if let Some(m) = forced_permission_mode() {
+            parts.push(format!("permission mode forced to '{m}'"));
+        }
+        if !r.deny_tools.is_empty() {
+            parts.push(format!("tools denied: {}", r.deny_tools.join(", ")));
+        }
+        lines.push(format!("runtime: {}", parts.join(" · ")));
+    }
+    lines.join("\n")
 }
 
 /// Walk the documented search path and return the first existing file.
@@ -573,6 +771,103 @@ mod tests {
         assert!(matches!(result, Err(PolicyError::InvalidConfig { .. })));
     }
 
+    fn audit_policy(a: AuditPolicy) -> Policy {
+        Policy {
+            version: 1,
+            issuer: "test".into(),
+            issued_at: String::new(),
+            expires_at: None,
+            binding: None,
+            policies: Policies {
+                audit: Some(a),
+                ..Default::default()
+            },
+            signature: None,
+        }
+    }
+
+    #[test]
+    fn validate_rejects_audit_enabled_without_sinks() {
+        let p = audit_policy(AuditPolicy {
+            enabled: true,
+            sinks: vec![],
+            include_summary: true,
+            correlate_gateway: true,
+        });
+        let r = validate_policies(&p, &PathBuf::from("/tmp/x.json"));
+        assert!(matches!(r, Err(PolicyError::InvalidConfig { .. })));
+    }
+
+    #[test]
+    fn validate_rejects_audit_http_sink_with_empty_url() {
+        let p = audit_policy(AuditPolicy {
+            enabled: true,
+            sinks: vec![AuditSinkConfig::Http {
+                url: "  ".into(),
+                auth_header_template: None,
+                batch: 50,
+                flush_secs: 5,
+            }],
+            include_summary: true,
+            correlate_gateway: true,
+        });
+        let r = validate_policies(&p, &PathBuf::from("/tmp/x.json"));
+        assert!(matches!(r, Err(PolicyError::InvalidConfig { .. })));
+    }
+
+    #[test]
+    fn validate_accepts_audit_disabled_without_sinks_and_file_sink_without_path() {
+        let off = audit_policy(AuditPolicy::default());
+        assert!(validate_policies(&off, &PathBuf::from("/tmp/x.json")).is_ok());
+        let on = audit_policy(AuditPolicy {
+            enabled: true,
+            sinks: vec![AuditSinkConfig::File { path: None }],
+            include_summary: true,
+            correlate_gateway: false,
+        });
+        assert!(validate_policies(&on, &PathBuf::from("/tmp/x.json")).is_ok());
+    }
+
+    /// The block is optional and skipped when absent, so a policy signed
+    /// before Phase 5 canonicalizes to the same bytes and keeps verifying.
+    #[test]
+    fn audit_block_round_trips_and_is_absent_by_default() {
+        let doc: serde_json::Value = serde_json::json!({
+            "version": 1, "issuer": "t", "issued_at": "", "policies": {
+                "audit": {
+                    "enabled": true,
+                    "sinks": [
+                        {"type": "file", "path": "~/.local/share/thclaws/audit/%Y-%m-%d.jsonl"},
+                        {"type": "http", "url": "https://siem.example/thclaws",
+                         "auth_header_template": "Bearer {{env:T}}"}
+                    ]
+                }
+            }
+        });
+        let p: Policy = serde_json::from_value(doc).unwrap();
+        let a = p.policies.audit.as_ref().unwrap();
+        assert!(a.enabled && a.include_summary && a.correlate_gateway);
+        assert_eq!(a.sinks.len(), 2);
+        match &a.sinks[1] {
+            AuditSinkConfig::Http {
+                batch, flush_secs, ..
+            } => {
+                assert_eq!((*batch, *flush_secs), (50, 5));
+            }
+            other => panic!("expected http sink, got {other:?}"),
+        }
+        let back = serde_json::to_value(&p).unwrap();
+        assert_eq!(back["policies"]["audit"]["sinks"][0]["type"], "file");
+
+        let plain: Policy =
+            serde_json::from_str(r#"{"version":1,"issuer":"t","issued_at":"","policies":{}}"#)
+                .unwrap();
+        assert!(plain.policies.audit.is_none());
+        assert!(serde_json::to_value(&plain).unwrap()["policies"]
+            .get("audit")
+            .is_none());
+    }
+
     #[test]
     fn validate_accepts_gateway_disabled_with_empty_url() {
         let p = Policy {
@@ -623,6 +918,56 @@ mod tests {
     }
 
     #[test]
+    fn runtime_block_parses_and_defaults_to_permissive() {
+        // Absent block: every accessor answers like open-core.
+        let p: Policy =
+            serde_json::from_str(r#"{"version":1,"policies":{},"signature":"x"}"#).unwrap();
+        assert!(p.policies.runtime.is_none());
+
+        // Present but only naming a denial: the two booleans default on,
+        // so a policy cannot switch off Remote by forgetting a field.
+        let p: Policy = serde_json::from_str(
+            r#"{"version":1,"policies":{"runtime":{"enabled":true,
+                "permission_mode":"ask","deny_tools":["Bash"]}},"signature":"x"}"#,
+        )
+        .unwrap();
+        let r = p.policies.runtime.as_ref().unwrap();
+        assert!(r.enabled && r.allow_remote && r.allow_serve);
+        assert_eq!(r.deny_tools, vec!["Bash".to_string()]);
+
+        // A disabled block is inert, and an unknown mode is ignored
+        // rather than obeyed as something it is not.
+        let disabled = RuntimePolicy {
+            enabled: false,
+            permission_mode: Some("ask".into()),
+            deny_tools: vec!["Bash".into()],
+            allow_remote: false,
+            allow_serve: false,
+        };
+        assert!(!disabled.enabled);
+        let json = serde_json::to_string(&RuntimePolicy {
+            enabled: true,
+            permission_mode: Some("sideways".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        let back: RuntimePolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.permission_mode.as_deref(), Some("sideways"));
+    }
+
+    #[test]
+    fn accessors_are_permissive_without_a_policy() {
+        // No policy is loaded in the unit-test process, which is the
+        // open-core case every non-EE user runs.
+        assert!(runtime().is_none());
+        assert!(remote_allowed());
+        assert!(serve_allowed());
+        assert!(tool_allowed("Bash"));
+        assert!(denied_tools().is_empty());
+        assert!(forced_permission_mode().is_none());
+    }
+
+    #[test]
     fn policy_round_trips_through_json() {
         let policy = Policy {
             version: 1,
@@ -647,6 +992,8 @@ mod tests {
                 }),
                 gateway: None,
                 sso: None,
+                audit: None,
+                runtime: None,
             },
             signature: Some("sig".into()),
         };

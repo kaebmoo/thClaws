@@ -651,6 +651,7 @@ fn request_gui_shutdown(
     // panes, so they are NOT reclaimed when the GUI process exits — the
     // explicit scoped kill is required.
     crate::team::kill_my_teammates();
+    crate::audit::shutdown();
     // Snapshot browser cookies and kill the engine-managed Chromium so
     // it doesn't orphan — a surviving orphan breaks the next launch's
     // playwright-mcp CDP attach ("Browser context management is not
@@ -1565,6 +1566,7 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                     "type": "initial_state",
                     "provider": provider_name,
                     "model": config.model,
+                    "thinking": crate::providers::ThinkingLevel::json(config.thinking_budget),
                     "provider_ready": provider_ready,
                     "mcp_servers": mcp_servers,
                     "sessions": sessions,

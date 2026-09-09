@@ -191,6 +191,13 @@ pub struct KmsManifest {
     /// `category:` matches a key but is missing one of the listed fields.
     #[serde(default)]
     pub frontmatter_required: std::collections::BTreeMap<String, Vec<String>>,
+    /// The page a reader should land on. Recorded when the KMS's first
+    /// page is created — whatever a vault starts with is what it is
+    /// about — and settable with `/kms entry`. Absent means "infer it"
+    /// (see [`entry_page`]), which is what every KMS did before this
+    /// existed and what a KMS whose entry page was deleted goes back to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
 }
 
 pub const KMS_SCHEMA_VERSION: &str = "1.0";
@@ -307,7 +314,7 @@ pub fn ensure_default(name: &str) -> Result<KmsRef> {
 /// minimal starter content so the model has something to read on day
 /// one. No-op and returns `Ok(existing)` if a KMS by that name already
 /// exists at the requested scope.
-pub fn create(name: &str, scope: KmsScope) -> Result<KmsRef> {
+fn validate_name(name: &str) -> Result<()> {
     if name.is_empty() {
         return Err(Error::Config("kms name must not be empty".into()));
     }
@@ -323,6 +330,107 @@ pub fn create(name: &str, scope: KmsScope) -> Result<KmsRef> {
             "invalid kms name '{name}' — no path separators, '..', control chars, or leading '.'"
         )));
     }
+    Ok(())
+}
+
+/// Viewer "Create page": turn the first plain occurrence of `text` in
+/// `page`'s body into `[[slug|text]]`. Skips frontmatter, headings,
+/// fenced code, and anything already inside a wikilink / markdown link
+/// / inline code. Returns `false` (and leaves the page untouched) when
+/// the phrase is not found in plain prose — the rendered selection may
+/// have crossed a citation or a link.
+pub fn link_phrase(kref: &KmsRef, page: &str, text: &str, slug: &str) -> Result<bool> {
+    use regex::Regex;
+    let path = kref.page_path(page)?;
+    let original = std::fs::read_to_string(&path)
+        .map_err(|e| Error::Tool(format!("read {}: {e}", path.display())))?;
+    let (fm_block, body) = split_frontmatter_block(&original);
+    let protect_re = Regex::new(r"(?:\[\[[^\]\n]+\]\]|\[[^\]\n]+\]\([^)\n]+\)|`[^`\n]+`)")
+        .expect("static regex");
+    let restore_re = Regex::new(r"\u{0000}P(\d+)\u{0000}").expect("static regex");
+    let mut out = String::with_capacity(body.len() + 32);
+    let mut in_fence = false;
+    let mut done = false;
+    for line in body.split_inclusive('\n') {
+        let t = line.trim_start();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            in_fence = !in_fence;
+        }
+        if done || in_fence || t.starts_with('#') {
+            out.push_str(line);
+            continue;
+        }
+        let mut placeholders: Vec<String> = Vec::new();
+        let protected = protect_re.replace_all(line, |caps: &regex::Captures| {
+            let idx = placeholders.len();
+            placeholders.push(caps[0].to_string());
+            format!("\u{0000}P{idx}\u{0000}")
+        });
+        let mut working = protected.into_owned();
+        if let Some(pos) = working.find(text) {
+            working.replace_range(pos..pos + text.len(), &format!("[[{slug}|{text}]]"));
+            done = true;
+        }
+        let restored = restore_re.replace_all(&working, |caps: &regex::Captures| {
+            let n: usize = caps[1].parse().unwrap_or(usize::MAX);
+            placeholders
+                .get(n)
+                .cloned()
+                .unwrap_or_else(|| caps[0].to_string())
+        });
+        out.push_str(&restored);
+    }
+    if !done {
+        return Ok(false);
+    }
+    let mut full = String::with_capacity(fm_block.len() + out.len());
+    full.push_str(fm_block);
+    full.push_str(&out);
+    write_page(kref, page, &full)?;
+    Ok(true)
+}
+
+/// Rename a KMS directory in place (same scope). If the old name is
+/// attached in project settings the attachment follows the rename, so
+/// the next config reload resolves the new name instead of a dangling
+/// one. Pages keep their content; wikilinks are slugs, not KMS names,
+/// so nothing inside the KMS changes.
+pub fn rename(old: &str, new: &str) -> Result<KmsRef> {
+    validate_name(new)?;
+    let kref = resolve(old).ok_or_else(|| Error::Tool(format!("KMS '{old}' not found")))?;
+    if old == new {
+        return Ok(kref);
+    }
+    let parent = kref
+        .root
+        .parent()
+        .ok_or_else(|| Error::Tool(format!("KMS '{old}' has no parent directory")))?;
+    let new_root = parent.join(new);
+    if new_root.exists() {
+        return Err(Error::Tool(format!(
+            "a KMS named '{new}' already exists at {}",
+            new_root.display()
+        )));
+    }
+    std::fs::rename(&kref.root, &new_root).map_err(|e| {
+        Error::Tool(format!(
+            "rename {} → {}: {e}",
+            kref.root.display(),
+            new_root.display()
+        ))
+    })?;
+    let _ = crate::config::ProjectConfig::rename_attached_kms(old, new);
+    let new_ref = KmsRef {
+        name: new.to_string(),
+        scope: kref.scope,
+        root: new_root,
+    };
+    let _ = append_log_header(&new_ref, "rename", &format!("renamed from '{old}'"));
+    Ok(new_ref)
+}
+
+pub fn create(name: &str, scope: KmsScope) -> Result<KmsRef> {
+    validate_name(name)?;
     let root = scope_root(scope)
         .ok_or_else(|| Error::Config("cannot locate user home directory".into()))?
         .join(name);
@@ -396,6 +504,7 @@ pub fn create(name: &str, scope: KmsScope) -> Result<KmsRef> {
     let manifest = KmsManifest {
         schema_version: KMS_SCHEMA_VERSION.into(),
         frontmatter_required: std::collections::BTreeMap::new(),
+        entry: None,
     };
     std::fs::write(
         kref.manifest_path(),
@@ -2655,6 +2764,11 @@ fn ensure_writable(kref: &KmsRef) -> Result<()> {
 pub fn write_page(kref: &KmsRef, page_name: &str, content: &str) -> Result<PathBuf> {
     ensure_writable(kref)?;
     let path = writable_page_path(kref, page_name)?;
+    // Whatever a vault starts with is what it is about, so the first
+    // page created becomes its entry page. Recorded once: after this
+    // the manifest holds an answer and nothing overwrites it except
+    // `/kms entry`, a rename, or deleting that page.
+    let is_first_page = page_count(kref) == 0 && !path.exists();
     let stem = path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -2668,7 +2782,20 @@ pub fn write_page(kref: &KmsRef, page_name: &str, content: &str) -> Result<PathB
     let (mut fm, body) = parse_frontmatter(content);
     let today = crate::usage::today_str();
     fm.entry("updated".into()).or_insert_with(|| today.clone());
-    if !existed {
+    if existed {
+        // A rewrite carries no `created:` unless the caller re-supplied
+        // one, and the creation date is not the caller's to forget —
+        // `/research` rewrites a note on every run and used to reset it.
+        if !fm.contains_key("created") {
+            if let Some(prev) = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|raw| parse_frontmatter(&raw).0.remove("created"))
+                .filter(|c| !c.trim().is_empty())
+            {
+                fm.insert("created".into(), prev);
+            }
+        }
+    } else {
         fm.entry("created".into()).or_insert(today.clone());
     }
     // Canonical page header: `# {title}\nDescription: {topic}\n---\n\n`
@@ -2709,6 +2836,9 @@ pub fn write_page(kref: &KmsRef, page_name: &str, content: &str) -> Result<PathB
     update_index_for_write(kref, &stem, &summary, category.as_deref(), existed)?;
     append_log_header(kref, if existed { "edited" } else { "wrote" }, &stem)?;
     fire_index_upsert(kref, &stem);
+    if is_first_page && kref.read_manifest().and_then(|m| m.entry).is_none() {
+        let _ = set_entry_page(kref, Some(&stem));
+    }
     Ok(path)
 }
 
@@ -2846,6 +2976,11 @@ pub fn delete_page(kref: &KmsRef, page_name: &str) -> Result<PathBuf> {
     remove_index_bullet(kref, &stem)?;
     append_log_header(kref, "deleted", &stem)?;
     fire_index_delete(kref, &stem);
+    // Clear rather than guess a replacement: with nothing recorded,
+    // `entry_page` infers one from what is left.
+    if kref.read_manifest().and_then(|m| m.entry).as_deref() == Some(stem.as_str()) {
+        let _ = set_entry_page(kref, None);
+    }
     Ok(path)
 }
 
@@ -2860,6 +2995,7 @@ pub fn delete_page(kref: &KmsRef, page_name: &str) -> Result<PathBuf> {
 /// page. Returns the new path.
 pub fn rename_page(kref: &KmsRef, old_name: &str, new_name: &str) -> Result<PathBuf> {
     ensure_writable(kref)?;
+    let entry_before = kref.read_manifest().and_then(|m| m.entry);
     let old_path = writable_page_path(kref, old_name)?;
     if !old_path.exists() {
         return Err(Error::Tool(format!(
@@ -2936,6 +3072,10 @@ pub fn rename_page(kref: &KmsRef, old_name: &str, new_name: &str) -> Result<Path
     append_log_header(kref, "renamed", &format!("{old_stem} → {new_slug}"))?;
     fire_index_delete(kref, &old_stem);
     fire_index_upsert(kref, &new_slug);
+    // The entry page is named by slug, so a rename has to follow it.
+    if entry_before.as_deref() == Some(old_stem.as_str()) {
+        let _ = set_entry_page(kref, Some(&new_slug));
+    }
     Ok(new_path)
 }
 
@@ -2963,6 +3103,8 @@ pub struct BrowseListing {
     pub kms: String,
     pub pages: Vec<BrowseFile>,
     pub sources: Vec<BrowseFile>,
+    /// The page a reader should land on — see [`entry_page`].
+    pub entry: Option<String>,
 }
 
 /// List browseable files for a KMS by name. Returns `None` if the
@@ -2984,11 +3126,162 @@ pub fn browse(name: &str) -> Option<BrowseListing> {
             ext: s.ext,
         })
         .collect();
+    let entry = entry_page(&kref);
     Some(BrowseListing {
         kms: name.to_string(),
         pages,
         sources,
+        entry,
     })
+}
+
+/// Record `slug` as the KMS's entry page, or clear it with `None`.
+/// Rewrites `manifest.json` through a JSON value so a field this build
+/// does not know about survives.
+pub fn set_entry_page(kref: &KmsRef, slug: Option<&str>) -> Result<()> {
+    ensure_writable(kref)?;
+    let path = kref.manifest_path();
+    let mut doc = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .filter(|v| v.is_object())
+        .unwrap_or_else(|| serde_json::json!({"schema_version": KMS_SCHEMA_VERSION}));
+    let obj = doc.as_object_mut().expect("object");
+    match slug {
+        Some(s) => {
+            obj.insert("entry".into(), serde_json::json!(s));
+        }
+        None => {
+            obj.remove("entry");
+        }
+    }
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&doc).unwrap_or_default(),
+    )
+    .map_err(|e| Error::Tool(format!("write {}: {e}", path.display())))
+}
+
+/// `/kms entry` for both surfaces: show, set, or clear, and say what
+/// happened. Setting a page that does not exist is refused — a
+/// recorded entry that points nowhere is worse than none, because the
+/// reader is left on an empty pane instead of the inferred page.
+pub fn apply_entry(kms_name: &str, set: Option<&str>, clear: bool) -> Result<String> {
+    let kref =
+        resolve(kms_name).ok_or_else(|| Error::Tool(format!("no KMS named '{kms_name}'")))?;
+    if clear {
+        set_entry_page(&kref, None)?;
+        let inferred = entry_page(&kref);
+        return Ok(match inferred {
+            Some(s) => format!("KMS '{kms_name}': entry page cleared — now inferred as `{s}`."),
+            None => format!("KMS '{kms_name}': entry page cleared; the KMS has no pages."),
+        });
+    }
+    if let Some(slug) = set {
+        let slug = slug.trim().trim_end_matches(".md");
+        if !kref.pages_dir().join(format!("{slug}.md")).is_file() {
+            return Err(Error::Tool(format!("no page '{slug}' in KMS '{kms_name}'")));
+        }
+        set_entry_page(&kref, Some(slug))?;
+        return Ok(format!("KMS '{kms_name}': entry page → `{slug}`."));
+    }
+    let recorded = kref.read_manifest().and_then(|m| m.entry);
+    Ok(match (recorded, entry_page(&kref)) {
+        (Some(r), Some(effective)) if r == effective => {
+            format!("KMS '{kms_name}': entry page is `{r}` (recorded).")
+        }
+        (Some(r), Some(effective)) => format!(
+            "KMS '{kms_name}': recorded entry `{r}` no longer exists; using `{effective}` (inferred)."
+        ),
+        (_, Some(effective)) => {
+            format!("KMS '{kms_name}': entry page is `{effective}` (inferred — `/kms entry {kms_name} --set <slug>` to pin it).")
+        }
+        (_, None) => format!("KMS '{kms_name}': no pages yet."),
+    })
+}
+
+/// Number of pages currently on disk. Used to spot the first one.
+fn page_count(kref: &KmsRef) -> usize {
+    std::fs::read_dir(kref.pages_dir())
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| {
+                    e.path().extension().and_then(|x| x.to_str()) == Some("md")
+                        && !e.file_name().to_string_lossy().starts_with('.')
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// Where a reader should start.
+///
+/// The recorded `entry` in `manifest.json` wins — set when the KMS's
+/// first page was created, or by `/kms entry`. A recording that points
+/// at a page that no longer exists is ignored rather than obeyed.
+///
+/// With nothing recorded it is inferred, in order:
+///
+/// 1. A map of content (`kind: moc`) — `/research` writes exactly one
+///    per query, and it is the page that describes the whole topic.
+/// 2. Otherwise the most linked-to page: in a vault nobody planned,
+///    the hub is whatever everything else points at.
+/// 3. Otherwise the most recently updated page, then the first by name.
+///
+/// Ties inside each rule break the same way, so the answer is stable
+/// between calls on an unchanged KMS.
+pub fn entry_page(kref: &KmsRef) -> Option<String> {
+    if let Some(slug) = kref.read_manifest().and_then(|m| m.entry) {
+        let slug = slug.trim().trim_end_matches(".md").to_string();
+        if !slug.is_empty() && kref.pages_dir().join(format!("{slug}.md")).is_file() {
+            return Some(slug);
+        }
+    }
+    infer_entry_page(kref)
+}
+
+fn infer_entry_page(kref: &KmsRef) -> Option<String> {
+    let backlinks = backlink_map(kref);
+    let mut best: Option<(u8, usize, String, String)> = None; // (rank, backlinks, updated, slug)
+    let rd = std::fs::read_dir(kref.pages_dir()).ok()?;
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if stem.starts_with('.') || stem == "_summary" {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let (fm, _) = parse_frontmatter(&raw);
+        let rank = if fm.get("kind").map(|k| k.trim()) == Some("moc") {
+            1
+        } else {
+            0
+        };
+        let inbound = backlinks.get(stem).map(|v| v.len()).unwrap_or(0);
+        let updated = fm.get("updated").cloned().unwrap_or_default();
+        let cand = (rank, inbound, updated, stem.to_string());
+        // Higher rank, then more inbound links, then newer, then the
+        // earlier name — `Ord` on the tuple does the first three; the
+        // slug has to invert so "first by name" wins a full tie.
+        let better = match &best {
+            None => true,
+            Some(b) => {
+                (cand.0, cand.1, &cand.2) > (b.0, b.1, &b.2)
+                    || ((cand.0, cand.1, &cand.2) == (b.0, b.1, &b.2) && cand.3 < b.3)
+            }
+        };
+        if better {
+            best = Some(cand);
+        }
+    }
+    best.map(|(_, _, _, slug)| slug)
 }
 
 fn scan_dir_md(dir: &Path) -> Vec<BrowseFile> {
@@ -3171,29 +3464,42 @@ pub fn graph(kms_name: &str, include_sources: bool) -> Option<GraphData> {
     // Second pass: scan each body for `[[slug]]` wikilinks (page→page)
     // and `(../sources/<stem>.md)` markdown links (page→source) and
     // emit edges where the target exists in the node set.
+    // One edge per (page, target): a page cites the same source twenty
+    // times and links a note both inline and in its Map — drawing every
+    // repeat inflated a 50-page KMS to 2 000+ springs and stalled the
+    // force layout.
     let mut edges: Vec<GraphEdge> = Vec::new();
+    let mut seen_edges: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
     for (source, body) in &bodies {
-        for target in extract_wikilink_targets(body) {
+        // `related:` frontmatter counts as an edge too, so a note whose
+        // prose never spelled the link still connects.
+        for target in outbound_page_links(body) {
             if !nodes.contains_key(&target) {
                 continue;
             }
             if &target == source {
                 continue;
             }
-            edges.push(GraphEdge {
-                source: source.clone(),
-                target,
-            });
+            if seen_edges.insert((source.clone(), target.clone())) {
+                edges.push(GraphEdge {
+                    source: source.clone(),
+                    target,
+                });
+            }
         }
         if include_sources {
             for stem in extract_source_link_targets(body) {
                 if !source_stems.contains(&stem) {
                     continue;
                 }
-                edges.push(GraphEdge {
-                    source: source.clone(),
-                    target: format!("source:{stem}"),
-                });
+                let target = format!("source:{stem}");
+                if seen_edges.insert((source.clone(), target.clone())) {
+                    edges.push(GraphEdge {
+                        source: source.clone(),
+                        target,
+                    });
+                }
             }
         }
     }
@@ -3247,6 +3553,131 @@ fn extract_source_link_targets(body: &str) -> Vec<String> {
 /// target as a list. Slug is the part before `|`; display is dropped
 /// (we only need the link target). Multiline / oversized brackets
 /// skipped to avoid pathological inputs.
+/// Every page this body points at: `[[wikilinks]]` in the prose plus
+/// the `related:` frontmatter list. One definition so the graph view,
+/// `/kms lint` and [`backlinks`] agree on what an edge is — they used
+/// to disagree, and a note connected only through `related:` showed as
+/// an orphan in lint while the graph drew it linked.
+pub(crate) fn outbound_page_links(body: &str) -> Vec<String> {
+    let mut out = extract_wikilink_targets(body);
+    // `[text](pages/x.md)` is the other link form a KMS carries: it is
+    // what hand-written pages use and what an OKF bundle round-trips
+    // wikilinks into. The graph and backlinks used to miss it, so an
+    // imported vault drew as a field of unconnected dots.
+    for cap in markdown_page_link_re().captures_iter(body) {
+        let t = cap[1].to_string();
+        if !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    let (fm, _) = parse_frontmatter(body);
+    if let Some(rel) = fm.get("related") {
+        for t in rel
+            .trim()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .split(',')
+            .map(|s| s.trim().trim_matches('"').trim_matches('\''))
+            .filter(|s| !s.is_empty())
+        {
+            if !out.iter().any(|x| x == t) {
+                out.push(t.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Every page that links to each page, newest-updated first: the
+/// reverse of [`outbound_page_links`], built in one pass over `pages/`.
+///
+/// Derived data, never stored. A backlink is a property of the graph —
+/// the fact that A links to B lives in A's file — so writing it into B
+/// would duplicate it, and keeping the duplicate correct would mean
+/// rewriting every target of every edit. That would also bump each
+/// target's `updated:`, which is the signal `/research refresh
+/// --older-than` uses to decide what has gone stale.
+pub fn backlink_map(kref: &KmsRef) -> std::collections::BTreeMap<String, Vec<(String, String)>> {
+    let mut map: std::collections::BTreeMap<String, Vec<(String, String, String)>> =
+        std::collections::BTreeMap::new();
+    let Ok(rd) = std::fs::read_dir(kref.pages_dir()) else {
+        return std::collections::BTreeMap::new();
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if stem.starts_with('.') || stem == "_summary" {
+            continue;
+        }
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let (fm, _) = parse_frontmatter(&body);
+        let title = fm
+            .get("title")
+            .map(|t| t.trim().trim_matches('"').to_string())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| stem.to_string());
+        let updated = fm.get("updated").cloned().unwrap_or_default();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for target in outbound_page_links(&body) {
+            if target == stem || !seen.insert(target.clone()) {
+                continue;
+            }
+            map.entry(target)
+                .or_default()
+                .push((stem.to_string(), title.clone(), updated.clone()));
+        }
+    }
+    map.into_iter()
+        .map(|(k, mut v)| {
+            v.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
+            (k, v.into_iter().map(|(s, t, _)| (s, t)).collect())
+        })
+        .collect()
+}
+
+fn markdown_page_link_re() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"\((?:\./)?pages/([^)]+?)\.md\)").expect("static regex"))
+}
+
+/// Pages that link to `page`, newest-updated first.
+pub fn backlinks(kms_name: &str, page: &str) -> Vec<(String, String)> {
+    let Some(kref) = resolve(kms_name) else {
+        return Vec::new();
+    };
+    backlink_map(&kref).remove(page).unwrap_or_default()
+}
+
+/// Heading of the backlink block materialised into exported bundles.
+/// Inside a live KMS the block never exists — it is recomputed on read.
+pub const BACKLINK_HEADING: &str = "## Linked from";
+
+/// Remove every `## Linked from` block (through the next `## ` or the
+/// end). Keeps export idempotent and keeps an imported bundle's pages
+/// free of derived data the importing KMS recomputes anyway.
+pub fn strip_backlink_section(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(at) = rest.find(BACKLINK_HEADING) {
+        let line_start = rest[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        out.push_str(&rest[..line_start]);
+        let after = &rest[at + BACKLINK_HEADING.len()..];
+        rest = match after.find("\n## ") {
+            Some(next) => &after[next + 1..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out.trim_end().to_string()
+}
+
 fn extract_wikilink_targets(body: &str) -> Vec<String> {
     let bytes = body.as_bytes();
     let mut out = Vec::new();
@@ -3893,6 +4324,8 @@ fn wikilinks_to_okf(body: &str) -> String {
 /// `/sources/…`, `/references/…`) into KMS-relative form so `lint` /
 /// `auto_link` / the search index recognise them.
 fn okf_links_to_kms(body: &str) -> String {
+    let body = strip_backlink_section(body);
+    let body = body.as_str();
     body.replace("](/pages/", "](pages/")
         .replace("](/sources/", "](sources/")
         .replace("](/references/", "](sources/")
@@ -4126,6 +4559,7 @@ pub fn export_okf(name: &str, out_dir: &Path) -> Result<OkfExportReport> {
     };
 
     // ── pages → pages/ ────────────────────────────────────────────
+    let backlinks = backlink_map(&kref);
     let okf_pages = out_dir.join("pages");
     std::fs::create_dir_all(&okf_pages)
         .map_err(|e| Error::Tool(format!("mkdir {}: {e}", okf_pages.display())))?;
@@ -4142,6 +4576,17 @@ pub fn export_okf(name: &str, out_dir: &Path) -> Result<OkfExportReport> {
             };
             let raw = std::fs::read_to_string(&path).unwrap_or_default();
             let (fm, body) = parse_frontmatter(&raw);
+            // A bundle leaves the KMS behind, so the reverse edges have
+            // to travel with it: nothing outside recomputes them, and a
+            // snapshot cannot go stale.
+            let stem = fname.trim_end_matches(".md");
+            let mut body = strip_backlink_section(&body);
+            if let Some(links) = backlinks.get(stem).filter(|l| !l.is_empty()) {
+                body.push_str(&format!("\n\n{BACKLINK_HEADING}\n\n"));
+                for (slug, title) in links {
+                    body.push_str(&format!("- [{title}](/pages/{slug}.md)\n"));
+                }
+            }
             let okf = write_frontmatter(&kms_fm_to_okf(&fm), &wikilinks_to_okf(&body));
             std::fs::write(okf_pages.join(&fname), okf.as_bytes())
                 .map_err(|e| Error::Tool(format!("write page {fname}: {e}")))?;
@@ -4591,7 +5036,20 @@ pub fn auto_link(kref: &KmsRef, opts: AutoLinkOptions) -> Result<AutoLinkReport>
     let mut compiled: Vec<(Regex, String, String)> = Vec::new();
     for (key, slug) in &candidates {
         let escaped = regex::escape(key);
-        let re = match Regex::new(&format!(r"(?i)\b{escaped}\b")) {
+        // `\b` only makes sense next to a word character; a key such as
+        // "Alibaba (Qwen)" ends in `)` and would never match with it.
+        let is_word = |c: Option<char>| c.map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false);
+        let lead = if is_word(key.chars().next()) {
+            r"\b"
+        } else {
+            ""
+        };
+        let tail = if is_word(key.chars().next_back()) {
+            r"\b"
+        } else {
+            ""
+        };
+        let re = match Regex::new(&format!(r"(?i){lead}{escaped}{tail}")) {
             Ok(r) => r,
             Err(_) => continue, // pathological key; skip rather than abort
         };
@@ -4599,9 +5057,16 @@ pub fn auto_link(kref: &KmsRef, opts: AutoLinkOptions) -> Result<AutoLinkReport>
     }
 
     // Pattern for "protected" inline regions we must not match inside:
-    // existing wikilinks, markdown links, and inline code spans.
-    let protect_re = Regex::new(r"(?:\[\[[^\]\n]+\]\]|\[[^\]\n]+\]\([^)\n]+\)|`[^`\n]+`)")
-        .expect("static regex");
+    // existing wikilinks, markdown links, inline code spans — and bare
+    // URLs. A bare URL is none of the first three, so a vault-wide
+    // `/kms link --apply` used to rewrite a word inside the address
+    // itself: research pages ended up citing
+    // `https://…deepseek-v4-adapted-[[huawei]]-chips…`, which resolves
+    // nowhere. Found by `/kms verify` on an 18-page vault.
+    let protect_re = Regex::new(
+        r"(?:\[\[[^\]\n]+\]\]|\[[^\]\n]+\]\([^)\n]+\)|`[^`\n]+`|<?https?://[^\s)>\]]+>?)",
+    )
+    .expect("static regex");
 
     let mut report = AutoLinkReport::default();
 
@@ -4621,6 +5086,14 @@ pub fn auto_link(kref: &KmsRef, opts: AutoLinkOptions) -> Result<AutoLinkReport>
             std::collections::HashSet::new();
         // Also seed with self so a page never links to itself.
         linked_in_page.insert(stem.clone());
+        // Bold mentions anywhere in the page win over an earlier plain
+        // mention: reserve their slugs now so the first-occurrence
+        // pass below leaves the plain text alone.
+        for (_re, key, slug) in &compiled {
+            if slug != stem && body.contains(&format!("**{key}**")) {
+                linked_in_page.insert(slug.clone());
+            }
+        }
 
         for line in body.split_inclusive('\n') {
             let trimmed_start = line.trim_start();
@@ -4645,6 +5118,26 @@ pub fn auto_link(kref: &KmsRef, opts: AutoLinkOptions) -> Result<AutoLinkReport>
             });
             let mut working = protected.into_owned();
 
+            // A bold mention (`**Alibaba (Qwen)**`) is the author marking
+            // a key entry: link every one of them, not just the first
+            // plain occurrence, and drop the bold so the link is bare.
+            for (_re, key, slug) in &compiled {
+                if slug == stem {
+                    continue;
+                }
+                let bold = format!("**{key}**");
+                if working.contains(&bold) {
+                    working = working.replace(&bold, &format!("[[{slug}|{key}]]"));
+                    linked_in_page.insert(slug.clone());
+                    report.links_added += 1;
+                    report.hits.push(LinkHit {
+                        page_stem: stem.clone(),
+                        target_slug: slug.clone(),
+                        matched: bold,
+                    });
+                }
+            }
+
             for (re, _key, slug) in &compiled {
                 if linked_in_page.contains(slug) {
                     continue;
@@ -4652,7 +5145,13 @@ pub fn auto_link(kref: &KmsRef, opts: AutoLinkOptions) -> Result<AutoLinkReport>
                 if let Some(m) = re.find(&working) {
                     let matched_text = m.as_str().to_string();
                     let (start, end) = (m.start(), m.end());
-                    let replacement = format!("[[{slug}]]");
+                    // Keep what the author wrote as the display text —
+                    // `[[alibaba]]` would render as "alibaba".
+                    let replacement = if matched_text == *slug {
+                        format!("[[{slug}]]")
+                    } else {
+                        format!("[[{slug}|{matched_text}]]")
+                    };
                     working.replace_range(start..end, &replacement);
                     linked_in_page.insert(slug.clone());
                     report.links_added += 1;
@@ -5249,7 +5748,6 @@ pub fn lint(kref: &KmsRef) -> Result<LintReport> {
         .read_manifest()
         .map(|m| m.frontmatter_required)
         .unwrap_or_default();
-    let link_re = regex::Regex::new(r"\(pages/([^)]+?)\.md\)").unwrap();
     let mut inbound_targets: HashSet<String> = HashSet::new();
     let source_stems: HashSet<String> = list_sources(kref)
         .iter()
@@ -5325,19 +5823,12 @@ pub fn lint(kref: &KmsRef) -> Result<LintReport> {
                 }
             }
         }
-        for cap in link_re.captures_iter(body) {
-            let target = cap[1].to_string();
-            inbound_targets.insert(target.clone());
-            if !all_stems.contains(&target) {
-                report.broken_links.push((stem.clone(), target));
-            }
-        }
-        // `[[wikilink]]` counts as an inbound link. It did not before —
-        // and `auto_link`, the KMS's own linker, writes exactly this
-        // form, so running `/kms link --apply` linked the whole vault
-        // and lint still reported every page as an orphan. The graph
-        // view already read wikilinks; lint was the odd one out.
-        for target in extract_wikilink_targets(body) {
+        // Markdown links, `[[wikilinks]]` and `related:` all count as
+        // inbound links. Only the first did before — and `auto_link`,
+        // the KMS's own linker, writes wikilinks, so running
+        // `/kms link --apply` linked the whole vault and lint still
+        // reported every page as an orphan.
+        for target in outbound_page_links(body) {
             inbound_targets.insert(target.clone());
             if !all_stems.contains(&target) {
                 report.broken_links.push((stem.clone(), target));
@@ -5434,6 +5925,7 @@ fn migrate_0_to_1(kref: &KmsRef, dry_run: bool) -> Result<Vec<String>> {
         let manifest = KmsManifest {
             schema_version: "1.0".into(),
             frontmatter_required: std::collections::BTreeMap::new(),
+            entry: entry_page(kref),
         };
         std::fs::write(
             &manifest_path,
@@ -6736,13 +7228,230 @@ mod tests {
     }
 
     #[test]
+    fn link_phrase_links_first_plain_mention_only() {
+        let _home = scoped_home();
+        let k = create("lp", KmsScope::User).unwrap();
+        write_page(
+            &k,
+            "topic",
+            "---\ntitle: \"Topic\"\n---\n\n# Hunyuan Hy4 heading\n\nSee [[x|Hunyuan Hy4]] and `Hunyuan Hy4` first; then Hunyuan Hy4 in prose. Hunyuan Hy4 again.\n",
+        )
+        .unwrap();
+        assert!(link_phrase(&k, "topic", "Hunyuan Hy4", "hunyuan-hy4").unwrap());
+        let on_disk = std::fs::read_to_string(k.pages_dir().join("topic.md")).unwrap();
+        assert!(on_disk.contains("# Hunyuan Hy4 heading"), "{on_disk}");
+        assert!(on_disk.contains("[[x|Hunyuan Hy4]] and `Hunyuan Hy4` first; then [[hunyuan-hy4|Hunyuan Hy4]] in prose. Hunyuan Hy4 again."), "{on_disk}");
+        assert!(on_disk.starts_with("---\n"), "frontmatter kept: {on_disk}");
+        assert!(!link_phrase(&k, "topic", "not in the page", "nope").unwrap());
+    }
+
+    #[test]
+    fn rename_moves_the_directory_and_refuses_collisions() {
+        let _home = scoped_home();
+        let k = create("old-name", KmsScope::User).unwrap();
+        write_page(&k, "alpha", "---\ntitle: \"Alpha\"\n---\n\nbody\n").unwrap();
+        let _other = create("taken", KmsScope::User).unwrap();
+        assert!(rename("old-name", "taken").is_err(), "collision refused");
+        assert!(rename("old-name", "../evil").is_err(), "bad name refused");
+        let r = rename("old-name", "new-name").unwrap();
+        assert_eq!(r.name, "new-name");
+        assert!(r.pages_dir().join("alpha.md").is_file());
+        assert!(resolve("old-name").is_none());
+        assert!(resolve("new-name").is_some());
+    }
+
+    #[test]
+    fn write_page_keeps_the_creation_date_across_a_rewrite() {
+        let _home = scoped_home();
+        let k = create("created-rt", KmsScope::User).unwrap();
+        write_page(&k, "p", "---\ntitle: \"P\"\n---\n\nfirst\n").unwrap();
+        let first = std::fs::read_to_string(k.pages_dir().join("p.md")).unwrap();
+        let created = parse_frontmatter(&first).0.remove("created").unwrap();
+        // A rewrite that supplies no `created:` — what /research does on
+        // every run over a note it already wrote.
+        write_page(&k, "p", "---\ntitle: \"P\"\nkind: concept\n---\n\nsecond\n").unwrap();
+        let again = std::fs::read_to_string(k.pages_dir().join("p.md")).unwrap();
+        assert_eq!(
+            parse_frontmatter(&again).0.remove("created").as_deref(),
+            Some(created.as_str()),
+            "{again}"
+        );
+        assert!(again.contains("second"));
+    }
+
+    #[test]
+    fn the_first_page_created_becomes_the_recorded_entry() {
+        let _home = scoped_home();
+        let k = create("first-rt", KmsScope::User).unwrap();
+        assert_eq!(k.read_manifest().and_then(|m| m.entry), None);
+
+        write_page(&k, "opening", "---\ntitle: O\n---\n\nfirst thing here\n").unwrap();
+        assert_eq!(
+            k.read_manifest().and_then(|m| m.entry).as_deref(),
+            Some("opening")
+        );
+        // A later page does not steal it, and neither does rewriting
+        // the first one.
+        write_page(&k, "second", "---\ntitle: S\nkind: moc\n---\n\nx\n").unwrap();
+        write_page(&k, "opening", "---\ntitle: O\n---\n\nedited\n").unwrap();
+        assert_eq!(entry_page(&k).as_deref(), Some("opening"));
+
+        // A rename carries it; the inference would have said `second`
+        // (it is the only moc), so this proves the record wins.
+        rename_page(&k, "opening", "the-opening").unwrap();
+        assert_eq!(entry_page(&k).as_deref(), Some("the-opening"));
+
+        // Deleting it falls back to inference.
+        delete_page(&k, "the-opening").unwrap();
+        assert_eq!(k.read_manifest().and_then(|m| m.entry), None);
+        assert_eq!(entry_page(&k).as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn apply_entry_shows_sets_clears_and_refuses_a_missing_page() {
+        let _home = scoped_home();
+        let k = create("apply-rt", KmsScope::User).unwrap();
+        write_page(&k, "a", "---\ntitle: A\n---\n\nx\n").unwrap();
+        write_page(&k, "b", "---\ntitle: B\n---\n\nx\n").unwrap();
+        assert!(apply_entry("apply-rt", None, false)
+            .unwrap()
+            .contains("`a`"));
+        assert!(apply_entry("apply-rt", Some("nope"), false).is_err());
+        assert!(apply_entry("apply-rt", Some("b.md"), false)
+            .unwrap()
+            .contains("`b`"));
+        assert_eq!(entry_page(&k).as_deref(), Some("b"));
+        let cleared = apply_entry("apply-rt", None, true).unwrap();
+        assert!(cleared.contains("cleared"), "{cleared}");
+        assert_eq!(k.read_manifest().and_then(|m| m.entry), None);
+        assert!(apply_entry("nosuch", None, false).is_err());
+    }
+
+    #[test]
+    fn entry_page_prefers_the_map_of_content_then_the_hub() {
+        let _home = scoped_home();
+        let k = create("entry-rt", KmsScope::User).unwrap();
+        // The inference chain, tested directly: `entry_page` would
+        // short-circuit on the record the first write leaves behind.
+        assert_eq!(infer_entry_page(&k), None);
+
+        // Nothing linked: the most recently updated wins.
+        write_page(&k, "old", "---\ntitle: O\nupdated: 2026-01-01\n---\n\nx\n").unwrap();
+        write_page(&k, "new", "---\ntitle: N\nupdated: 2026-09-01\n---\n\nx\n").unwrap();
+        assert_eq!(infer_entry_page(&k).as_deref(), Some("new"));
+
+        // A hub outranks a merely-recent page.
+        write_page(&k, "hub", "---\ntitle: H\nupdated: 2026-02-01\n---\n\nx\n").unwrap();
+        write_page(&k, "a", "---\ntitle: A\n---\n\n[[hub]]\n").unwrap();
+        write_page(&k, "b", "---\ntitle: B\n---\n\n[[hub]]\n").unwrap();
+        assert_eq!(infer_entry_page(&k).as_deref(), Some("hub"));
+
+        // A map of content outranks the hub even with fewer backlinks.
+        write_page(
+            &k,
+            "topic",
+            "---\ntitle: T\nkind: moc\nupdated: 2026-03-01\n---\n\n[[hub]]\n",
+        )
+        .unwrap();
+        assert_eq!(infer_entry_page(&k).as_deref(), Some("topic"));
+
+        // The record the first write left behind still wins overall.
+        assert_eq!(entry_page(&k).as_deref(), Some("old"));
+    }
+
+    #[test]
+    fn backlink_map_builds_the_whole_reverse_index_in_one_pass() {
+        let _home = scoped_home();
+        let k = create("bmap-rt", KmsScope::User).unwrap();
+        write_page(&k, "hub", "---\ntitle: \"Hub\"\n---\n\nnothing\n").unwrap();
+        write_page(
+            &k,
+            "a",
+            "---\ntitle: \"A\"\nrelated: [\"hub\"]\n---\n\n[[hub]] twice: [[hub|Hub]]\n",
+        )
+        .unwrap();
+        write_page(&k, "b", "---\ntitle: \"B\"\n---\n\nsee [[a]] and [[hub]]\n").unwrap();
+        write_page(&k, "self", "---\ntitle: \"S\"\n---\n\n[[self]]\n").unwrap();
+        let map = backlink_map(&k);
+        assert_eq!(
+            map.get("hub").map(|v| v.len()),
+            Some(2),
+            "one edge per linking page, not per mention: {map:?}"
+        );
+        assert_eq!(
+            map.get("a")
+                .map(|v| v.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>()),
+            Some(vec!["b"])
+        );
+        assert!(!map.contains_key("self"), "a page is not its own backlink");
+        // The markdown link form counts too — it is what a hand-written
+        // page uses and what an OKF round trip leaves behind.
+        write_page(&k, "md", "---\ntitle: \"MD\"\n---\n\n[Hub](pages/hub.md)\n").unwrap();
+        assert!(
+            backlink_map(&k)["hub"].iter().any(|(s, _)| s == "md"),
+            "markdown page links are edges"
+        );
+    }
+
+    #[test]
+    fn strip_backlink_section_removes_the_block_and_nothing_else() {
+        let body = "intro\n\n## Linked from\n\n- [A](/pages/a.md)\n\n## Sources\n\n1. x\n";
+        let out = strip_backlink_section(body);
+        assert!(out.starts_with("intro"), "{out}");
+        assert!(out.contains("## Sources"), "{out}");
+        assert!(!out.contains("Linked from"), "{out}");
+        // Trailing block, and a body with no block at all.
+        assert_eq!(
+            strip_backlink_section("body\n\n## Linked from\n\n- [A](/pages/a.md)\n"),
+            "body"
+        );
+        assert_eq!(strip_backlink_section("plain body\n"), "plain body");
+    }
+
+    #[test]
+    fn backlinks_read_wikilinks_and_related_frontmatter() {
+        let _home = scoped_home();
+        let k = create("backlink-rt", KmsScope::User).unwrap();
+        write_page(&k, "target", "---\ntitle: \"Target\"\n---\n\nthe note\n").unwrap();
+        write_page(
+            &k,
+            "prose",
+            "---\ntitle: \"Prose\"\nupdated: 2026-09-02\n---\n\nsee [[target|Target]]\n",
+        )
+        .unwrap();
+        write_page(
+            &k,
+            "frontmatter-only",
+            "---\ntitle: \"FM only\"\nrelated: [\"target\"]\nupdated: 2026-09-05\n---\n\nno inline link\n",
+        )
+        .unwrap();
+        write_page(&k, "unrelated", "---\ntitle: \"Other\"\n---\n\nnothing\n").unwrap();
+        let b = backlinks("backlink-rt", "target");
+        let slugs: Vec<&str> = b.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(
+            slugs,
+            vec!["frontmatter-only", "prose"],
+            "newest first: {b:?}"
+        );
+        assert_eq!(b[0].1, "FM only");
+        assert!(backlinks("backlink-rt", "unrelated").is_empty());
+        // A page linked only through `related:` is not an orphan.
+        let report = lint(&k).unwrap();
+        assert!(
+            !report.orphan_pages.contains(&"target".to_string()),
+            "{:?}",
+            report.orphan_pages
+        );
+    }
+
+    #[test]
     fn graph_skips_dangling_and_self_links() {
         let _home = scoped_home();
         let k = create("nb", KmsScope::User).unwrap();
         write_page(
             &k,
             "alpha",
-            "---\ntitle: \"Alpha\"\n---\n\nlinks to [[beta]] and [[ghost]] and self [[alpha]]\n",
+            "---\ntitle: \"Alpha\"\nrelated: [\"beta\"]\n---\n\nlinks to [[beta]] and [[ghost]] and self [[alpha]], and [[beta|Beta]] again\n",
         )
         .unwrap();
         write_page(
@@ -6757,8 +7466,9 @@ mod tests {
         assert!(ids.contains(&"beta".to_string()));
         assert!(!ids.contains(&"ghost".to_string()));
         // alpha → beta + beta → alpha; alpha → ghost dropped (dangling);
-        // alpha → alpha dropped (self-link).
-        assert_eq!(g.edges.len(), 2);
+        // alpha → alpha dropped (self-link); alpha → beta counted ONCE
+        // although it appears inline twice and in `related:`.
+        assert_eq!(g.edges.len(), 2, "{:?}", g.edges);
         let alpha = g.nodes.iter().find(|n| n.id == "alpha").unwrap();
         assert_eq!(alpha.label, "Alpha");
         assert_eq!(alpha.kind, GraphNodeKind::Page);
@@ -7297,6 +8007,7 @@ mod tests {
         let m = KmsManifest {
             schema_version: "1.0".into(),
             frontmatter_required: required,
+            entry: None,
         };
         std::fs::write(k.manifest_path(), serde_json::to_string_pretty(&m).unwrap()).unwrap();
         let read = k.read_manifest().unwrap();
@@ -7341,6 +8052,7 @@ mod tests {
         let m = KmsManifest {
             schema_version: "1.0".into(),
             frontmatter_required: required,
+            entry: None,
         };
         std::fs::write(k.manifest_path(), serde_json::to_string_pretty(&m).unwrap()).unwrap();
         std::fs::write(k.pages_dir().join("a.md"), "---\ncategory: x\n---\nbody\n").unwrap();
@@ -7369,6 +8081,7 @@ mod tests {
         let m = KmsManifest {
             schema_version: "1.0".into(),
             frontmatter_required: required,
+            entry: None,
         };
         std::fs::write(k.manifest_path(), serde_json::to_string_pretty(&m).unwrap()).unwrap();
         // Research page without `sources:` → flagged.
@@ -7412,6 +8125,7 @@ mod tests {
         let m = KmsManifest {
             schema_version: "1.0".into(),
             frontmatter_required: required,
+            entry: None,
         };
         std::fs::write(k.manifest_path(), serde_json::to_string_pretty(&m).unwrap()).unwrap();
         std::fs::write(k.pages_dir().join("bare.md"), "no frontmatter\n").unwrap();
@@ -7616,6 +8330,7 @@ mod tests {
         let m = KmsManifest {
             schema_version: "1.0".into(),
             frontmatter_required: required,
+            entry: None,
         };
         std::fs::write(k.manifest_path(), serde_json::to_string_pretty(&m).unwrap()).unwrap();
         // Self-linked pages so we don't trip orphan/broken-link checks.
@@ -7851,7 +8566,10 @@ mod tests {
         assert_eq!(report.links_added, 1);
         let on_disk = std::fs::read_to_string(k.pages_dir().join("indexing.md")).unwrap();
         assert!(on_disk.starts_with("---\ncategory: db\n---\n"));
-        assert!(on_disk.contains("[[postgresql]]"));
+        assert!(
+            on_disk.contains("[[postgresql|PostgreSQL]]"),
+            "display text preserved: {on_disk}"
+        );
     }
 
     #[test]
@@ -7885,9 +8603,9 @@ Inline `PostgreSQL` in code span.\n\
         // Inline code intact.
         assert!(on_disk.contains("Inline `PostgreSQL` in code span."));
         // First prose mention got linked.
-        let linked_count = on_disk.matches("[[postgresql]]").count();
+        let linked_count = on_disk.matches("[[postgresql").count();
         // Original body already had ONE [[postgresql]], plus the one we add.
-        assert_eq!(linked_count, 2);
+        assert_eq!(linked_count, 2, "{on_disk}");
     }
 
     #[test]
@@ -7930,7 +8648,39 @@ Inline `PostgreSQL` in code span.\n\
         let report = auto_link(&k, opts).unwrap();
         assert_eq!(report.links_added, 1);
         let on_disk = std::fs::read_to_string(k.pages_dir().join("note.md")).unwrap();
-        assert!(on_disk.contains("[[pg]]"));
+        assert!(on_disk.contains("[[pg|postgres]]"), "{on_disk}");
+    }
+
+    #[test]
+    fn auto_link_links_every_bold_mention_and_keys_ending_in_punctuation() {
+        let _home = scoped_home();
+        let k = create("bold-kms", KmsScope::Project).unwrap();
+        std::fs::write(
+            k.pages_dir().join("alibaba.md"),
+            "---\ntitle: Alibaba (Qwen)\n---\nstub\n",
+        )
+        .unwrap();
+        std::fs::write(
+            k.pages_dir().join("topic.md"),
+            "Big tech like Alibaba lead.\n\n- **Alibaba (Qwen)** publishes the most.\n- **Alibaba (Qwen)** again.\n",
+        )
+        .unwrap();
+        let opts = AutoLinkOptions {
+            apply: true,
+            ..AutoLinkOptions::default()
+        };
+        let report = auto_link(&k, opts).unwrap();
+        let on_disk = std::fs::read_to_string(k.pages_dir().join("topic.md")).unwrap();
+        assert_eq!(
+            on_disk.matches("[[alibaba|Alibaba (Qwen)]]").count(),
+            2,
+            "both bold mentions, bold dropped: {on_disk}"
+        );
+        assert!(
+            on_disk.contains("like Alibaba lead"),
+            "plain mention untouched once a bold one is linked: {on_disk}"
+        );
+        assert!(report.links_added >= 2);
     }
 
     #[test]
@@ -8185,6 +8935,8 @@ Inline `PostgreSQL` in code span.\n\
         assert!(page.contains("[orders](/pages/orders.md)"));
         // KMS-only key rides along.
         assert!(page.contains("sources: session-1"));
+        // Nothing links to auth, so it carries no backlink block.
+        assert!(!page.contains("Linked from"), "got: {page}");
 
         // Root index declares the OKF version.
         let idx = std::fs::read_to_string(out.join("index.md")).unwrap();
@@ -8198,6 +8950,45 @@ Inline `PostgreSQL` in code span.\n\
         // Every emitted concept .md carries a `type` (conformance §9).
         let (page_fm, _) = parse_frontmatter(&page);
         assert!(page_fm.get("type").map(|t| !t.is_empty()).unwrap_or(false));
+    }
+
+    #[test]
+    fn okf_export_carries_backlinks_and_import_drops_them_again() {
+        let _home = scoped_home();
+        let k = create("bl-src", KmsScope::Project).unwrap();
+        write_page(&k, "target", "---\ntitle: \"Target\"\n---\n\nthe note\n").unwrap();
+        write_page(
+            &k,
+            "linker",
+            "---\ntitle: \"Linker\"\n---\n\npoints at [[target|Target]]\n",
+        )
+        .unwrap();
+
+        let bundle = k.root.parent().unwrap().join("bl-okf");
+        export_okf("bl-src", &bundle).unwrap();
+        let exported = std::fs::read_to_string(bundle.join("pages/target.md")).unwrap();
+        assert!(
+            exported.contains("## Linked from") && exported.contains("[Linker](/pages/linker.md)"),
+            "a bundle leaves the KMS behind, so the reverse edges travel with it: {exported}"
+        );
+        // Re-exporting must not stack a second block.
+        export_okf("bl-src", &bundle).unwrap();
+        let again = std::fs::read_to_string(bundle.join("pages/target.md")).unwrap();
+        assert_eq!(again.matches("## Linked from").count(), 1, "{again}");
+
+        // Importing recomputes them, so the file must come back clean.
+        import_okf(&bundle, "bl-dst", KmsScope::Project).unwrap();
+        let dst = resolve("bl-dst").unwrap();
+        let imported = std::fs::read_to_string(dst.pages_dir().join("target.md")).unwrap();
+        assert!(!imported.contains("Linked from"), "{imported}");
+        assert_eq!(
+            backlinks("bl-dst", "target")
+                .into_iter()
+                .map(|(s, _)| s)
+                .collect::<Vec<_>>(),
+            vec!["linker"],
+            "the graph survives the round trip through the links themselves"
+        );
     }
 
     #[test]

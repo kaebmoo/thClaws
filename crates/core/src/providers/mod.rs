@@ -1151,6 +1151,106 @@ impl Drop for RawDump {
     }
 }
 
+/// One knob for reasoning depth across every provider. thClaws stores
+/// and transports it as a token budget (`StreamRequest::thinking_budget`)
+/// so old settings files (`thinkingBudget: 10000`) keep working; each
+/// provider maps the level onto whatever it exposes:
+///
+/// | level | Anthropic budget | OpenAI o*/gpt-5 effort | DeepSeek/GLM | Qwen | Gemini 2.5 budget (flash/pro) | Gemini 3 level | Ollama |
+/// |---|---|---|---|---|---|---|---|
+/// | 0 off    | none   | minimal/low | disabled | off           | 0 / 128    | low  | think:false |
+/// | 1 low    | 2 048  | low         | enabled  | on, 2 048     | 2 048      | low  | think:true  |
+/// | 2 medium | 10 000 | medium      | enabled  | on, 10 000    | 10 000     | high | think:true  |
+/// | 3 high   | 32 000 | high        | enabled  | on, 32 000    | 24 576/32 000 | high | think:true |
+/// | auto     | provider default (no field sent) |||||||
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingLevel {
+    Off,
+    Low,
+    Medium,
+    High,
+}
+
+impl ThinkingLevel {
+    pub const LOW_BUDGET: u32 = 2_048;
+    pub const MEDIUM_BUDGET: u32 = 10_000;
+    pub const HIGH_BUDGET: u32 = 32_000;
+
+    /// `0`–`3`, `off|low|medium|high`, or `auto` (→ `None`). A bare
+    /// number ≥ 100 is taken as a raw token budget (legacy `/thinking N`).
+    pub fn parse(s: &str) -> Option<Option<u32>> {
+        let t = s.trim().to_ascii_lowercase();
+        match t.as_str() {
+            "auto" | "default" => Some(None),
+            "0" | "off" | "none" => Some(Some(0)),
+            "1" | "low" | "min" | "minimal" => Some(Some(Self::LOW_BUDGET)),
+            "2" | "medium" | "med" | "mid" => Some(Some(Self::MEDIUM_BUDGET)),
+            "3" | "high" | "max" => Some(Some(Self::HIGH_BUDGET)),
+            _ => t.parse::<u32>().ok().filter(|n| *n >= 100).map(|n| Some(n)),
+        }
+    }
+
+    pub fn to_budget(self) -> u32 {
+        match self {
+            Self::Off => 0,
+            Self::Low => Self::LOW_BUDGET,
+            Self::Medium => Self::MEDIUM_BUDGET,
+            Self::High => Self::HIGH_BUDGET,
+        }
+    }
+
+    /// Bucket any budget back into a level; `None` = auto.
+    pub fn from_budget(b: Option<u32>) -> Option<Self> {
+        match b {
+            None => None,
+            Some(0) => Some(Self::Off),
+            Some(n) if n <= 4_096 => Some(Self::Low),
+            Some(n) if n <= 16_000 => Some(Self::Medium),
+            Some(_) => Some(Self::High),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    pub fn number(self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::Low => 1,
+            Self::Medium => 2,
+            Self::High => 3,
+        }
+    }
+
+    /// `{level, name, budget}` for the sidebar selector; `level: null` = auto.
+    pub fn json(b: Option<u32>) -> serde_json::Value {
+        match Self::from_budget(b) {
+            None => serde_json::json!({"level": null, "name": "auto", "budget": null}),
+            Some(l) => serde_json::json!({"level": l.number(), "name": l.name(), "budget": b}),
+        }
+    }
+
+    /// `thinking_update` envelope broadcast after any change.
+    pub fn update_payload(b: Option<u32>) -> serde_json::Value {
+        serde_json::json!({"type": "thinking_update", "thinking": Self::json(b)})
+    }
+
+    /// Human label for status lines: `2 medium (10000 tokens)` / `auto`.
+    pub fn describe(b: Option<u32>) -> String {
+        match (Self::from_budget(b), b) {
+            (None, _) => "auto (provider default)".to_string(),
+            (Some(l), Some(n)) => format!("{} {} ({n} tokens)", l.number(), l.name()),
+            (Some(l), None) => format!("{} {}", l.number(), l.name()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StreamRequest {
     pub model: String,
@@ -1158,7 +1258,14 @@ pub struct StreamRequest {
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDef>,
     pub max_tokens: u32,
-    /// Anthropic extended-thinking budget. `None` disables thinking.
+    /// Extended-thinking budget — the wire form of [`ThinkingLevel`]
+    /// (`ThinkingLevel::to_budget` / `from_budget`). `None` = provider default; `Some(0)` =
+    /// explicitly OFF on providers that expose a switch (DeepSeek/GLM
+    /// `thinking.type=disabled`, Qwen `enable_thinking=false`, OpenAI
+    /// o-series/gpt-5 `reasoning_effort=low`, Gemini flash
+    /// `thinkingBudget=0`); Anthropic sends no thinking block either way.
+    /// Research uses `Some(0)`: a 10k-char digest on deepseek-v4 spent
+    /// 5–13k reasoning tokens (77–89 s) versus 4–7 s with thinking off.
     pub thinking_budget: Option<u32>,
     /// Per-call override for the per-chunk idle timeout. `None` falls
     /// back to the global `stream_chunk_timeout()` (driven by the user
@@ -2824,5 +2931,35 @@ mod tests {
             ProviderKind::detect("gemma-4-26b-a4b-it"),
             Some(ProviderKind::Gemini)
         );
+    }
+}
+
+#[cfg(test)]
+mod thinking_level_tests {
+    use super::ThinkingLevel as L;
+
+    #[test]
+    fn parse_levels_names_and_raw() {
+        assert_eq!(L::parse("0"), Some(Some(0)));
+        assert_eq!(L::parse("off"), Some(Some(0)));
+        assert_eq!(L::parse("1"), Some(Some(L::LOW_BUDGET)));
+        assert_eq!(L::parse("medium"), Some(Some(L::MEDIUM_BUDGET)));
+        assert_eq!(L::parse("3"), Some(Some(L::HIGH_BUDGET)));
+        assert_eq!(L::parse("auto"), Some(None));
+        assert_eq!(L::parse("12000"), Some(Some(12000)));
+        assert_eq!(L::parse("7"), None, "small bare numbers are not levels");
+        assert_eq!(L::parse("bogus"), None);
+    }
+
+    #[test]
+    fn budget_round_trips_through_buckets() {
+        for l in [L::Off, L::Low, L::Medium, L::High] {
+            assert_eq!(L::from_budget(Some(l.to_budget())), Some(l));
+        }
+        assert_eq!(L::from_budget(None), None);
+        assert_eq!(L::from_budget(Some(12000)), Some(L::Medium));
+        assert_eq!(L::json(Some(0))["level"], 0);
+        assert!(L::json(None)["level"].is_null());
+        assert_eq!(L::update_payload(Some(32000))["thinking"]["name"], "high");
     }
 }

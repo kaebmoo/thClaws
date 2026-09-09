@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ChevronRight,
   X,
@@ -77,6 +77,14 @@ export function KmsBrowserSidebar({
     selected.kms === kmsName &&
     selected.kind === kind &&
     selected.name === name;
+  // A KMS opens on its entry page — the topic page for a research
+  // vault, the most linked-to page otherwise (the engine decides; see
+  // `kms::entry_page`). Once per open: a later `kms_browse_result`,
+  // fired when a research job finishes or a page is renamed, must not
+  // yank the reader off whatever they are reading.
+  const autoOpened = useRef(false);
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
   const [pages, setPages] = useState<BrowseFile[] | null>(null);
   const [sources, setSources] = useState<BrowseFile[]>([]);
   /// Name filter. A KMS of any real size is unbrowsable by scrolling,
@@ -102,6 +110,7 @@ export function KmsBrowserSidebar({
     setSources([]);
     setError(null);
     setDismissed(false);
+    autoOpened.current = false;
     const unsub = subscribe((msg) => {
       if (
         msg.type === "kms_browse_result" &&
@@ -111,6 +120,11 @@ export function KmsBrowserSidebar({
           setPages((msg.pages as BrowseFile[]) ?? []);
           setSources((msg.sources as BrowseFile[]) ?? []);
           setError(null);
+          const entry = typeof msg.entry === "string" ? msg.entry : null;
+          if (entry && !autoOpened.current && selectedRef.current === null) {
+            autoOpened.current = true;
+            onOpenFile({ kms: kmsName, kind: "page", name: entry });
+          }
         } else {
           setError((msg.error as string) ?? "browse failed");
           setPages([]);
@@ -384,6 +398,20 @@ export function KmsBrowserSidebar({
               color: "var(--text-primary)",
             }}
           >
+            <button
+              type="button"
+              className="block w-full text-left px-3 py-1.5 hover:bg-white/10"
+              title="Re-research this note with fresh sources and merge what is new"
+              onClick={() => {
+                send({
+                  type: "chat_prompt",
+                  text: `/research refresh ${kmsName} ${pageMenu.name}`,
+                });
+                setPageMenu(null);
+              }}
+            >
+              Refresh (research)
+            </button>
             <button
               type="button"
               className="block w-full text-left px-3 py-1.5 hover:bg-white/10"

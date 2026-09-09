@@ -748,6 +748,7 @@ async fn main() {
         eprintln!("\x1b[31m{}\x1b[0m", e.refuse_message());
         std::process::exit(2);
     }
+    thclaws_core::audit::init();
 
     let cli = Cli::parse();
 
@@ -1075,6 +1076,9 @@ async fn main() {
     if let Some(ref mode) = cli.permission_mode {
         config.permissions = mode.clone();
     }
+    // Re-apply after the CLI flags above: a policy a `--permission-mode`
+    // flag could climb over would not be a policy.
+    config.apply_runtime_policy();
     if let Some(ref sp) = cli.system_prompt {
         config.system_prompt = sp.clone();
     }
@@ -1134,6 +1138,7 @@ async fn main() {
             eprintln!("\n\x1b[31merror: {e}\x1b[0m");
             std::process::exit(1);
         }
+        thclaws_core::audit::shutdown();
     } else {
         if let Err(e) = run_repl(config).await {
             eprintln!("\n\x1b[31merror: {e}\x1b[0m");

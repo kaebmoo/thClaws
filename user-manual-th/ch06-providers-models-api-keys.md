@@ -333,6 +333,40 @@ OPENAI_COMPAT_API_KEY=...
 > ประวัติก็ยุ่งยาก แถมใครก็ตามที่ clone ไปก่อนที่คุณจะรู้ตัวก็มี key
 > ของคุณติดมือไปแล้ว
 
+## ระดับ thinking — ปุ่มเดียวใช้ได้ทุก provider
+
+แต่ละ provider เรียก "ให้โมเดลคิดหนักแค่ไหน" คนละแบบ: Anthropic
+รับเป็น token budget, OpenAI o-series/gpt-5 รับ `reasoning_effort`,
+DeepSeek กับ GLM เป็นสวิตช์เปิด/ปิด, Qwen มี `enable_thinking` + budget,
+Gemini 2.5 รับ budget ส่วน Gemini 3 รับ `thinkingLevel`, Ollama รับ
+`think: true|false` thClaws รวมทั้งหมดเป็นระดับเดียวที่ตั้งครั้งเดียว:
+
+| ระดับ | ความหมาย | Anthropic | OpenAI o*/gpt-5 | DeepSeek / GLM | Qwen (hybrid) | Gemini 2.5 flash / pro | Gemini 3 | Ollama |
+|---|---|---|---|---|---|---|---|---|
+| `0` off | เร็วสุด ไม่คิด | ไม่ส่ง thinking block | `minimal` / `low` | `disabled` | ปิด | budget 0 / 128 | `low` | `think: false` |
+| `1` low | คิดสั้น ๆ | 2,048 tokens | `low` | enabled | เปิด, 2,048 | 2,048 | `low` | `think: true` |
+| `2` medium | สมดุล | 10,000 | `medium` | enabled | เปิด, 10,000 | 10,000 | `high` | `think: true` |
+| `3` high | คิดลึกสุด | 32,000 | `high` | enabled | เปิด, 32,000 | 24,576 / 32,000 | `high` | `think: true` |
+| `auto` | ค่า default ของ provider — ไม่ส่ง field ใดเลย | | | | | | | |
+
+ตั้งได้สองทาง:
+
+- **Sidebar** — pill `think auto 0 1 2 3` ใต้ชื่อโมเดล
+- **`/thinking 0`** … `/thinking 3`, `/thinking auto` หรือระบุ budget ตรง ๆ
+  เช่น `/thinking 12000` สำหรับ provider แบบ Anthropic
+
+ทั้งสองทางบันทึกลง `thinkingBudget` ใน `.thclaws/settings.json`
+ระดับจึงติดกับ workspace ไม่ใช่ session โมเดลที่ไม่มีปุ่มให้ปรับ
+(gpt-4o, Qwen-Max, โมเดล local ส่วนใหญ่) จะไม่ถูกส่ง field เพิ่ม
+และทำงานเหมือนเดิม — thClaws ไม่ส่งระดับไปให้โมเดลที่จะ reject
+
+โมเดล frontier ยังเลือกเองว่าจะใช้ budget เท่าไร: บน Anthropic และ
+Gemini ค่า budget เป็นเพดาน โมเดลจะใช้น้อยลงเองเมื่อคำถามง่าย ค่าที่
+เปลี่ยนพฤติกรรมชัดที่สุดคือ `off` — บน DeepSeek v4 คือความต่างระหว่าง
+~90 วินาที กับ ~4 วินาที สำหรับ prompt สกัดข้อมูลยาว ๆ นี่คือเหตุผลที่
+`/research` รัน worker call (digest, แผน, note) ที่ระดับ `off` เสมอ
+ไม่ว่าคุณตั้งค่าแชทไว้อย่างไร
+
 ## โมเดลแบบ reasoning / thinking
 
 โมเดลในกลุ่มต่อไปนี้ส่ง field `reasoning_content` (chain-of-thought) ออก

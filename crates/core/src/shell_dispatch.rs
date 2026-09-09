@@ -814,26 +814,34 @@ pub async fn dispatch(
             }
         }
         SlashCommand::Thinking(arg) => {
+            use crate::providers::ThinkingLevel;
             let arg = arg.trim();
             if arg.is_empty() {
-                let budget = state.agent.thinking_budget.unwrap_or(0);
                 emit(
                     events_tx,
-                    format!("thinking budget: {budget} tokens (0 = off)"),
+                    format!(
+                        "thinking: {}\n  levels: 0 off · 1 low · 2 medium · 3 high · auto",
+                        ThinkingLevel::describe(state.agent.thinking_budget)
+                    ),
                 );
             } else {
-                match arg.parse::<u32>() {
-                    Ok(0) => {
-                        state.agent.thinking_budget = None;
-                        state.config.thinking_budget = None;
-                        emit(events_tx, "thinking disabled".into());
+                match ThinkingLevel::parse(arg) {
+                    Some(b) => {
+                        state.agent.thinking_budget = b;
+                        state.config.thinking_budget = b;
+                        let _ = crate::config::ProjectConfig::persist_thinking_budget(b);
+                        emit(
+                            events_tx,
+                            format!("thinking → {}", ThinkingLevel::describe(b)),
+                        );
+                        let _ = events_tx.send(ViewEvent::KmsUpdate(
+                            ThinkingLevel::update_payload(b).to_string(),
+                        ));
                     }
-                    Ok(n) => {
-                        state.agent.thinking_budget = Some(n);
-                        state.config.thinking_budget = Some(n);
-                        emit(events_tx, format!("thinking budget → {n} tokens"));
-                    }
-                    Err(_) => emit(events_tx, "usage: /thinking BUDGET (integer)".into()),
+                    None => emit(
+                        events_tx,
+                        "usage: /thinking 0|1|2|3 | off|low|medium|high | auto | <tokens>".into(),
+                    ),
                 }
             }
         }
@@ -1285,24 +1293,49 @@ pub async fn dispatch(
             max_pages,
             budget_tokens: _,
             budget_time_secs,
+            max_notes,
+            novelty_pct,
+            append,
+            dry_run,
+            legacy,
+            digest_model,
+            language,
         } => {
-            let mut cfg = crate::research::JobConfig::default();
-            cfg.kms_target = kms_target;
-            if let Some(v) = min_iter {
-                cfg.min_iter = v;
-            }
-            if let Some(v) = max_iter {
-                cfg.max_iter = v;
-            }
-            if let Some(pct) = score_threshold_pct {
-                cfg.score_threshold = (pct as f32 / 100.0).clamp(0.0, 1.0);
-            }
-            if let Some(v) = max_pages {
-                cfg.max_pages = v;
-            }
-            if let Some(secs) = budget_time_secs {
-                cfg.time_budget = std::time::Duration::from_secs(secs);
-            }
+            let cfg = crate::research::JobConfig::from_flags(crate::research::StartFlags {
+                kms_target,
+                min_iter,
+                max_iter,
+                score_threshold_pct,
+                max_pages,
+                budget_time_secs,
+                max_notes,
+                novelty_pct,
+                append,
+                dry_run,
+                legacy,
+                digest_model,
+                // Disk is what the sidebar checkbox writes; memory is what
+                // `/kms use` updates. Prefer disk so a checkbox tick counts.
+                language,
+                attached_kms: crate::config::ProjectConfig::load()
+                    .and_then(|c| c.kms.map(|k| k.active))
+                    .unwrap_or_else(|| state.config.kms_active.clone()),
+            });
+            let target_desc = match &cfg.kms_target {
+                Some(k) => format!("into KMS '{k}'"),
+                None => "into a new KMS named from the query (attach one or pass --kms to build on an existing graph)".to_string(),
+            };
+            let target_desc = format!(
+                "{target_desc} · worker model: {}",
+                cfg.digest_model
+                    .as_deref()
+                    .unwrap_or("(your current model)")
+            );
+            let digest_provider = cfg.digest_model.as_ref().and_then(|dm| {
+                let mut c2 = state.config.clone();
+                c2.model = dm.clone();
+                crate::repl::build_provider(&c2).ok()
+            });
             let provider = match crate::repl::build_provider(&state.config) {
                 Ok(p) => p,
                 Err(e) => {
@@ -1311,11 +1344,12 @@ pub async fn dispatch(
                 }
             };
             let model = state.config.model.clone();
-            match crate::research::start(query.clone(), cfg, provider, model).await {
+            match crate::research::start(query.clone(), cfg, provider, model, digest_provider).await
+            {
                 Ok(id) => emit(
                     events_tx,
                     format!(
-                        "[research started: id={id}] query: {query}\n  \
+                        "[research started: id={id}] query: {query}\n  {target_desc}\n  \
                          /research status {id}     check progress\n  \
                          /research show {id}       stream result\n  \
                          /research cancel {id}     cancel"
@@ -1324,7 +1358,75 @@ pub async fn dispatch(
                 Err(e) => emit(events_tx, format!("/research start failed: {e}")),
             }
         }
+        SlashCommand::ResearchRefresh {
+            kms,
+            slugs,
+            all,
+            older_than_days,
+            digest_model,
+            language,
+        } => {
+            let attached: Vec<String> = crate::config::ProjectConfig::load()
+                .and_then(|c| c.kms.map(|k| k.active))
+                .unwrap_or_else(|| state.config.kms_active.clone());
+            let Some(kms) = kms.or_else(|| attached.last().cloned()) else {
+                emit(
+                    events_tx,
+                    "/research refresh: no KMS given and none attached — /research refresh <kms> <slug>".into(),
+                );
+                return;
+            };
+            let cfg = crate::research::JobConfig::from_flags(crate::research::StartFlags {
+                kms_target: Some(kms.clone()),
+                digest_model,
+                language,
+                ..Default::default()
+            });
+            let digest_provider = cfg.digest_model.as_ref().and_then(|dm| {
+                let mut c2 = state.config.clone();
+                c2.model = dm.clone();
+                crate::repl::build_provider(&c2).ok()
+            });
+            let provider = match crate::repl::build_provider(&state.config) {
+                Ok(p) => p,
+                Err(e) => {
+                    emit(
+                        events_tx,
+                        format!("/research refresh: provider unavailable: {e}"),
+                    );
+                    return;
+                }
+            };
+            let _ = all;
+            match crate::research::start_refresh(
+                kms.clone(),
+                slugs,
+                older_than_days.unwrap_or(30),
+                cfg,
+                provider,
+                state.config.model.clone(),
+                digest_provider,
+                None,
+            )
+            .await
+            {
+                Ok(ids) => {
+                    let list: Vec<String> =
+                        ids.iter().map(|(id, s)| format!("{id} → {s}")).collect();
+                    emit(
+                        events_tx,
+                        format!(
+                            "[research refresh queued: {} note(s) in KMS '{kms}']\n  {}\n  runs one after another; the Research panel follows each job",
+                            ids.len(),
+                            list.join("\n  ")
+                        ),
+                    );
+                }
+                Err(e) => emit(events_tx, format!("/research refresh failed: {e}")),
+            }
+        }
         SlashCommand::ResearchList => {
+            let _ = crate::config::ProjectConfig::sync_kms_active(&mut state.config);
             let jobs = crate::research::manager().list();
             if jobs.is_empty() {
                 emit(events_tx, "no research jobs (try /research <query>)".into());
@@ -1332,9 +1434,10 @@ pub async fn dispatch(
                 let mut out = String::new();
                 for j in jobs {
                     out.push_str(&format!(
-                        "{}  {}  iter={}  src={}  score={}  query={}\n",
+                        "{}  {}  ⏱{}  iter={}  src={}  score={}  query={}\n",
                         j.id,
                         j.status.as_str(),
+                        j.elapsed_str(),
                         j.iterations_done,
                         j.source_count,
                         j.last_score
@@ -1351,39 +1454,52 @@ pub async fn dispatch(
             None => emit(events_tx, format!("no research job '{id}'")),
         },
         SlashCommand::ResearchShow { id } => match crate::research::manager().get(&id) {
-            Some(j) => match (j.status, &j.result_page) {
-                (crate::research::JobStatus::Done, Some(path)) => {
-                    let parts: Vec<&str> = path.splitn(2, '/').collect();
-                    if parts.len() == 2 {
-                        if let Some(kref) = crate::kms::resolve(parts[0]) {
-                            let p = kref.pages_dir().join(parts[1]);
-                            match std::fs::read_to_string(&p) {
-                                Ok(body) => emit(events_tx, body),
-                                Err(e) => {
-                                    emit(events_tx, format!("cannot read {}: {e}", p.display()))
+            Some(j) => {
+                // Re-open / focus the right-edge Research panel on this job
+                // (the panel forwards any `research_*` payload verbatim).
+                let _ = events_tx.send(crate::shared_session::ViewEvent::ResearchUpdate(
+                    serde_json::json!({"type": "research_focus", "id": j.id}).to_string(),
+                ));
+                match (j.status, &j.result_page) {
+                    (crate::research::JobStatus::Done, Some(path)) => {
+                        let parts: Vec<&str> = path.splitn(2, '/').collect();
+                        if parts.len() == 2 {
+                            if let Some(kref) = crate::kms::resolve(parts[0]) {
+                                // v2 `--dry-run` reports `runs/<file>` (KMS root),
+                                // everything else is a page under `pages/`.
+                                let p = if parts[1].starts_with("runs/") {
+                                    kref.root.join(parts[1])
+                                } else {
+                                    kref.pages_dir().join(parts[1])
+                                };
+                                match std::fs::read_to_string(&p) {
+                                    Ok(body) => emit(events_tx, body),
+                                    Err(e) => {
+                                        emit(events_tx, format!("cannot read {}: {e}", p.display()))
+                                    }
                                 }
+                            } else {
+                                emit(events_tx, format!("KMS '{}' not found", parts[0]));
                             }
                         } else {
-                            emit(events_tx, format!("KMS '{}' not found", parts[0]));
+                            emit(events_tx, format!("malformed result_page: {path}"));
                         }
-                    } else {
-                        emit(events_tx, format!("malformed result_page: {path}"));
                     }
-                }
-                (status, _) => emit(
-                    events_tx,
-                    format!(
-                        "status: {} — phase: {} (iter {}, src {}, score {})",
-                        status.as_str(),
-                        j.phase,
-                        j.iterations_done,
-                        j.source_count,
-                        j.last_score
-                            .map(|s| format!("{s:.2}"))
-                            .unwrap_or_else(|| "—".into()),
+                    (status, _) => emit(
+                        events_tx,
+                        format!(
+                            "status: {} — phase: {} (iter {}, src {}, score {})",
+                            status.as_str(),
+                            j.phase,
+                            j.iterations_done,
+                            j.source_count,
+                            j.last_score
+                                .map(|s| format!("{s:.2}"))
+                                .unwrap_or_else(|| "—".into()),
+                        ),
                     ),
-                ),
-            },
+                }
+            }
             None => emit(events_tx, format!("no research job '{id}'")),
         },
         SlashCommand::ResearchCancel { id } => {
@@ -1452,6 +1568,9 @@ pub async fn dispatch(
         }
 
         // ─── sso (EE Phase 4) ───────────────────────────────────────
+        SlashCommand::PolicyStatus => {
+            emit(events_tx, crate::policy::status_text());
+        }
         SlashCommand::Sso { sub } => {
             let policy = crate::policy::active()
                 .and_then(|a| a.policy.policies.sso.as_ref())
@@ -2479,6 +2598,28 @@ pub async fn dispatch(
                 }
             }
         }
+        SlashCommand::KmsRename { old, new } => match crate::kms::rename(&old, &new) {
+            Ok(r) => {
+                let was_attached = state.config.kms_active.iter().any(|n| n == &old);
+                for n in state.config.kms_active.iter_mut() {
+                    if *n == old {
+                        *n = new.clone();
+                    }
+                }
+                emit(
+                    events_tx,
+                    format!("renamed KMS '{old}' → '{new}' ({})", r.root.display()),
+                );
+                if was_attached {
+                    // The system prompt names attached KMSes.
+                    if let Err(e) = state.rebuild_agent(true) {
+                        emit(events_tx, format!("warning: agent rebuild failed: {e}"));
+                    }
+                }
+                broadcast_kms_update(events_tx);
+            }
+            Err(e) => emit(events_tx, format!("/kms rename failed: {e}")),
+        },
         SlashCommand::KmsDrop { name, force } => {
             let Some(k) = crate::kms::resolve(&name) else {
                 emit(events_tx, format!("no KMS named '{name}'"));
@@ -2634,6 +2775,81 @@ pub async fn dispatch(
             match crate::kms::reindex(&k) {
                 Ok(r) => emit(events_tx, format!("/kms reindex {name} — {}", r.summary())),
                 Err(e) => emit(events_tx, format!("/kms reindex {name} failed: {e}")),
+            }
+        }
+        SlashCommand::KmsEntry { name, set, clear } => {
+            let Some(kname) = name.or_else(|| state.config.kms_active.last().cloned()) else {
+                emit(
+                    events_tx,
+                    "/kms entry: no KMS attached to this session. Run `/kms use <name>` first, or pass a name."
+                        .into(),
+                );
+                return;
+            };
+            match crate::kms::apply_entry(&kname, set.as_deref(), clear) {
+                Ok(msg) => {
+                    emit(events_tx, msg);
+                    broadcast_kms_update(events_tx);
+                }
+                Err(e) => emit(events_tx, format!("/kms entry: {e}")),
+            }
+        }
+        SlashCommand::KmsVerify {
+            name,
+            llm,
+            stale_days,
+            page,
+            fix,
+        } => {
+            let Some(kname) = name.or_else(|| state.config.kms_active.last().cloned()) else {
+                emit(
+                    events_tx,
+                    "/kms verify: no KMS attached to this session. Run `/kms use <name>` first, or pass a name."
+                        .into(),
+                );
+                return;
+            };
+            let opts = crate::kms_verify::VerifyOptions {
+                stale_days: stale_days.unwrap_or(crate::kms_verify::DEFAULT_STALE_DAYS),
+                page,
+                llm,
+                fix,
+            };
+            let provider = if llm {
+                match crate::repl::build_provider(&state.config) {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        emit(
+                            events_tx,
+                            format!("/kms verify --llm: provider unavailable: {e}"),
+                        );
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            if llm {
+                emit(
+                    events_tx,
+                    format!(
+                        "/kms verify {kname} --llm: auditing each cited page with `{}` (8 at a time)…",
+                        state.config.model
+                    ),
+                );
+            }
+            match crate::kms_verify::run(
+                &kname,
+                &opts,
+                provider,
+                &state.config.model,
+                std::time::Duration::from_secs(180),
+                &state.cancel,
+            )
+            .await
+            {
+                Ok(msg) => emit(events_tx, msg),
+                Err(e) => emit(events_tx, format!("/kms verify failed: {e}")),
             }
         }
         SlashCommand::KmsLint(name) => {

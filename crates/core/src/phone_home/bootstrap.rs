@@ -33,6 +33,26 @@ pub fn spawn(config: PhoneHomeConfig, input_tx: mpsc::Sender<ShellInput>) -> Pho
     let server_url = config.resolved_server_url();
 
     let client = Arc::new(super::build_client(config, cancel.clone()));
+
+    // Phase 8: the tunnel makes this machine's agent reachable from the
+    // cloud, which is the one thing a locked-down deployment cannot let
+    // a user switch on. Refuse here — every path that starts a session
+    // (boot autoconnect, `/remote` pairing, reconnect) lands on this
+    // function. The handle is still returned, already cancelled, so
+    // callers that hold one keep working without a special case.
+    if !crate::policy::remote_allowed() {
+        eprintln!(
+            "\x1b[33m[phone-home] refused: thClaws Remote is disabled by org policy \
+             (policies.runtime.allow_remote = false)\x1b[0m"
+        );
+        cancel.cancel();
+        return PhoneHomeHandle {
+            cancel,
+            join: tokio::spawn(async {}),
+            server_url,
+            client,
+        };
+    }
     let sink = PhoneHomeSink::new(input_tx);
 
     let cancel_for_task = cancel.clone();

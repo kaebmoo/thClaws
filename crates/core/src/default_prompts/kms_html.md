@@ -49,6 +49,11 @@ Suggested tool sequence:
    style, common frontmatter fields, and the kinds of relationships
    in the data (citations, cross-page wikilinks, etc.). Do NOT read
    every page yet — sample first, full reads come in Phase 3.
+   Every `KmsRead` of a page ends with a `Linked from (N): …` line
+   naming the notes that point AT it. That is the reverse of the
+   page's own wikilinks and it exists nowhere in the files — capture
+   it as you read, because a reader of the finished site expects to
+   walk the graph in both directions.
 
 Do **not** Read source files in this phase. Don't enumerate them,
 don't peek at frontmatter, don't list them in the chat. Sources
@@ -137,6 +142,8 @@ This is editorial, not documentation. Make it feel hand-crafted:
 - Mobile-friendly — responsive with CSS, not JS.
 - Citations rendered as actual chips (not raw `[1]` text); wikilinks
   rendered with their own affordance separate from external links.
+- Every page view ends with its **Linked from** list (from the
+  `KmsRead` footer), styled apart from the page's own outgoing links.
 
 ## Final report
 

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { ViewerTarget } from "./KmsBrowserSidebar";
 import { ChevronRight, X, Search } from "lucide-react";
 import { send, subscribe } from "../hooks/useIPC";
 
@@ -68,7 +69,38 @@ const STATUS_LABEL: Record<ResearchStatus, string> = {
   failed: "failed",
 };
 
-export function ResearchSidebar() {
+/// `result_page` is `<kms>/<page>.md` (v2: the map-of-content note) or
+/// `<kms>/runs/<file>.md` for a `--dry-run`. Only pages open in the
+/// viewer; anything else falls back to printing in chat.
+function resultAsViewerTarget(resultPage: string): ViewerTarget | null {
+  const slash = resultPage.indexOf("/");
+  if (slash <= 0) return null;
+  const kms = resultPage.slice(0, slash);
+  const rest = resultPage.slice(slash + 1);
+  if (rest.startsWith("runs/") || rest.includes("/")) return null;
+  return { kms, kind: "page", name: rest.replace(/\.md$/, "") };
+}
+
+function fmtElapsed(startedAt: number | null, finishedAt: number | null, nowSec: number): string {
+  if (startedAt === null) return "";
+  const end = finishedAt ?? nowSec;
+  const s = Math.max(0, end - startedAt);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const mm = String(m).padStart(2, "0");
+  const ss = String(sec).padStart(2, "0");
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+export function ResearchSidebar({
+  onOpenResult,
+}: {
+  /// When given, "Show result" opens the note in the KMS viewer pane
+  /// (App wires this to `setViewerTarget`). Without it the button
+  /// prints the note into chat via `/research show`.
+  onOpenResult?: (target: ViewerTarget) => void;
+}) {
   // null = no envelope yet; the sidebar suppresses entirely on a
   // fresh session that's never seen a /research run.
   const [progressMap, setProgressMap] = useState<Map<string, JobProgress> | null>(null);
@@ -90,9 +122,25 @@ export function ResearchSidebar() {
   const dismissedTerminalRef = useRef<Set<string>>(new Set());
   const [dismissedVersion, setDismissedVersion] = useState(0);
   const lastSeenIterRef = useRef<Map<string, number>>(new Map());
+  // Wall clock for the elapsed timer — ticks once a second while any job
+  // is running, mirroring the chat turn's clock.
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    const t = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000);
+    return () => clearInterval(t);
+  }, []);
 
   useEffect(() => {
     const unsub = subscribe((msg) => {
+      if (msg.type === "research_focus" && typeof msg.id === "string") {
+        // `/research show <id>` re-opens a closed panel on that job,
+        // even after a terminal-state dismiss.
+        dismissedTerminalRef.current.delete(msg.id);
+        setDismissedVersion((v) => v + 1);
+        setDismissed(false);
+        setFocusedId(msg.id);
+        return;
+      }
       if (msg.type !== "research_update") return;
       const jobs = (msg.jobs as ResearchJobInfo[]) ?? [];
       setProgressMap((prev) => {
@@ -195,13 +243,17 @@ export function ResearchSidebar() {
       // sidebar stays closed for that job.
       const dismissedIds = dismissedTerminalRef.current;
       setFocusedId((prev) => {
-        const prevStillExists =
-          prev !== null && jobs.some((j) => j.id === prev) && !dismissedIds.has(prev);
-        if (prevStillExists) return prev;
+        // A live job always wins: starting a new /research while a
+        // finished one is still on screen must switch the panel to the
+        // new run (pre-fix the finished job stayed focused forever).
+        // `jobs` is newest-first, so the first running one is the latest.
         const running = jobs.find(
           (j) => (j.status === "running" || j.status === "pending") && !dismissedIds.has(j.id),
         );
         if (running) return running.id;
+        const prevStillExists =
+          prev !== null && jobs.some((j) => j.id === prev) && !dismissedIds.has(prev);
+        if (prevStillExists) return prev;
         const liveJobs = jobs.filter((j) => !dismissedIds.has(j.id));
         if (liveJobs.length > 0) return liveJobs[0].id;
         return null;
@@ -246,8 +298,10 @@ export function ResearchSidebar() {
           color: "var(--text-secondary)",
           cursor: "pointer",
         }}
-        title={`Research: ${focused.view.status} · ${focused.view.iterations_done} iter${
-          focused.view.last_score !== null ? ` · score ${focused.view.last_score.toFixed(2)}` : ""
+        title={`Research: ${focused.view.status} · ${fmtElapsed(focused.view.started_at, focused.view.finished_at, nowSec)} · round ${focused.view.iterations_done}${
+          focused.view.last_score !== null
+            ? ` · novelty ${(focused.view.last_score * 100).toFixed(0)}%`
+            : ""
         }`}
       >
         <ChevronRight size={14} style={{ transform: "rotate(180deg)" }} />
@@ -262,9 +316,14 @@ export function ResearchSidebar() {
   // changed the cap we fallback to inferring from history length.
   // Backend doesn't ship max_iter in the envelope, so we use 8 as
   // the JobConfig default; if a real run goes past, we pad.
-  const maxIter = Math.max(8, iterationHistory.length, view.iterations_done);
+  const maxIter = Math.max(3, iterationHistory.length, view.iterations_done);
 
   const showResult = () => {
+    const target = view.result_page ? resultAsViewerTarget(view.result_page) : null;
+    if (onOpenResult && target) {
+      onOpenResult(target);
+      return;
+    }
     send({ type: "chat_prompt", text: `/research show ${view.id}` });
   };
   const cancel = () => {
@@ -359,10 +418,14 @@ export function ResearchSidebar() {
         {/* Current phase (highlighted) */}
         <div>
           <div
-            className="text-[9px] uppercase tracking-wider mb-1"
+            className="text-[9px] uppercase tracking-wider mb-1 flex items-center justify-between"
             style={{ color: "var(--text-secondary)" }}
           >
-            Phase
+            <span>Phase</span>
+            <span className="font-mono normal-case tracking-normal" title="elapsed">
+              {isRunning ? "⏱ " : ""}
+              {fmtElapsed(view.started_at, view.finished_at, nowSec)}
+            </span>
           </div>
           <div
             className="text-xs leading-snug font-mono"
@@ -414,7 +477,7 @@ export function ResearchSidebar() {
               className="text-[9px] uppercase tracking-wider mb-1"
               style={{ color: "var(--text-secondary)" }}
             >
-              Score history
+              Novelty per round
             </div>
             <div className="flex flex-col gap-0.5">
               {iterationHistory.map((h) => (
@@ -426,7 +489,7 @@ export function ResearchSidebar() {
                   <span
                     style={{ color: "var(--text-secondary)", width: "26px" }}
                   >
-                    iter {h.iter}
+                    r{h.iter}
                   </span>
                   <div
                     className="flex-1 rounded-sm overflow-hidden"
@@ -447,7 +510,7 @@ export function ResearchSidebar() {
                     )}
                   </div>
                   <span style={{ width: "30px", textAlign: "right" }}>
-                    {h.score !== null ? h.score.toFixed(2) : "—"}
+                    {h.score !== null ? `${(h.score * 100).toFixed(0)}%` : "—"}
                   </span>
                   <span
                     style={{
@@ -523,8 +586,10 @@ export function ResearchSidebar() {
               Result
             </div>
             <div
-              className="text-[10px] font-mono break-all"
+              className="text-[10px] font-mono break-all cursor-pointer hover:underline"
               style={{ color: "var(--accent)" }}
+              onClick={showResult}
+              title="Open"
             >
               {view.result_page}
             </div>
@@ -565,7 +630,11 @@ export function ResearchSidebar() {
               background: "var(--accent)",
               color: "#fff",
             }}
-            title="Print synthesized result in chat"
+            title={
+              onOpenResult
+                ? "Open the map of content in the KMS viewer"
+                : "Print the result in chat"
+            }
           >
             Show result
           </button>

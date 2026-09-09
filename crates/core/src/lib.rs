@@ -51,6 +51,7 @@ pub mod aiserver;
 /// OpenAI-compatible HTTP API surface mounted on `--serve` (see
 /// `dev-plan/19-thclaws-openai-compat.md`).
 pub mod api_v1;
+pub mod audit;
 /// Self-improving AI Agent — auto-learn pipeline that files each
 /// ended session as a page in a dedicated KMS and periodically
 /// reconciles it. See `dev-plan/27-self-improving-agent.md`.
@@ -105,6 +106,7 @@ pub mod instructions;
 pub mod ipc;
 pub mod kms;
 pub mod kms_sources;
+pub mod kms_verify;
 // dev-plan/36 Tier 1: BM25-ranked KMS search + native Thai segmenter.
 // Both gated behind the `kms_search_index` Cargo feature (opt-in
 // forever per D3) so users / operators without KMSes don't pay the

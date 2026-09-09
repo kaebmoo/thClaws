@@ -47,7 +47,8 @@ impl Tool for KmsReadTool {
          from — use it when a page cites a source you need the detail of, \
          or when KmsSearch returns a `[source]` / `sources/…` hit. Source \
          names may carry an extension (`spec.txt`); the bare stem also \
-         resolves."
+         resolves. A page read ends with the notes that link TO it, so \
+         you can walk the graph backwards as well as forwards."
     }
 
     fn input_schema(&self) -> Value {
@@ -99,11 +100,53 @@ impl Tool for KmsReadTool {
         // "no verification record" hint rather than a date-based
         // alarm so existing user-curated content isn't shouted at.
         let warning = staleness_warning(&body);
-        Ok(match warning {
+        let body = match warning {
             Some(w) => format!("{w}\n\n{body}"),
             None => body,
-        })
+        };
+        // Backlinks are computed per read and never stored (see
+        // `kms::backlink_map`), so the tool result is the only place the
+        // model can learn who points at this note.
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(page)
+            .to_string();
+        Ok(format!("{body}{}", backlink_footer(&kref, &stem)))
     }
+}
+
+/// Notes linking to `stem`, as a trailing line on a `KmsRead` result.
+/// Empty when nothing links here, so an isolated note costs nothing.
+fn backlink_footer(kref: &crate::kms::KmsRef, stem: &str) -> String {
+    const SHOWN: usize = 30;
+    let links = crate::kms::backlink_map(kref)
+        .remove(stem)
+        .unwrap_or_default();
+    if links.is_empty() {
+        return String::new();
+    }
+    let total = links.len();
+    let shown: Vec<String> = links
+        .iter()
+        .take(SHOWN)
+        .map(|(slug, title)| {
+            if title == slug {
+                format!("[[{slug}]]")
+            } else {
+                format!("[[{slug}|{title}]]")
+            }
+        })
+        .collect();
+    let more = if total > SHOWN {
+        format!(" · +{} more", total - SHOWN)
+    } else {
+        String::new()
+    };
+    format!(
+        "\n\n---\nLinked from ({total}): {}{more}",
+        shown.join(" · ")
+    )
 }
 
 /// Read a file out of `sources/`. Raw archived material is unbounded

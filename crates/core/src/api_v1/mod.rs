@@ -277,6 +277,12 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+/// `THCLAWS_API_TOKEN` is process-wide, so the tests that set it must
+/// not run at the same time as the tests that read it. Held across each
+/// such test in this module and in `info`.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,7 +297,7 @@ mod tests {
 
     #[test]
     fn auth_token_distinguishes_three_modes() {
-        let _guard = crate::kms::test_env_lock();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Order matters — env is process-wide and these tests can't run
         // in parallel without locks. Reading + restoring around each
         // assertion keeps the suite passable when run as a unit.

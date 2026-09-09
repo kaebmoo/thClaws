@@ -98,6 +98,10 @@ Slash commands คือ control plane ของ thClaws พิมพ์ `/` ต
 | `/kms new [--project] NAME` | สร้าง KMS ใหม่ (scope ดีฟอลต์คือ user) |
 | `/kms use NAME` | ผูก KMS เข้ากับการสนทนาของโปรเจกต์นี้ |
 | `/kms off NAME` | ถอด KMS ออก |
+| `/kms entry [NAME] [--set SLUG \| --clear]` | ดูหรือตั้งหน้าที่ KMS browser เปิดขึ้นมา บันทึกตอนสร้าง page แรกของ KMS ถ้าไม่มีค่าบันทึกจะอนุมานให้ |
+| `/kms verify [NAME] [--llm] [--fix]` | ตรวจหลักฐาน: citation ชี้ถูก, source ที่ archive ไว้ยังมีข้อความที่ claim อ้าง, ไม่มีตัวเลขที่อ้างโดยไม่มีที่มา `--llm` เพิ่มการตรวจว่าประโยคตามมาจาก claim จริงไหม `--fix` ถอด link ที่ถูกเขียนทับในที่อยู่เว็บ |
+| `/kms rename OLD NEW` | เปลี่ยนชื่อโฟลเดอร์ KMS การผูกตามไปด้วย (หรือคลิกขวาที่ KMS บน sidebar) |
+| `/kms drop NAME [--force]` | ลบ KMS ถ้าไม่ใส่ `--force` เป็น dry-run (หรือคลิกขวาบน sidebar → Delete…) |
 | `/kms show NAME` | พิมพ์ `index.md` ของ KMS ออกมา |
 | `/kms html NAME [OUT]` | สร้าง HTML site แบบ single-file ที่ interactive จาก KMS (v0.8.5+) Agent อ่าน KMS ผ่าน tools, ออกแบบ component, แล้วเขียน `<OUT>/index.html` (default `./<NAME>-site/`) ลง workspace |
 | `/dream [FOCUS]` | Consolidate KMS ของโปรเจกต์โดย mine session ล่าสุด (GUI-only, dispatch built-in side-channel agent) |
@@ -109,12 +113,13 @@ Slash commands คือ control plane ของ thClaws พิมพ์ `/` ต
 | คำสั่ง | ทำอะไร |
 |---|---|
 | `/research <query>` | spawn งาน research background — multi-iteration web search + multi-page KMS write |
-| `/research [--kms NAME] [--max-pages N] [--max-iter K] [--score-threshold 0.X] [--budget-time T] <query>` | เริ่มพร้อม override |
+| `/research [--kms NAME] [--max-notes N] [--max-iter K] [--novelty 0.X] [--worker-model ID] [--append] [--dry-run] [--budget-time T] <query>` | เริ่มพร้อม override (ดูบทที่ 20) |
 | `/research` (หรือ `/research list`) | list ทุก job (newest first) |
 | `/research status ID` | detail (phase, iteration, score) |
 | `/research show ID` | print synthesized result ใน chat |
 | `/research cancel ID` | cancel job ที่รัน; partial result ทิ้ง |
 | `/research wait ID` | block CLI prompt จน terminal (CLI-only) |
+| `/policy` (หรือ `/policy status`) | org policy ที่ active อยู่: ไฟล์ต้นทาง, issuer, วันหมดอายุ, block ไหนเปิดอยู่ และ audit sink พร้อมจำนวน record ที่ drop (Enterprise) |
 
 ดู [บทที่ 20](ch20-research.md) สำหรับ pipeline ฉบับเต็ม + KMS layout + flag reference
 
@@ -123,7 +128,7 @@ Slash commands คือ control plane ของ thClaws พิมพ์ `/` ต
 | Command | ทำอะไร |
 |---|---|
 | `/permissions MODE` | สลับระหว่าง `auto` และ `ask` ระหว่าง session |
-| `/thinking BUDGET` | กำหนด budget token สำหรับ extended-thinking (0 = ปิด ใช้ได้เฉพาะ Anthropic) |
+| `/thinking 0-3` | ระดับ thinking ใช้ได้ทุก provider: `0` ปิด · `1` low · `2` medium · `3` high · `auto` (ค่า default ของ provider) หรือ `/thinking <tokens>` ระบุ budget ตรง ๆ ปุ่มเดียวกับ pill **think** ใต้ชื่อโมเดลใน sidebar บันทึกลง `thinkingBudget` |
 | `/tasks` | แสดง task / todo ที่ agent สร้างไว้ |
 | `/config key=val` | เขียนทับค่า config เฉพาะ session นี้ |
 | `/agent NAME PROMPT` | Spawn user-driven side-channel subagent (GUI-only รันขนานกับ main) |

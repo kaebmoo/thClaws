@@ -3,6 +3,7 @@ import { Plus } from "lucide-react";
 import { send, subscribe } from "../hooks/useIPC";
 import { ModelPickerDropdown } from "./ModelPickerDropdown";
 import { KmsCreateModal, type KmsCreateMode } from "./KmsCreateModal";
+import { CtxMenuItem } from "./CtxMenuItem";
 
 type SessionInfo = { id: string; model: string; messages: number; title?: string | null };
 type KmsInfo = { name: string; scope: "user" | "project"; active: boolean };
@@ -131,6 +132,10 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
   // Inline model picker dropdown anchored to the Provider section.
   // null means closed; opens on click of the active model row. #49.
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  // Thinking level 0-3, null = auto (provider default). Mirrors
+  // `/thinking`; the engine broadcasts `thinking_update` after either
+  // path persists, so this never drifts from the shell.
+  const [thinkingLevel, setThinkingLevel] = useState<number | null>(null);
   const [mcpServers, setMcpServers] = useState<
     { name: string; tools: number }[]
   >([]);
@@ -141,6 +146,10 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
   // OKF import/export context menu on the "Knowledge" section header,
   // anchored to cursor coords; null when closed.
   const [kmsMenu, setKmsMenu] = useState<{ x: number; y: number } | null>(null);
+  // Per-row menu on a KMS entry: rename / export / delete.
+  const [kmsRowMenu, setKmsRowMenu] = useState<{ kms: KmsInfo; x: number; y: number } | null>(null);
+  const [kmsRenameTarget, setKmsRenameTarget] = useState<KmsInfo | null>(null);
+  const kmsRenameInputRef = useRef<HTMLInputElement | null>(null);
   // OKF import modal (collects new KMS name + scope; the backend opens
   // the native folder picker on submit). null = closed.
   const [okfImport, setOkfImport] = useState<{ scope: "user" | "project" } | null>(null);
@@ -197,6 +206,10 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
       } else if (msg.type === "initial_state" || msg.type === "provider_update") {
         if (msg.provider) setActiveProvider(msg.provider as string);
         if (msg.model) setActiveModel(msg.model as string);
+        if (msg.thinking && typeof msg.thinking === "object") {
+          const lv = (msg.thinking as { level?: number | null }).level;
+          setThinkingLevel(typeof lv === "number" ? lv : null);
+        }
         if (typeof msg.provider_ready === "boolean") {
           setProviderReady(msg.provider_ready);
         }
@@ -209,6 +222,9 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
         if (msg.kmss) {
           setKmss(msg.kmss as KmsInfo[]);
         }
+      } else if (msg.type === "thinking_update") {
+        const lv = (msg.thinking as { level?: number | null } | undefined)?.level;
+        setThinkingLevel(typeof lv === "number" ? lv : null);
       } else if (msg.type === "mcp_update") {
         setMcpServers(msg.servers as { name: string; tools: number }[]);
       } else if (msg.type === "kms_update") {
@@ -263,9 +279,15 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
   // before acting so they don't self-dismiss prematurely.
   useEffect(() => {
     if (!sessionMenu) return;
-    const onClick = () => setSessionMenu(null);
+    const onClick = () => {
+      setSessionMenu(null);
+      setKmsRowMenu(null);
+    };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setSessionMenu(null);
+      if (e.key === "Escape") {
+        setSessionMenu(null);
+        setKmsRowMenu(null);
+      }
     };
     window.addEventListener("click", onClick);
     window.addEventListener("keydown", onKey);
@@ -308,6 +330,10 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
   // Focus + select-all when the rename dialog opens so the user can
   // either replace the whole title or click to keep part of it.
   useEffect(() => {
+    if (kmsRenameTarget && kmsRenameInputRef.current) {
+      kmsRenameInputRef.current.focus();
+      kmsRenameInputRef.current.select();
+    }
     if (renameTarget && renameInputRef.current) {
       renameInputRef.current.focus();
       renameInputRef.current.select();
@@ -408,6 +434,13 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
               onClose={() => setModelPickerOpen(false)}
             />
           )}
+          <ThinkingSelector
+            level={thinkingLevel}
+            onChange={(lv) => {
+              setThinkingLevel(lv);
+              send({ type: "thinking_set", level: lv === null ? "auto" : lv });
+            }}
+          />
         </div>
       </Section>
 
@@ -666,7 +699,11 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
             <div
               key={`${k.scope}:${k.name}`}
               className="flex items-center gap-1.5 px-2 py-1 rounded hover:bg-white/5"
-              title={`${k.scope} scope — checkbox toggles attach; click name to browse`}
+              title={`${k.scope} scope — checkbox toggles attach; click name to browse; right-click to rename / delete`}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setKmsRowMenu({ kms: k, x: e.clientX, y: e.clientY });
+              }}
             >
               <input
                 type="checkbox"
@@ -774,6 +811,149 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
           >
             Delete
           </CtxMenuItem>
+        </div>
+      )}
+      {kmsRowMenu && (
+        <div
+          className="fixed z-50 rounded border shadow-lg py-1 text-xs"
+          style={{
+            left: kmsRowMenu.x,
+            top: kmsRowMenu.y,
+            background: "var(--bg-primary)",
+            borderColor: "var(--border)",
+            color: "var(--text-primary)",
+            minWidth: 160,
+          }}
+          onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <div
+            className="px-3 py-0.5 truncate"
+            style={{ color: "var(--text-secondary)", fontSize: "9px" }}
+          >
+            {kmsRowMenu.kms.name}
+            {kmsRowMenu.kms.scope === "project" ? " (proj)" : ""}
+          </div>
+          <CtxMenuItem
+            onClick={() => {
+              const k = kmsRowMenu.kms;
+              setKmsRowMenu(null);
+              setKmsRenameTarget(k);
+            }}
+          >
+            Rename…
+          </CtxMenuItem>
+          <CtxMenuItem
+            onClick={() => {
+              const k = kmsRowMenu.kms;
+              setKmsRowMenu(null);
+              send({ type: "kms_export_okf", name: k.name });
+            }}
+          >
+            Export OKF bundle…
+          </CtxMenuItem>
+          <CtxMenuItem
+            danger
+            onClick={async () => {
+              const k = kmsRowMenu.kms;
+              setKmsRowMenu(null);
+              // Same one-frame wait as the session menu: let React close
+              // the menu before the native dialog blocks the webview.
+              await new Promise((r) => requestAnimationFrame(() => r(undefined)));
+              const ok = await platformConfirm({
+                title: "Delete KMS",
+                message: `Delete KMS "${k.name}"? Every page and source in it is removed from disk. This can't be undone.`,
+                yesLabel: "Delete",
+                noLabel: "Cancel",
+              });
+              if (ok) send({ type: "kms_drop", name: k.name });
+            }}
+          >
+            Delete…
+          </CtxMenuItem>
+        </div>
+      )}
+      {kmsRenameTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ background: "var(--modal-backdrop, rgba(0,0,0,0.55))" }}
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setKmsRenameTarget(null);
+          }}
+        >
+          <div
+            className="rounded-lg border shadow-xl w-80 max-w-[92vw]"
+            style={{
+              background: "var(--bg-primary)",
+              borderColor: "var(--border)",
+              color: "var(--text-primary)",
+            }}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div
+              className="px-4 py-2 border-b text-sm font-semibold"
+              style={{ borderColor: "var(--border)" }}
+            >
+              Rename KMS
+            </div>
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                const next = (kmsRenameInputRef.current?.value ?? "").trim();
+                if (next && next !== kmsRenameTarget.name) {
+                  send({ type: "kms_rename", name: kmsRenameTarget.name, new_name: next });
+                }
+                setKmsRenameTarget(null);
+              }}
+            >
+              <div className="px-4 py-3">
+                <input
+                  ref={kmsRenameInputRef}
+                  type="text"
+                  defaultValue={kmsRenameTarget.name}
+                  placeholder="new-name (no spaces or slashes)"
+                  className="w-full rounded border px-2 py-1 text-xs font-mono"
+                  style={{
+                    background: "var(--bg-secondary)",
+                    borderColor: "var(--border)",
+                    color: "var(--text-primary)",
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      setKmsRenameTarget(null);
+                    }
+                  }}
+                />
+                <div className="mt-1" style={{ color: "var(--text-secondary)", fontSize: "10px" }}>
+                  Folder is renamed in place; the attachment follows. Wikilinks are unaffected.
+                </div>
+              </div>
+              <div
+                className="px-4 py-3 border-t flex items-center justify-end gap-2"
+                style={{ borderColor: "var(--border)" }}
+              >
+                <button
+                  type="button"
+                  className="text-xs px-3 py-1.5 rounded hover:bg-white/5"
+                  style={{ color: "var(--text-secondary)" }}
+                  onClick={() => setKmsRenameTarget(null)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="text-xs px-3 py-1.5 rounded"
+                  style={{
+                    background: "var(--accent)",
+                    color: "var(--accent-fg, #ffffff)",
+                  }}
+                >
+                  Rename
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
       {/* OKF import/export menu for the "Knowledge" header. Export lists
@@ -1066,40 +1246,56 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
   );
 }
 
-// Context-menu item with a solid accent-colored hover/focus highlight.
-// `hover:bg-white/5` on the raw <button> is barely visible on light
-// themes and under the modal backdrop, so we drive the background
-// from state + pair it with a contrasting foreground colour.
-function CtxMenuItem({
-  onClick,
-  danger,
-  children,
+const THINKING_LEVELS: { level: number | null; label: string; hint: string }[] = [
+  { level: null, label: "auto", hint: "provider default" },
+  { level: 0, label: "0", hint: "off — fastest, no reasoning" },
+  { level: 1, label: "1", hint: "low" },
+  { level: 2, label: "2", hint: "medium" },
+  { level: 3, label: "3", hint: "high — deepest reasoning" },
+];
+
+/// Thinking level pills under the model chip. Same knob as `/thinking`,
+/// mapped per provider by the engine (Anthropic budget, OpenAI effort,
+/// DeepSeek/Qwen switch, Gemini budget/level, Ollama think).
+function ThinkingSelector({
+  level,
+  onChange,
 }: {
-  onClick: () => void;
-  danger?: boolean;
-  children: React.ReactNode;
+  level: number | null;
+  onChange: (lv: number | null) => void;
 }) {
-  const [hot, setHot] = useState(false);
-  const activeBg = danger
-    ? "var(--danger, #e06c75)"
-    : "var(--accent)";
-  const activeFg = "var(--accent-fg, #ffffff)";
-  const idleFg = danger ? "var(--danger, #e06c75)" : "var(--text-primary)";
   return (
-    <button
-      className="w-full text-left px-3 py-1 transition-colors"
-      style={{
-        background: hot ? activeBg : "transparent",
-        color: hot ? activeFg : idleFg,
-      }}
-      onMouseEnter={() => setHot(true)}
-      onMouseLeave={() => setHot(false)}
-      onFocus={() => setHot(true)}
-      onBlur={() => setHot(false)}
-      onClick={onClick}
+    <div
+      className="ml-3 mt-1 flex items-center gap-1"
+      style={{ fontSize: "10px", color: "var(--text-secondary)" }}
+      title="Thinking level — how much the model reasons before answering (also: /thinking 0-3)"
     >
-      {children}
-    </button>
+      <span style={{ opacity: 0.7 }}>think</span>
+      {THINKING_LEVELS.map((opt) => {
+        const active = opt.level === level;
+        return (
+          <button
+            key={opt.label}
+            type="button"
+            onClick={() => onChange(opt.level)}
+            title={opt.hint}
+            className="rounded px-1"
+            style={{
+              fontSize: "10px",
+              lineHeight: "14px",
+              cursor: "pointer",
+              border: "1px solid",
+              borderColor: active ? "var(--accent)" : "var(--border)",
+              background: active ? "var(--bg-tertiary)" : "transparent",
+              color: active ? "var(--text-primary)" : "var(--text-secondary)",
+              fontWeight: active ? 600 : 400,
+            }}
+          >
+            {opt.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

@@ -91,6 +91,17 @@ Sidebar แสดงอยู่ตลอดเวลา และประก�
 - รูปภาพและ PDF — preview แบบ inline
 - ไฟล์ข้อความ/คอนฟิก (`.txt`, `.log`, `.env`, `.conf`, `.ini`, `.toml`, `.sh`, `Dockerfile`, …) — แสดงใน `<pre>` ธรรมดา
 
+**คลิกขวาที่ไฟล์ `.md`** จะได้คำสั่ง KMS สองแบบ ทั้งคู่ archive ไฟล์ต้นฉบับ
+เป็น `sources/<alias>.md` ก่อนเหมือนกัน ต่างกันที่ page ที่ได้:
+
+- **Add to KMS** — agent หลักเรียบเรียง stub page เป็นสรุปหนึ่งหน้า (เห็นเป็น turn ในแชท)
+- **Add to KMS as atomic notes** — research job (ดูความคืบหน้าใน Research sidebar)
+  digest ทั้งเอกสารทีละ window ~10k ตัวอักษร สกัด claim ที่ตรวจ quote แล้วและ entity
+  จากนั้นเขียนหน้า topic ทับ `pages/<alias>.md` บวก **หนึ่ง note ต่อหนึ่งความคิด**
+  ที่ link จากหน้า topic — ผลลัพธ์แบบ zettelkasten เดียวกับ `/research` อ้างอิงไปที่
+  `../sources/<alias>.md` เลือกแบบนี้กับเอกสารยาวที่อยากไล่ดูตาม concept
+  ส่วนสรุปธรรมดาเหมาะกับ note สั้น ๆ
+
 ![โหมด Preview ของแท็บ Files — `script.js` เรนเดอร์ผ่าน CodeMirror พร้อมเลขบรรทัดและการไฮไลต์ syntax ส่วนปุ่ม Edit อยู่มุมขวาบนเพื่อสลับเข้าสู่โหมดแก้ไข](../user-manual-img/ch-04/thClaws-gui-file-viewer.png)
 
 ไฟล์ `.html` จะถูกเรนเดอร์สดใน sandboxed iframe จึงเห็นหน้าเว็บได้เหมือนที่ browser แสดง — style, รูป และ JS แบบ interactive ทำงานได้ครบ
