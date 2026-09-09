@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Run the whole suite against an arbitrary ref on demand. Added so a
+  # release candidate can be verified BEFORE `make cut` pushes main —
+  # the v0.121.0 cut went out on a run that had already failed.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -77,9 +81,32 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
       - uses: actions/download-artifact@v8
+        id: frontend-dist
+        # GitHub's artifact service answers ListArtifacts with a
+        # non-retryable 403 often enough to break a release — it took out
+        # jobs on BOTH repos during the v0.121.0 cut (2026-09-08 16:45Z),
+        # and `download-artifact` gives up immediately on a 403. The
+        # bundle is well under a minute to rebuild, so fall back to
+        # building it rather than failing the job on someone else's
+        # outage. Steps below are skipped entirely on the happy path.
+        continue-on-error: true
         with:
           name: frontend-dist
           path: frontend/dist/
+      - name: Set up pnpm (only when the artifact download failed)
+        if: steps.frontend-dist.outcome == 'failure'
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - name: Set up Node (only when the artifact download failed)
+        if: steps.frontend-dist.outcome == 'failure'
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+      - name: Rebuild frontend/dist (only when the artifact download failed)
+        if: steps.frontend-dist.outcome == 'failure'
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile && pnpm build
       # Warnings logged but not fatal — cleanup tracked separately from launch
       - run: cargo clippy --features gui
 
@@ -108,9 +135,32 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
       - uses: actions/download-artifact@v8
+        id: frontend-dist
+        # GitHub's artifact service answers ListArtifacts with a
+        # non-retryable 403 often enough to break a release — it took out
+        # jobs on BOTH repos during the v0.121.0 cut (2026-09-08 16:45Z),
+        # and `download-artifact` gives up immediately on a 403. The
+        # bundle is well under a minute to rebuild, so fall back to
+        # building it rather than failing the job on someone else's
+        # outage. Steps below are skipped entirely on the happy path.
+        continue-on-error: true
         with:
           name: frontend-dist
           path: frontend/dist/
+      - name: Set up pnpm (only when the artifact download failed)
+        if: steps.frontend-dist.outcome == 'failure'
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - name: Set up Node (only when the artifact download failed)
+        if: steps.frontend-dist.outcome == 'failure'
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+      - name: Rebuild frontend/dist (only when the artifact download failed)
+        if: steps.frontend-dist.outcome == 'failure'
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile && pnpm build
       - run: cargo build --release --features gui --bin thclaws
 
   # Test matrix across major platforms
@@ -148,9 +198,32 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
       - uses: actions/download-artifact@v8
+        id: frontend-dist
+        # GitHub's artifact service answers ListArtifacts with a
+        # non-retryable 403 often enough to break a release — it took out
+        # jobs on BOTH repos during the v0.121.0 cut (2026-09-08 16:45Z),
+        # and `download-artifact` gives up immediately on a 403. The
+        # bundle is well under a minute to rebuild, so fall back to
+        # building it rather than failing the job on someone else's
+        # outage. Steps below are skipped entirely on the happy path.
+        continue-on-error: true
         with:
           name: frontend-dist
           path: frontend/dist/
+      - name: Set up pnpm (only when the artifact download failed)
+        if: steps.frontend-dist.outcome == 'failure'
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - name: Set up Node (only when the artifact download failed)
+        if: steps.frontend-dist.outcome == 'failure'
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+      - name: Rebuild frontend/dist (only when the artifact download failed)
+        if: steps.frontend-dist.outcome == 'failure'
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile && pnpm build
       - run: cargo build --features gui
       - run: cargo test --features gui
         env:
