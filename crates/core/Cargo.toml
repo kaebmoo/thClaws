@@ -1,6 +1,6 @@
 [package]
 name = "thclaws-core"
-version = "0.121.0"
+version = "0.122.0"
 edition = "2021"
 description = "thClaws — native Rust AI agent workspace with CLI and desktop GUI."
 license = "MIT OR Apache-2.0"
@@ -258,6 +258,12 @@ wiremock = "0.6"
 # `server::run` in a background task, connects via tokio-tungstenite,
 # round-trips shell_input → chat_* / terminal_* envelopes.
 tokio-tungstenite = "0.29"
+# Drive `api_v1::router()` through tower's `oneshot` instead of binding
+# a port, so the /v1 surface's status codes, auth headers and error
+# envelopes are covered by unit tests. Both already resolve as
+# transitive deps of axum — no new crates enter the tree.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
 
 # Embed the .ico resource into the Windows PE so Explorer / taskbar /
 # alt-tab pick up the icon. Only pulled in for Windows targets; macOS

@@ -124,9 +124,10 @@ hosted runtime ให้เช่า — ดู bullet ด้านล่าง�
   ([บทที่ 6](ch06-providers-models-api-keys.md))
 - **API พร้อมใช้กับเครื่องมือมาตรฐาน** — `--serve` เปิดทั้ง
   `/v1/chat/completions` (OpenAI-compatible สำหรับ Cursor, Aider, n8n,
-  openai-python) และ `/agent/run` + `/v1/agent/info` (thClaws-native
-  สำหรับ orchestrator) — agent ตัวเดียวให้บริการได้
-  ทั้งคนและซอฟต์แวร์พร้อมกัน
+  openai-python), `/v1/messages` (Anthropic-compatible สำหรับ SDK
+  `anthropic` หรืออะไรก็ตามที่ตั้ง `ANTHROPIC_BASE_URL`) และ
+  `/agent/run` + `/v1/agent/info` (thClaws-native สำหรับ orchestrator)
+  — agent ตัวเดียวให้บริการได้ทั้งคนและซอฟต์แวร์พร้อมกัน
 - **Async webhook delivery** — งานที่รันยาว (deploy, build, multi-step
   research) ส่ง prompt + `x_callback` แล้วปิด connection ได้ thClaws
   จะ POST ผลกลับเมื่อทำเสร็จ ทนต่อ network blip และ orchestrator pod

@@ -2975,3 +2975,74 @@ mod thinking_level_tests {
         assert_eq!(L::update_payload(Some(32000))["thinking"]["name"], "high");
     }
 }
+
+/// The HTTP client every provider streams through.
+///
+/// `reqwest::Client::new()` keeps idle connections forever and imposes
+/// no connect timeout. Over a long-lived process that is a slow leak of
+/// *latency*: the pool hands back a keep-alive socket the upstream shut
+/// hours ago, and with no connect timeout the request waits on the OS
+/// default before anything retries. The user sees a turn that produces
+/// no first token for tens of seconds, on every provider and every
+/// model, until the process restarts.
+///
+/// The three settings below are the same ones the cloud gateway adopted
+/// in June for exactly this symptom (`thclaws-cloud/gateway/src/state.rs`).
+/// A short idle timeout retires sockets before they go stale, TCP
+/// keepalive notices a dead peer, and `connect_timeout` fails a dead
+/// connection fast enough to retry cleanly.
+///
+/// Deliberately NO overall request timeout: a long generation is a
+/// legitimately long response, and a timeout here would sever it.
+pub(crate) fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .tcp_keepalive(std::time::Duration::from_secs(30))
+        .pool_idle_timeout(std::time::Duration::from_secs(20))
+        .build()
+        // A builder failure here means the TLS backend is unusable, in
+        // which case a default client would not work either. Falling
+        // back keeps construction infallible for every caller.
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+#[cfg(test)]
+mod http_client_tests {
+    /// Pins the settings, not the behaviour — reqwest exposes no getters,
+    /// so the guard this test gives is that the builder still accepts the
+    /// configuration and produces a client. The regression it exists for
+    /// is someone replacing a provider's `super::http_client()` with a
+    /// bare `Client::new()` again, which the grep in the sibling test
+    /// below catches.
+    #[test]
+    fn builds() {
+        let _ = super::http_client();
+    }
+
+    /// No provider may construct its own unconfigured client. A default
+    /// `reqwest::Client` keeps idle sockets forever and has no connect
+    /// timeout, which is how first-token latency degrades to tens of
+    /// seconds in a long-lived process.
+    #[test]
+    fn no_provider_uses_a_bare_client() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/providers");
+        let mut offenders = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("providers dir") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            if path.file_name().and_then(|n| n.to_str()) == Some("mod.rs") {
+                continue; // defines the helper + documents the anti-pattern
+            }
+            let src = std::fs::read_to_string(&path).expect("read provider");
+            if src.contains("Client::new()") {
+                offenders.push(path.file_name().unwrap().to_string_lossy().to_string());
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these providers build an unconfigured HTTP client — use super::http_client(): {offenders:?}"
+        );
+    }
+}

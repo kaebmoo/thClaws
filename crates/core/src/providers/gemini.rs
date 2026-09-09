@@ -92,7 +92,7 @@ pub struct GeminiProvider {
 impl GeminiProvider {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: super::http_client(),
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
             next_tool_id: Arc::new(AtomicU64::new(0)),

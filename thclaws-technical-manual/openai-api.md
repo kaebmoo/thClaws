@@ -18,6 +18,21 @@ The webapp + WebSocket are unchanged; the OpenAI surface is additive.
 >
 > Background: [`dev-plan/25-thclaws-as-agent.md`](../dev-plan/25-thclaws-as-agent.md).
 
+> **Anthropic-shaped clients want the sibling endpoint.** `--serve` also
+> speaks the Anthropic Messages API at `POST /v1/messages` — same agent,
+> same toolset, different wire shape — for the `anthropic` SDKs and
+> anything driven by `ANTHROPIC_BASE_URL`. See
+> [`anthropic-api.md`](anthropic-api.md). This endpoint stays strictly
+> OpenAI-shaped; the body is parsed as an OpenAI `ChatRequest` and
+> nothing else.
+>
+> Not to be confused with the *outbound* direction: the thclaws.cloud
+> gateway proxies `/anthropic/*` for calls thClaws makes
+> ([ch27](../user-manual/ch27-thclaws-cloud.md)), and the Enterprise
+> `gateway` policy block always substitutes an OpenAI Chat Completions
+> client — so an org gateway that only speaks Anthropic Messages is not
+> supported there ([provider-gateway.md](provider-gateway.md)).
+
 Source: [`crates/core/src/api_v1/`](../crates/core/src/api_v1/) +
 the Router merge in [`server.rs`](../crates/core/src/server.rs).
 Companion smoke tests: [`tests/openai_compat/`](../tests/openai_compat/).

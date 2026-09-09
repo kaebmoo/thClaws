@@ -30,7 +30,7 @@ pub struct OllamaCloudProvider {
 impl OllamaCloudProvider {
     pub fn new(api_key: String) -> Self {
         Self {
-            client: Client::new(),
+            client: super::http_client(),
             api_key,
             base_url: "https://ollama.com".to_string(),
         }

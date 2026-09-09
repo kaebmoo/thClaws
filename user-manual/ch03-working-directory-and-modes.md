@@ -179,10 +179,11 @@ use cases:
   open a public port).
 - **AI Agent (API server) surface** — `--serve` also exposes
   `/v1/chat/completions` (OpenAI-compatible, so Cursor, Aider, n8n,
-  openai-python can call it as-is) and `/agent/run` +
-  `/v1/agent/info` (thClaws-native, for orchestrators). One agent
-  instance can serve humans and
-  other software at the same time.
+  openai-python can call it as-is), `/v1/messages`
+  (Anthropic-compatible, for the `anthropic` SDKs or anything set up
+  with `ANTHROPIC_BASE_URL`), and `/agent/run` + `/v1/agent/info`
+  (thClaws-native, for orchestrators). One agent instance can serve
+  humans and other software at the same time.
 
 Default bind is `127.0.0.1` only (single-user, localhost loopback).
 To expose to other machines use `--bind 0.0.0.0` and set

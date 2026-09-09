@@ -103,7 +103,7 @@ The same `Agent` loop, `Session`, and `ToolRegistry` back every UX:
 - **Desktop GUI** (`thclaws`) — native window with Terminal, Chat, Files, and optional Team tabs.
 - **CLI REPL** (`thclaws --cli`) — interactive terminal prompt for SSH, headless servers, or zero-GUI workflows.
 - **Non-interactive mode** (`thclaws -p "prompt"`) — single turn, exits. Pipe-friendly for scripts and CI. `-v` for token usage on stderr.
-- **Webapp** (`thclaws --serve --port 7878`) — same engine over WebSocket/HTTP, plus an OpenAI-compatible API at `/v1/chat/completions` so other tools can drive the agent. SSH-tunnel for "Claude Code anywhere" without opening a port.
+- **Webapp** (`thclaws --serve --port 7878`) — same engine over WebSocket/HTTP, plus a drop-in API surface so other tools can drive the agent: **OpenAI-compatible** at `/v1/chat/completions` and **Anthropic-compatible** at `/v1/messages`. Point the openai or anthropic SDK at it, or set `ANTHROPIC_BASE_URL`. SSH-tunnel for "Claude Code anywhere" without opening a port.
 
 ---
 

@@ -72,6 +72,50 @@ fn main() {
         .unwrap_or_default();
     println!("cargo:rustc-env=THCLAWS_EMBEDDED_POLICY_PUBKEY={embedded_b64}");
 
+    // Optional: bake the SIGNED policy into the binary too, so a customer
+    // without endpoint management gets ONE file instead of two. Resolved
+    // like the pubkey above: explicit env var, else the conventional
+    // `~/.config/thclaws/policy.json`.
+    //
+    // This does NOT replace the on-disk file — the runtime still prefers
+    // a file when one exists, which is what lets an org rotate policy by
+    // re-signing rather than rebuilding. The embedded copy is the
+    // fallback for "the file was never placed, or someone deleted it".
+    //
+    // Stored base64 so arbitrary JSON survives the rustc-env round trip.
+    // Not verified here: signature, expiry and binding are all checked at
+    // startup, against the same key, whichever source the policy came from.
+    println!("cargo:rerun-if-env-changed=THCLAWS_POLICY_FILE_EMBED");
+    let policy_path: Option<String> = match std::env::var("THCLAWS_POLICY_FILE_EMBED") {
+        Ok(p) if !p.trim().is_empty() => Some(p),
+        _ => default_policy_path().filter(|p| std::path::Path::new(p).exists()),
+    };
+    let embedded_policy_b64 = match policy_path {
+        Some(path) => {
+            println!("cargo:rerun-if-changed={path}");
+            match std::fs::read(&path) {
+                Ok(bytes) => base64_encode(&bytes),
+                Err(e) => panic!("policy file at {path:?} unreadable: {e}"),
+            }
+        }
+        None => String::new(),
+    };
+    println!("cargo:rustc-env=THCLAWS_EMBEDDED_POLICY_JSON={embedded_policy_b64}");
+
+    // Refuse to start with no policy at all. Set automatically when this
+    // build carries BOTH a key and a policy — the combination that only a
+    // per-customer build produces, and the one where a missing policy can
+    // only mean the file was removed. A maintainer's local build picks up
+    // `policy.pub` alone and stays runnable, which is why the two are not
+    // conflated. `THCLAWS_REQUIRE_POLICY=1` forces it on for a customer
+    // who ships policy by MDM only and embeds nothing.
+    println!("cargo:rerun-if-env-changed=THCLAWS_REQUIRE_POLICY");
+    let forced = std::env::var("THCLAWS_REQUIRE_POLICY")
+        .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    let require = forced || (!embedded_b64.is_empty() && !embedded_policy_b64.is_empty());
+    println!("cargo:rustc-env=THCLAWS_POLICY_REQUIRED={}", require as u8);
+
     // ── Bundled SSO credentials ──────────────────────────────────────
     //
     // Official release builds bake in the OAuth client IDs so the
@@ -149,6 +193,15 @@ fn embed_windows_icon() {}
 /// isn't explicitly set. Mirrors the runtime loader's fallback so the
 /// solo-operator workflow is "drop the file once, both build and runtime
 /// pick it up."
+/// Conventional path for the signed policy at build time, mirroring
+/// `default_pubkey_path`. Same directory the runtime searches last.
+fn default_policy_path() -> Option<String> {
+    let home = std::env::var("HOME")
+        .ok()
+        .or_else(|| std::env::var("USERPROFILE").ok())?;
+    Some(format!("{home}/.config/thclaws/policy.json"))
+}
+
 fn default_pubkey_path() -> Option<String> {
     let home = std::env::var("HOME")
         .ok()

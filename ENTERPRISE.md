@@ -1,10 +1,14 @@
 # thClaws Enterprise Edition — Administrator Guide
 
+> ฉบับภาษาไทย: [`ENTERPRISE-th.md`](ENTERPRISE-th.md) — this English
+> document is authoritative; the Thai one is a translation of it.
+
 > **Status:** Phases 0–4 (policy infrastructure, branding, plugin/skill/MCP
-> allow-list, gateway enforcement, OIDC SSO) **shipped in v0.6.0**. The
-> EE foundation is feature-complete for the four most-asked-for
-> enterprise controls. See the "Status by phase" section for what each
-> phase covers.
+> allow-list, gateway enforcement, OIDC SSO) shipped in **v0.6.0**;
+> `audit` (client-side tool-call records) in **v0.120.0**; `runtime`
+> (forced permission mode, tool deny-list, Remote and `--serve` switches)
+> in the next release. See "Status by phase" for what each covers and
+> where the known limitations are.
 
 This document is for IT/Security administrators evaluating or deploying
 thClaws inside an organization. Read this if you need to:
@@ -18,6 +22,91 @@ thClaws inside an organization. Read this if you need to:
 
 If you're an end user trying to use thClaws, see the main
 [`README.md`](README.md) instead.
+
+---
+
+## Before you start: what this document assumes
+
+Most administrators reading this have deployed managed software before
+but have not deployed an *agent* before. The difference matters, so this
+section states it plainly. Skip it if the vocabulary is already familiar.
+
+### An agent is not a chatbot
+
+A chatbot takes text and returns text; its worst failure is being wrong.
+thClaws is an **agent**: the model's reply can be a request to run a
+tool, the engine runs that tool on the user's machine, the result is fed
+back, and the loop repeats until the model stops asking. Reading files,
+editing them, and running shell commands are ordinary steps in that
+loop.
+
+That is why an organization needs controls here that it would not need
+for an ordinary desktop application. The four questions this document
+answers are the standard ones:
+
+| Question | Answered by |
+|---|---|
+| **Who is allowed to use it?** | the `sso` block |
+| **What can it reach?** | the `gateway`, `plugins` and `runtime` blocks |
+| **Who pays, and how much?** | the `gateway` block |
+| **What happened?** | the `audit` block |
+
+### Terms used throughout
+
+- **Tool / tool call** — a named capability the model can ask the engine
+  to run (`Read`, `Write`, `Edit`, `Bash`, `WebFetch`…). One request to
+  run one is a *tool call*: the unit that gets approved, denied and
+  audited.
+- **Permission mode** — whether a tool call needs a human to say yes:
+  `ask` (prompt before any mutating tool), `auto` (never prompt), `plan`
+  (read-only exploration; mutating tools are blocked at dispatch).
+- **Confinement** — an OS-level restriction on what a shell command may
+  touch, independent of what the command says. Seatbelt on macOS,
+  Landlock on Linux, with bubblewrap as a fallback. Where no confiner is
+  available the command still runs unconfined, and the audit record says
+  so.
+- **Provider** — the company or server hosting a model (Anthropic,
+  OpenAI, Google, or a local runtime such as Ollama).
+- **Gateway** — a server *you* run that speaks the same HTTP API as a
+  provider. Every laptop talks to it instead of to the provider, and it
+  holds the credentials. LiteLLM, Portkey, an Azure OpenAI deployment or
+  something in-house all work.
+- **MCP / plugin / skill** — the three ways capability is added to the
+  agent. An **MCP server** exposes extra tools, either over **stdio** (a
+  local program launched as a subprocess) or **HTTP** (a remote URL); a
+  **plugin** is a packaged bundle installed from a URL or repo; a
+  **skill** is a markdown instruction file that may carry scripts. All
+  three are places third-party code enters the machine, which is why one
+  policy block covers them together.
+- **Session log** — the JSONL file on the user's machine holding the
+  actual conversation content. Distinct from the audit record, which
+  holds facts about tool calls and deliberately no payloads.
+- **IdP** — identity provider: Okta, Microsoft Entra ID, Google
+  Workspace, Auth0, Keycloak, Ping.
+- **SIEM** — where your security team collects logs (Splunk, Sentinel,
+  Elastic, QRadar). The `audit` block's `http` sink posts to one.
+- **Fail-closed / fail-open** — when a control cannot do its job, does
+  the system stop or continue without it? thClaws' policy loader is
+  **fail-closed** (an unverifiable policy stops the program); its audit
+  sinks are **fail-open** (an unreachable SIEM never blocks a user's
+  work, and drops are counted). Both are deliberate.
+
+### What the job actually is
+
+Deploying this is four activities with very different rhythms, and
+confusing them is the usual source of trouble:
+
+| Activity | How often | If it goes wrong |
+|---|---|---|
+| **Hold the signing key** | once, then forever | Total compromise. This is the root of trust |
+| **Build a binary that trusts it** | once per thClaws release | Nobody can install the new version; existing machines keep working |
+| **Write, sign, deploy a policy** | whenever the rules change | Wrong rules apply, or the binary refuses to start |
+| **Watch it in production** | continuously | Expiry lands unnoticed and every desk stops at once |
+
+The asymmetry to design around: **changing a rule is cheap** (edit JSON,
+re-sign, push one file, no reinstall), **changing the key is expensive**
+(a new binary on every machine). Put what you expect to change often in
+the policy, and touch the key once a year.
 
 ---
 
@@ -38,10 +127,10 @@ codebase — the same binary runs in both modes. What turns it into an
 │       ┌───────────┴────────────┐                        │
 │       │                        │                        │
 │       ▼                        ▼                        │
-│  No policy file        Verified policy file             │
-│  → open-core           → org rules apply                │
-│    behavior              (branding, allow-list,         │
-│                          gateway, SSO, etc.)            │
+│  No policy on disk     Verified policy file             │
+│  → embedded policy,    → org rules apply                │
+│    else open-core        (branding, allow-list,         │
+│    behavior              gateway, SSO, etc.)            │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -49,6 +138,9 @@ codebase — the same binary runs in both modes. What turns it into an
 
 - **Without a policy file**, thClaws behaves exactly as it does for
   the open-source community. Zero overhead, zero behavior change.
+  (A build that embeds a policy applies the embedded one instead; a
+  build that requires one refuses to start. See [Distributing without
+  endpoint management](#distributing-without-endpoint-management).)
 - **With a verified policy file**, the binary applies the rules in
   that file and overrides any conflicting user-level settings.
 - **With an unverified or expired policy file**, the binary refuses
@@ -65,7 +157,9 @@ core, commercial wrapper.
 
 ## Deployment model
 
-There are two pieces an organization deploys:
+There are two pieces an organization deploys — or one, if you embed
+the policy in the binary (see [Distributing without endpoint
+management](#distributing-without-endpoint-management)):
 
 ### 1. The thClaws binary (one-time per release)
 
@@ -139,8 +233,10 @@ Verify the embed worked:
 
 ```bash
 strings ./target/release/thclaws | grep -A1 "POLICY_PUBKEY" || true
-# Or run the binary with no policy file — it should still start
-# (today's UX preserved when no policy is present).
+# Or run the binary with no policy file. An open-core build starts
+# normally (today's UX preserved when no policy is present); a build
+# that also embeds a policy applies the embedded one, and a build with
+# THCLAWS_REQUIRE_POLICY=1 and no policy anywhere refuses with exit 2.
 ```
 
 For Production deployments build for each target architecture (Linux
@@ -244,6 +340,48 @@ sudo chown root:root /etc/thclaws/policy.json
 sudo chmod 644 /etc/thclaws/policy.json
 ```
 
+#### Distributing without endpoint management
+
+The two artefacts are the binary (your public key is compiled into it)
+and `policy.json`. Your private key never leaves your control.
+
+MDM is what guarantees the policy file actually arrives. Without it, a
+user who never places the file — or deletes it — runs an unrestricted
+binary, because a build with no policy behaves exactly like open-core.
+
+Build with the signed policy embedded and you ship **one file**:
+
+```bash
+THCLAWS_POLICY_PUBKEY_PATH=policy.pub \
+THCLAWS_POLICY_FILE_EMBED=policy.json \
+  cargo build --release --features gui
+```
+
+| On the machine | Result |
+|---|---|
+| A policy file exists | The file is used |
+| No file, policy embedded | The embedded copy is used |
+| Neither, and this build requires one | Refuses to start, exit 2 |
+| Neither, open-core build | Runs unrestricted |
+
+The file still wins, which is what preserves rotation: re-sign,
+redistribute one file, no rebuild. Every source is verified identically —
+signature, `expires_at` and `binding` are checked whichever way the
+policy arrived.
+
+A build requires a policy when it carries both a key and an embedded
+policy. `THCLAWS_REQUIRE_POLICY=1` forces the requirement for a
+deployment that ships policy by MDM only.
+
+Give an embedded policy a long `expires_at`: renewing one means
+rebuilding and redistributing the binary, and an expired embedded policy
+refuses to start.
+
+This closes the accident of a missing file. It does not stop someone
+determined — the open-core binary is a public download, and no client
+can prevent that. Restricting which binaries may run is a device or
+network control.
+
 ### 6. Verify it loaded
 
 ```bash
@@ -277,12 +415,58 @@ build; blocks for unimplemented phases are accepted but inert. Once
 the corresponding phase ships, the same policy file gains enforcement
 without re-signing.
 
-**v0.5.0 caveats**: Frontend (React) branding strings still render
-"thClaws" literals — backend branding (REPL banner, GUI title, system
-prompt template) is fully active. Wiring the frontend through an IPC
-bridge to the branding module is planned for v0.5.x. Until then,
-end-user-visible "thClaws" strings inside the GUI window are unbranded;
-the window title and CLI surfaces are correctly branded.
+### Known limitations, stated up front
+
+These are all discoverable by a security reviewer, so we would rather
+you hear them from us:
+
+| Limitation | What it means in practice |
+|---|---|
+| A few React GUI strings still render "thClaws" literals | Backend branding (REPL banner, GUI window title, system prompt) is fully active; some strings inside the GUI window are not yet routed through the branding module. Cosmetic |
+| **stdio** MCP servers are not gated by the allow-list | Only HTTP MCP servers are filtered. The contents of `mcp.json` are the administrator's responsibility |
+| `WebFetch` / `WebSearch` are not gateway-routed | They are general web access. Use your network firewall for those |
+| `gateway.fail_closed` is enforced by construction | No code path builds a direct provider while the gateway is active, but there is no separate HTTP-layer guard |
+| Audit sinks are fail-open | An unreachable SIEM never blocks a tool call; drops are counted and shown in `/policy status`. If your posture requires fail-closed auditing, tell us — it is a change request, not a flag |
+| No key revocation without a rebuild | If the signing key leaks, the remedy is a new keypair, a new binary and re-signed policies. There is no remote kill switch today |
+| Live IdP coverage is Google Workspace | Okta and Entra ID are supported and unit-tested, with policy templates. Budget one smoke session against your own tenant |
+| Shared-server (multiuser) deployments force auto-approve | One worker serving many users cannot route approval prompts per person. Enable `audit` there |
+
+---
+
+## Choosing which blocks to turn on
+
+Each block is independent and inert unless the policy enables it, so a
+deployment can be staged. Administrators frequently reach for `plugins`
+first because it is easy to reason about, when `gateway` and `runtime`
+are the two that change the risk picture.
+
+| Block | The question it answers | Turn it on when |
+|---|---|---|
+| `branding` | — (adoption, not security) | Staff should see this as internal infrastructure |
+| `plugins` | What may be *installed*? | You care about third-party code reaching the machine |
+| `gateway` | Where does the data go, and who pays? | Almost always. The highest-value block |
+| `sso` | Who is allowed to use it? | You have an IdP and want joiner/leaver to apply |
+| `audit` | What happened? | Compliance wants evidence, or you run multiuser |
+| `runtime` | What may happen at all? | You need "cannot", not "was logged" |
+
+`audit` answers *what happened*; `runtime` decides *what may happen*.
+Auditors ask for the first, security architects for the second.
+
+### A staged rollout that works
+
+| Stage | Turn on | What you learn |
+|---|---|---|
+| 1. Pilot team | `branding` only | That the build, the MDM push and the policy pipeline all work, with no behaviour change to blame |
+| 2. Pilot | `+ gateway` | Whether the gateway's model allow-list matches real needs. Expect a week of "model X is missing" |
+| 3. Pilot | `+ sso` | Whether the IdP client is registered correctly |
+| 4. Pilot | `+ audit` | Whether your SIEM ingests the schema, and what the volume is |
+| 5. Fleet | the same four | — |
+| 6. Fleet | `+ plugins`, `+ runtime` | The restrictive ones last, once normal usage is known |
+
+Two rules that save incidents: **never introduce a restriction and a new
+binary in the same change** (when something breaks you will not know
+which caused it), and **keep the pilot group on a shorter `expires_at`**
+than the fleet, so expiry fails first on machines you are watching.
 
 ---
 
@@ -305,6 +489,10 @@ mechanism in v0.5.x — invalidation is "stop signing with the old key,
 ship a new binary that doesn't trust it." Sufficient for most
 deployments; CRL/OCSP-style live revocation can be added later if
 demand emerges.
+
+**Order matters in an incident:** ship the new binary **before**
+retiring the old key, or the binaries still in the field cannot verify
+the newly signed policy.
 
 ### Policy expiry
 
@@ -391,6 +579,53 @@ the session JSONL. Design and record schema:
   show in `/policy status` and in the `session_end` record.
 - `enabled: true` with an empty `sinks` list refuses to start, like an
   enabled gateway with no URL.
+
+### Verification checklist
+
+Run through this on a real endpoint — not the build machine — before
+declaring the deployment done. Each line is something that has silently
+failed for someone before.
+
+- [ ] `/policy status` names your policy file, your issuer, and the
+      blocks you expect. If it says `no org policy active`, nothing else
+      on this list means anything.
+- [ ] The expiry shown is the one you intended, and someone owns the
+      calendar entry to re-sign before it.
+- [ ] Rename the policy file once and confirm the machine behaves the
+      way you planned — community behaviour, or a refusal if this build
+      requires a policy. Knowing which of the two you get is the point.
+- [ ] Edit one character of the deployed policy and confirm the binary
+      refuses with `signature verification failed`. Then restore it.
+- [ ] `gateway` on: `/models` lists the gateway's catalogue, and a
+      request appears in the gateway's own log attributed to the
+      signed-in user rather than a shared service account.
+- [ ] `gateway` on: set a personal `OPENAI_API_KEY` in the environment
+      and confirm it is ignored.
+- [ ] `sso` on: `/sso login` completes against the real tenant. Then
+      disable the test account at the IdP and confirm access ends at the
+      next refresh.
+- [ ] `plugins` on: an install from a non-approved host is refused with
+      a message naming the host.
+- [ ] `audit` on: a record reaches the sink, and a `Bash` record carries
+      `confine.enforced: true` on the platforms you support. If it is
+      `false`, the OS confiner is missing from that image — find out why
+      before production.
+- [ ] `runtime` on: `--permission-mode auto` does not override a forced
+      `ask`, and a denied tool is absent from the agent's tool list.
+- [ ] The deployed policy file is root-owned and not writable by the
+      logged-in user.
+
+### Common mistakes
+
+| Mistake | Symptom | Fix |
+|---|---|---|
+| Editing a signed policy in place on the endpoint | `signature verification failed` fleet-wide | Edit the source, re-sign, redeploy |
+| Rebuilding without updating `binding.binary_fingerprint` | `binding mismatch` after a routine update | Recompute the fingerprint, or rely on prefix matching |
+| Testing against a build with no embedded key | "the control does nothing" | `/policy status` first |
+| Registering the IdP client as a Web application | `redirect_uri_mismatch` at first login | Re-register as Native / Desktop / public |
+| Using an Azure v1 issuer | `discovery doc … missing authorization_endpoint` | The issuer must end in `/v2.0` |
+| Assuming the MDM profile applied | One machine group silently unrestricted | Verify on a real endpoint in each group |
+| A short `expires_at` on an *embedded* policy | Fleet-wide stop that needs a rebuild to fix | Long expiry when embedded; short only for files on disk |
 
 ### Updating policy without rebuilding the binary
 
@@ -519,6 +754,10 @@ know "you expected a policy here but it's gone."
 This is the same model as `/etc/sudoers` or any other admin-deployed
 config file: the file system is the trust boundary, not the binary.
 
+If you have no MDM, see [Distributing without endpoint
+management](#distributing-without-endpoint-management) — compiling the
+policy into the binary closes this gap.
+
 **Q: We need feature X that isn't in any policy block. Can you add it?**
 A: Probably yes. We're explicitly building EE features in the open
 core (not behind a paywall), so most enterprise asks land as new
@@ -565,6 +804,8 @@ Run `thclaws-policy-tool <subcommand> --help` for full options.
 | `THCLAWS_POLICY_PUBKEY_PATH` | Override default pubkey path for build embed | Build time |
 | `THCLAWS_POLICY_PUBLIC_KEY` | Pubkey contents (base64/PEM) for runtime override | Runtime |
 | `THCLAWS_POLICY_FILE` | Override default policy.json search path | Runtime |
+| `THCLAWS_POLICY_FILE_EMBED` | Signed policy file to compile into the binary | Build time |
+| `THCLAWS_REQUIRE_POLICY` | `1` = this build refuses to start with no policy anywhere | Build time |
 
 ### File search paths
 
@@ -573,6 +814,7 @@ Policy file (JSON):
   1. $THCLAWS_POLICY_FILE
   2. /etc/thclaws/policy.json
   3. ~/.config/thclaws/policy.json
+  4. (compile-time embedded copy — if the build carries one)
 
 Public key:
   1. (compile-time embedded — highest trust)

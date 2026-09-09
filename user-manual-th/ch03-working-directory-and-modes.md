@@ -182,9 +182,10 @@ engine ตัวเดียวกันถูก expose ผ่าน HTTP + Web
   เปิด port ออกสาธารณะ)
 - **AI Agent (API Server) surface** — `--serve` มาพร้อม
   `/v1/chat/completions` (OpenAI-compatible — ให้ Cursor, Aider,
-  n8n, openai-python เรียกใช้ได้เลย) และ `/agent/run` +
-  `/v1/agent/info` (thClaws-native สำหรับ orchestrator เช่น
-  orchestrator ทั่วไป) — agent ตัวเดียวให้บริการได้ทั้งคน
+  n8n, openai-python เรียกใช้ได้เลย), `/v1/messages`
+  (Anthropic-compatible — ส่ง token มาทาง `x-api-key` หรือ Bearer
+  ก็ได้) และ `/agent/run` + `/v1/agent/info` (thClaws-native สำหรับ
+  orchestrator) — agent ตัวเดียวให้บริการได้ทั้งคน
   และซอฟต์แวร์พร้อมกัน
 
 ค่าเริ่มต้น bind ที่ `127.0.0.1` เท่านั้น (single-user, localhost

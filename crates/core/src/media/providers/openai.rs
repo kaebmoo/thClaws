@@ -26,11 +26,44 @@ use std::time::Duration;
 
 const OPENAI_BASE: &str = "https://api.openai.com";
 
-const MODELS: &[ImageModelInfo] = &[ImageModelInfo {
-    id: "gpt-image-2",
-    aliases: &["openai", "gpt-image", "gpt-image-2"],
-    label: "OpenAI GPT Image 2",
-}];
+// Order matters: the first entry is what `provider: "openai"` with no
+// model resolves to. Flare leads because it is strictly better than
+// GPT Image 2 at the SAME published token price — higher quality, and
+// measurably faster (13s vs 22s for sunburst on an identical low-quality
+// 1024² prompt when these were added).
+//
+// Sunburst is the premium path: same price again, longer generation,
+// tighter control across edits and inpainting. Worth choosing
+// deliberately, not by default.
+//
+// NOTE: OpenAI's `/v1/models` did NOT list either model on release day,
+// while `/v1/images/generations` accepted both. Do not treat that
+// endpoint as the source of truth for availability — and note
+// `scripts/refresh-model-catalogue.py` filters `image` out of the
+// OpenAI listing by design, so this table is hand-maintained.
+const MODELS: &[ImageModelInfo] = &[
+    ImageModelInfo {
+        id: "gpt-image-2.5-flare",
+        aliases: &[
+            "openai",
+            "gpt-image",
+            "flare",
+            "gpt-image-2.5",
+            "gpt-image-2.5-flare",
+        ],
+        label: "OpenAI GPT Image 2.5 Flare",
+    },
+    ImageModelInfo {
+        id: "gpt-image-2.5-sunburst",
+        aliases: &["sunburst", "gpt-image-2.5-sunburst"],
+        label: "OpenAI GPT Image 2.5 Sunburst",
+    },
+    ImageModelInfo {
+        id: "gpt-image-2",
+        aliases: &["gpt-image-2"],
+        label: "OpenAI GPT Image 2",
+    },
+];
 
 pub struct OpenAiImageProvider;
 

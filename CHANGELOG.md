@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.122.0] — 2026-09-09
+
+thClaws' HTTP surface learns to speak Anthropic, and the enterprise documentation is rewritten for readers who are new to enterprise software, to AI agents, or to both.
+
+### Added
+- **`--serve` speaks the Anthropic Messages API.** `POST /v1/messages` runs the same agent as `/v1/chat/completions`, in Anthropic's wire shape — so the `anthropic` Python/TS SDKs, anything driven by `ANTHROPIC_BASE_URL`, and LiteLLM's `anthropic/` provider can drive thClaws with no translation layer. Sync and streaming, the latter in Anthropic's documented six-event sequence (`message_start` → `content_block_start` → `content_block_delta`* → `content_block_stop` → `message_delta` → `message_stop`, no `[DONE]` sentinel). The token may arrive as `x-api-key` — what the SDKs send — or as `Authorization: Bearer`; both are compared in constant time. Top-level `system` is appended to thClaws' own system prompt rather than replacing it, and `stop_reason` is normalised onto Anthropic's four values so a non-Anthropic model underneath can't hand an SDK an enum value it will refuse to deserialise. Tool activity is opt-in via `x_thclaws_tool_events` (the SDKs dispatch on the SSE event name, so an unknown event type is not something a strict client can ignore the way it ignores an unknown JSON key). Both endpoints build the agent through one shared constructor, so their tool surface cannot drift. Reference: `thclaws-technical-manual/anthropic-api.md`.
+- **A from-zero primer for the enterprise documentation.** `docs/enterprise{,-th}/concepts.md` explains what "enterprise software" means as a category and why organisations need it, what an AI agent is mechanically and why that is harder to govern than ordinary software, and signing / gateways / SSO / audit from first principles — then traces one request end to end and lists the things that bite. Every existing chapter gained the prose it had been assuming: the admin guide now opens with what the job actually is, and carries a staged rollout plan, a verification checklist and a common-mistakes table.
+- **`ENTERPRISE-th.md`** — the administrator guide in Thai, section for section with the English original, carried to the mirror by the release sync.
+
+### Changed
+- **`ENTERPRISE.md` states its known limitations up front** — stdio MCP not gated, `WebFetch`/`WebSearch` not gateway-routed, `fail_closed` enforced by construction, audit fail-open, no key revocation without a rebuild, Google-only live IdP coverage, and forced auto-approve on shared-server deployments. Plus guidance on which policy blocks to turn on and in what order.
+- **The public README is now workspace-sourced** (`thclaws/README.md`) and rides `make sync-public`. It had gone sixty minor versions stale living only on the mirror. Community PRs against it now need the same cherry-pick as any other code PR; `make sync-public-check` prints the mirror's recent README authors when the two copies differ.
+
+### Fixed
+- **CI survives the artifact service's 403.** GitHub answered `ListArtifacts` with a non-retryable 403 during the v0.121.0 cut, failing `cargo clippy` on both repos in the same minute. Each job that consumes `frontend-dist` now falls back to rebuilding the bundle in place instead of failing on someone else's outage, and `workflow_dispatch` lets a release candidate be verified before it lands on main.
+
 ## [0.120.0] — 2026-09-06
 
 Enterprise policies gain a client-side audit trail, and teammates are reaped cleanly on Windows.

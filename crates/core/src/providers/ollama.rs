@@ -35,7 +35,7 @@ pub struct OllamaProvider {
 impl OllamaProvider {
     pub fn new() -> Self {
         Self {
-            client: Client::new(),
+            client: super::http_client(),
             base_url: DEFAULT_BASE_URL.to_string(),
         }
     }

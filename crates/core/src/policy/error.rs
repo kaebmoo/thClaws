@@ -8,6 +8,16 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PolicyError {
+    /// This build requires a policy and none was found — not on disk, and
+    /// none embedded. Reached only by an enterprise build; open-core runs
+    /// unrestricted when no policy exists.
+    #[error(
+        "this build requires an organization policy, but none was found \
+         (looked at THCLAWS_POLICY_FILE, /etc/thclaws/policy.json, \
+         ~/.config/thclaws/policy.json, and the built-in copy)"
+    )]
+    PolicyRequired,
+
     /// File was readable but didn't parse as valid JSON.
     #[error("policy file at {path:?} is not valid JSON: {source}")]
     InvalidJson {
@@ -88,6 +98,21 @@ impl PolicyError {
     /// Render the error as a multi-line "refuse to start" message
     /// suitable for printing to stderr at startup.
     pub fn refuse_message(&self) -> String {
+        // The missing-policy case is the one an ordinary employee will
+        // actually hit — usually because the file was deleted — so it
+        // gets instructions they can act on rather than a description of
+        // the failure.
+        if matches!(self, PolicyError::PolicyRequired) {
+            return format!(
+                "thClaws refused to start: this copy is configured for your organization \
+                 and its policy file is missing.\n  {self}\n\n\
+                 Ask whoever provided thClaws for your organization's policy.json, then \
+                 save it as one of:\n  \
+                 /etc/thclaws/policy.json          (all users on this machine)\n  \
+                 ~/.config/thclaws/policy.json     (just you)\n\n\
+                 Nothing else needs installing — the file alone is enough."
+            );
+        }
         format!(
             "thClaws refused to start due to a policy enforcement failure:\n  {self}\n\n\
              If you are an end user, contact your organization's administrator.\n\

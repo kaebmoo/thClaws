@@ -174,8 +174,9 @@ dedicated bullet below and [Chapter 27](ch27-thclaws-cloud.md):
   the provider's catalogue) or swap the whole provider with `/provider`.
 - **API-ready for standard tooling.** `--serve` exposes
   `/v1/chat/completions` (OpenAI-compatible for Cursor, Aider, n8n,
-  openai-python) and `/agent/run` + `/v1/agent/info` (thClaws-native
-  for orchestrators). One agent instance can serve
+  openai-python), `/v1/messages` (Anthropic-compatible for the
+  `anthropic` SDKs), and `/agent/run` + `/v1/agent/info`
+  (thClaws-native for orchestrators). One agent instance can serve
   humans and other software at the same time.
 - **Async webhook delivery.** Long-running runs (deploys, builds,
   multi-step research) send the prompt + `x_callback` and close the

@@ -4,7 +4,7 @@
 //! These were Gemini-only (`tools/gemini_image.rs`); they now resolve a
 //! `model` (+ optional `provider`) to a backend via [`crate::media`] and
 //! call through the `ImageProvider` trait. Backends: `gemini`
-//! (gemini-3.1-flash-image / -pro-image), `openai` (gpt-image-2), `qwen`
+//! (gemini-3.1-flash-image / -pro-image), `openai` (gpt-image-2.5-flare), `qwen`
 //! (qwen-image-2.0/3.0) and `iapp` (iapp-image-generation).
 //!
 //! `text` + `font` are iApp-only passthroughs — literal copy the
@@ -87,7 +87,7 @@ fn build_image_result(bytes: &[u8], path: &std::path::Path) -> ToolResultContent
 
 const MODEL_DESC: &str = "Which image model. Provider is inferred from the model. \
 Gemini: `flash` (default; gemini-3.1-flash-image) or `pro` (gemini-3-pro-image). \
-OpenAI: `gpt-image-2` (alias `openai`). Qwen: `qwen-image-3.0` (alias `qwen-3`) or \
+OpenAI: `flare` (default; gpt-image-2.5-flare — better and faster than gpt-image-2 at the same price) or `sunburst` (gpt-image-2.5-sunburst — premium editing/inpainting, slower). `gpt-image-2` still resolves. Qwen: `qwen-image-3.0` (alias `qwen-3`) or \
 `qwen-image-3.0-pro` — newest, best at dense layouts and small text; `qwen-image-2.0` \
 (alias `qwen`) / `-pro` remain. Strong at multi-image editing + text rendering. \
 iApp: `iapp` (iapp-image-generation) — Thai-first; the only backend that typesets \
@@ -129,7 +129,7 @@ impl Tool for TextToImageTool {
     }
     fn description(&self) -> &'static str {
         "Generate a brand-new image from a text prompt. Multi-provider: \
-         Gemini (`flash` default, `pro`), OpenAI (`gpt-image-2`), Qwen, or iApp \
+         Gemini (`flash` default, `pro`), OpenAI (`flare`/`sunburst`), Qwen, or iApp \
          (`iapp` — Thai-first, typesets Thai copy via `text`/`font`). Output is \
          written to `output/img-<ts>-<sha8>.<ext>` and returned inline as an \
          image block. Requires `imageToolsEnabled: true` in \
@@ -213,7 +213,7 @@ impl Tool for ImageToImageTool {
     }
     fn description(&self) -> &'static str {
         "Edit or transform an existing image using a text prompt (edit mode). \
-         Multi-provider: Gemini (`flash`/`pro`), OpenAI (`gpt-image-2`), iApp \
+         Multi-provider: Gemini (`flash`/`pro`), OpenAI (`flare`/`sunburst`), iApp \
          (`iapp`, Thai text), or Qwen \
          (`qwen-image-3.0`/`-pro`, newest; `qwen-image-2.0`/`-pro` also available — \
          strong at edits + text). Pass \
@@ -339,9 +339,30 @@ mod tests {
 
     #[test]
     fn explicit_provider_overrides_inference() {
+        // Bare `openai` follows the table's first entry, which is the
+        // current best default — not a pinned id. Asserting the id here
+        // is deliberate: changing the default must be a decision someone
+        // makes, not something that drifts in with a table reorder.
         let (p, m) = registry::resolve("openai", "").unwrap();
         assert_eq!(p.id(), "openai");
-        assert_eq!(m, "gpt-image-2");
+        assert_eq!(m, "gpt-image-2.5-flare");
+    }
+
+    #[test]
+    fn gpt_image_2_5_variants_resolve_and_older_ids_still_work() {
+        for (input, want) in [
+            ("flare", "gpt-image-2.5-flare"),
+            ("gpt-image-2.5", "gpt-image-2.5-flare"),
+            ("gpt-image-2.5-flare", "gpt-image-2.5-flare"),
+            ("sunburst", "gpt-image-2.5-sunburst"),
+            ("gpt-image-2.5-sunburst", "gpt-image-2.5-sunburst"),
+            // Anything already pinned to the previous model keeps working.
+            ("gpt-image-2", "gpt-image-2"),
+        ] {
+            let (p, m) = registry::resolve("", input).unwrap();
+            assert_eq!(p.id(), "openai", "{input} went to the wrong provider");
+            assert_eq!(m, want, "{input} resolved wrong");
+        }
     }
 
     #[test]
