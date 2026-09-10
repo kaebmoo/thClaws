@@ -153,6 +153,45 @@ impl Client {
         res.json().await.map_err(|e| format!("decode: {}", e))
     }
 
+    /// Publish a self-contained HTML file to the apps domain.
+    ///
+    /// Unlike every other call here, this one works **without a token**.
+    /// That is the point: "show someone this page" should not require an
+    /// account. The server decides the lifetime from whether the header
+    /// arrived — an hour anonymously, three days signed in — so the
+    /// client just sends what it has and reports what comes back.
+    pub async fn publish_app(&self, html: Vec<u8>) -> Result<PublishedApp, String> {
+        let mut req = self
+            .http
+            .post(format!("{}/api/apps", self.base_url))
+            .header("Content-Type", "text/html; charset=utf-8")
+            .body(html);
+        // Anonymous is a supported mode, not a failure — attach the
+        // token when there is one and carry on when there isn't.
+        if let Some(t) = self.token.as_deref() {
+            req = req.header("Authorization", format!("Bearer {}", t));
+        }
+        let res = req.send().await.map_err(|e| format!("network: {}", e))?;
+        if !res.status().is_success() {
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            // The API answers a refusal (too big, rate-limited, quota)
+            // with a plain sentence meant for the person who typed
+            // /publish — pass it through rather than wrapping it in
+            // status-code noise.
+            let detail = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| v.get("detail").and_then(|d| d.as_str().map(String::from)))
+                .unwrap_or(body);
+            return Err(if status.as_u16() == 400 {
+                detail
+            } else {
+                format!("status {}: {}", status, detail)
+            });
+        }
+        res.json().await.map_err(|e| format!("decode: {}", e))
+    }
+
     pub async fn download(
         &self,
         slug: &str,
@@ -602,6 +641,21 @@ pub struct AgentSummary {
     pub current_version: Option<String>,
     pub purchase_usd: f64,
     pub author_handle: Option<String>,
+}
+
+/// A single-file HTML app published to `<id>.thclaws.app`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishedApp {
+    pub id: String,
+    pub url: String,
+    pub title: Option<String>,
+    pub size_bytes: u64,
+    /// RFC 3339. The link stops working at this instant — 1 hour when
+    /// published without a token, 3 days with one.
+    pub expires_at: String,
+    /// True when no CLI token was sent. Surfaced so the CLI can say why
+    /// the link is short-lived instead of leaving the user to notice.
+    pub anonymous: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

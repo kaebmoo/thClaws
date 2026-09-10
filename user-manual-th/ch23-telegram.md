@@ -5,7 +5,7 @@
 desktop ของคุณ — tool registry เต็มชุด (Bash, Edit, KMS, MCP,
 skills) รันในเครื่อง แล้ว stream คำตอบกลับมาเป็น Telegram message
 tool call ที่ต้อง approve จะโผล่เป็นปุ่ม inline keyboard ให้แตะจาก
-มือถือ (dev-plan/29 Tier 1)
+มือถือ (dev-plan/29)
 
 ## ทำไมเป็น Telegram (และต่างจาก LINE ยังไง)
 
@@ -159,19 +159,91 @@ Tap a button (auto-denies in 60s).
 เพิ่ม bot เข้ากลุ่ม โดย default (`groupPolicy: "allowlist"`) bot จะ
 เพิกเฉยกลุ่มนั้นจนกว่าคุณจะ opt-in เพิ่ม chat id ของกลุ่ม (เลขจำนวน
 เต็มติดลบ) ใต้ `groups` ใน config หรือตั้ง `groupPolicy: "open"` เพื่อ
-เสิร์ฟทุกกลุ่มที่ bot ถูกเพิ่มเข้าไป ใน Tier 1 กลุ่มหนึ่งใช้ session
-เดียว (ไม่แยกราย user) ส่วน **channel** แบบ broadcast และ
-forum-topic routing เป็นเรื่องของ tier ถัดไป (ดูด้านล่าง)
+เสิร์ฟทุกกลุ่มที่ bot ถูกเพิ่มเข้าไป กลุ่มธรรมดาใช้ session เดียวร่วมกัน
+ไม่แยกราย user ทุกคนในห้องจึงคุยอยู่กับบทสนทนาเดียวกัน ยกเว้นกลุ่มแบบ
+**forum** ที่แยก session ตาม topic (ดู [Channel และ forum topic](#channel-และ-forum-topic))
 
 > bot ใน Telegram โดย default จะรับ message ในกลุ่มเฉพาะตอนถูก
 > mention หรือเป็น command ("privacy mode") ปรับใน BotFather
 > (`/setprivacy`) ถ้าอยากให้ bot เห็น text ทั้งหมดในกลุ่ม
 
+## Channel และ forum topic
+
+**channel** ของ Telegram คือรูปแบบกระจายเสียง — agent โพสต์ คนอ่าน
+คอมเมนต์ แต่คอมเมนต์ไม่ได้มาที่ channel Telegram จะ route มันเข้า
+**linked discussion group** ของ channel นั้น ซึ่งมาถึงในรูปข้อความ
+ธรรมดาที่ bot รับมืออยู่แล้ว ผูกทั้งคู่ไว้ใต้ `channels` แล้วทำงานทั้ง
+สองฝั่ง
+
+```json
+"channels": {
+  "-1009876543210": {
+    "linkedDiscussionGroup": "-1001111111111",
+    "agentId": "researcher"
+  }
+}
+```
+
+bot ต้องเป็น **admin ที่มีสิทธิ์โพสต์** บน channel นั้น thClaws จะ probe
+ให้ตอนผูก และรายงาน error ที่ชัดเจน แทนที่จะปล่อยให้การโพสต์ทีหลังพัง
+ด้วย 403 เงียบ ๆ
+
+`agentId` อ้างถึง agent def ใต้ `.thclaws/agents/` — คีย์เดียวกับที่ Agent
+Teams ใช้ ([บทที่ 17](ch17-agent-teams.md)) เป็นตัวกำหนดว่า agent ตัวไหน
+ตอบใน channel นั้นและใน discussion group ของมัน ถ้าไม่ตั้งจะตกกลับไปใช้
+agent หลักของคุณ
+
+### Forum topic
+
+supergroup ที่เปิด **Topics** จะถูกแบ่งเป็น thread และ discussion group
+ของ channel ก็เป็น forum ได้ คอมเมนต์บนโพสต์หนึ่งจึงลงไปอยู่ใน topic
+หนึ่งโดยเฉพาะ ตามมาด้วยสองเรื่อง
+
+- **แต่ละ topic มีบทสนทนาของตัวเอง** session ถูก key ตาม topic สอง topic
+  ในกลุ่มเดียวกันจึงไม่ปนบริบทกัน
+- **แต่ละ topic มี agent ของตัวเองได้** ผ่าน `topicRouting` ที่ key ด้วย
+  เลข topic id ส่วน topic ที่ไม่ได้ระบุจะตกกลับไปใช้ `agentId` ของ channel
+
+```json
+"topicRouting": { "42": { "agentId": "support" } }
+```
+
+topic **General** คือ id `1` และมีความประหลาดนิดหน่อย: ขามาข้อความของมัน
+ไม่มี thread id ติดมาเลย ส่วนขาออก Telegram *ปฏิเสธ* thread id ที่เป็น `1`
+thClaws จัดการให้ทั้งสองกรณีแล้ว — คุณอ้างถึง General ด้วยเลข `1` ใน config
+ได้ตามปกติ
+
+## การตอบแบบ streaming
+
+ค่าเริ่มต้นคือหนึ่ง turn ได้หนึ่งข้อความตอนจบ ถ้าเปิด `streamPreview`
+bot จะโพสต์ placeholder ไว้ก่อนแล้ว **แก้ข้อความนั้นสด ๆ** ระหว่าง agent
+generate คุณจึงเห็นคำตอบทยอยมา
+
+```json
+{ "streamPreview": true }
+```
+
+มีสองข้อจำกัดที่ควรรู้ก่อนเปิด Telegram throttle การแก้ข้อความเดิมซ้ำ ๆ
+อย่างหนัก ระบบจึงรวบการแก้ให้เหลืออย่างมาก **1 ครั้งต่อ 1.2 วินาที** และ
+ข้ามการแก้ที่เนื้อหาไม่เปลี่ยน อีกข้อคือมีเฉพาะ path headless `--telegram`
+ที่รองรับ flag นี้ตอนนี้ — path ที่ผ่าน GUI worker ยังตอบทีเดียวตอนจบ
+เมื่อ turn จบ preview จะถูกแทนที่ด้วยคำตอบสุดท้ายที่จัดรูปแบบและตัดชิ้น
+เรียบร้อยแล้ว
+
 ## การตั้งค่า (Configuration)
 
-state ตอนรันอยู่ใน `~/.config/thclaws/telegram.json` (เขียนโดย GUI
-modal) โปรเจกต์ใส่ block `telegram` ใน `.thclaws/settings.json` ก็ได้
-ฟิลด์:
+state ตอนรันอยู่ใน **`./.thclaws/telegram.json`** — เป็นระดับโปรเจกต์
+resolve จากไดเรกทอรีที่คุณเปิด thClaws และเขียนโดย GUI modal แต่ละ
+โปรเจกต์ (และแต่ละ GUI Shell) จึงเป็นเจ้าของ bot ของตัวเองแยกกัน
+
+> **เดิมอยู่ที่ `~/.config/thclaws/telegram.json`** ตอนนี้ path ระดับ
+> user เป็น legacy แล้ว จะถูกอ่านเป็น fallback เท่านั้น และเฉพาะเมื่อ
+> ตั้ง `THCLAWS_TELEGRAM_USER_CONFIG=1` ระบบไม่ย้ายและไม่ลบให้อัตโนมัติ
+> ถ้าอัปเกรดแล้ว bot หายไป ให้ย้าย `telegram.json` เดิมเข้าไปในโฟลเดอร์
+> `.thclaws/` ของโปรเจกต์ (หรือตั้ง env ตัวนั้นไว้ก่อนระหว่างรอย้าย)
+> การแก้ไฟล์ระดับ user โดยไม่เปิด opt-in จะไม่มีผลอะไรเลย
+
+โปรเจกต์ใส่ block `telegram` ใน `.thclaws/settings.json` ก็ได้ ฟิลด์:
 
 ```json
 {
@@ -181,7 +253,15 @@ modal) โปรเจกต์ใส่ block `telegram` ใน `.thclaws/setti
   "allowFrom": ["111111111"],
   "groupPolicy": "allowlist",
   "groups": { "-1001234567890": { "label": "Team room" } },
-  "outputCeiling": 4000
+  "channels": {
+    "-1009876543210": {
+      "linkedDiscussionGroup": "-1001111111111",
+      "agentId": "researcher",
+      "topicRouting": { "42": { "agentId": "support" } }
+    }
+  },
+  "outputCeiling": 4000,
+  "streamPreview": false
 }
 ```
 
@@ -193,7 +273,9 @@ modal) โปรเจกต์ใส่ block `telegram` ใน `.thclaws/setti
 | `allowFrom` | Telegram user id (string) ที่อนุญาตให้ DM |
 | `groupPolicy` | `allowlist` (default) หรือ `open` |
 | `groups` | chat id ของกลุ่มที่ allowlist → `{ label? }` |
+| `channels` | การผูก broadcast channel → `{ linkedDiscussionGroup?, agentId?, topicRouting? }` — ดู [Channel และ forum topic](#channel-และ-forum-topic) |
 | `outputCeiling` | ลิมิตตัวอักษรต่อ message ก่อนตัดเป็นชิ้น (default 4000) |
+| `streamPreview` | แก้ข้อความเดิมสด ๆ ระหว่าง agent generate แทนการตอบทีเดียวตอนจบ ปิดไว้เป็นค่าเริ่มต้น ใช้ได้เฉพาะ headless `--telegram` |
 
 **ลำดับความสำคัญของ token:** env `TELEGRAM_BOT_TOKEN` → `botToken` ใน
 ไฟล์ → ไม่มี การที่ env ชนะหมายความว่าคุณไม่ต้อง commit token ลงดิสก์
@@ -246,20 +328,26 @@ Telegram adapter status
   code ที่ค้างจะหาย (DM ใหม่เพื่อขอ code ใหม่) user ที่ approve แล้ว
   ค้างอยู่ใน `allowFrom`
 
-## ยังไม่มีใน Tier 1 (มาทีหลัง)
+## อะไรรองรับแล้ว อะไรยังไม่รองรับ
 
-บทนี้อธิบาย Tier 1 — DM + กลุ่มพื้นฐาน + plain text + pairing +
-approval แบบ inline keyboard สิ่งที่วางแผนไว้สำหรับ tier ถัดไป:
+ที่ ship ไปแล้วเกินจาก Tier 1 เดิม (DM + กลุ่ม + text + pairing +
+approval แบบ inline keyboard)
 
-- **broadcast channel + linked discussion group + forum-topic
-  routing** (Tier 2) — "agent research เบื้องหลังโพสต์สถานะไป channel
-  ที่ฉันชำเลืองดู"
-- **streaming preview edit, media (photo/document) up/download, voice
-  transcription, sticker vision, webhook mode, multi-account, proxy
-  support** (Tier 3)
+- **broadcast channel + linked discussion group + forum-topic routing**
+  รวมถึง agent ราย topic และการแยก session ราย topic — ดูข้างบน
+- **streaming preview edit** (`streamPreview` เฉพาะ headless) — ดูข้างบน
+- **รูปภาพขาเข้า** ส่งรูปให้ bot แล้วมันจะดาวน์โหลดมาส่งให้โมเดลเป็น
+  image โดยใช้ caption เป็นข้อความ ไฟล์แนบถูกจำกัดที่ **8 MB** เพราะ
+  bytes จะถูก base64 เข้าไปใน prompt รูปใหญ่เกินไปจึงเปลืองโทเคนและอาจ
+  ชนลิมิตของ provider ก่อนที่จะช่วยอะไรได้ ถ้าดาวน์โหลดพลาด turn ยังรัน
+  ต่อแบบ text อย่างเดียวและบอกเหตุผล ไม่ได้กลืนข้อความคุณทิ้ง
 
-จนกว่าจะถึงตอนนั้น photo/voice/sticker ขาเข้าจะถูกเพิกเฉย (text
-อย่างเดียว)
+ที่ยังไม่รองรับ — จะถูกเพิกเฉย
+
+- **voice message, document และ sticker** อ่านได้เฉพาะรูปภาพ
+- **สื่อขาออก** bot ส่งข้อความอย่างเดียว ไม่ส่งไฟล์หรือรูปกลับให้
+- **webhook mode, multi-account, proxy support** ใช้ long-polling
+  อย่างเดียว และหนึ่ง bot ต่อหนึ่ง thClaws
 
 ## การแก้ปัญหา
 

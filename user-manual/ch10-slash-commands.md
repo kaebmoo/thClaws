@@ -41,6 +41,7 @@ tried first.
 | `/load ID\|NAME` | Load a session by id, id-prefix, or title |
 | `/sessions` | List saved sessions (newest first) |
 | `/rename [NAME]` | Rename the current session (no arg clears the title) |
+| `/fork` | Save the current session, then start a fresh one seeded with a summary of it — a clean context that remembers where you were |
 | `/resume ID\|NAME` | (CLI flag `--resume`) restart with a session loaded |
 | `/clear` | Wipe in-memory history (doesn't touch saved files) |
 | `/history` | Print a message-count summary |
@@ -132,6 +133,7 @@ See [Chapter 20](ch20-research.md) for the full pipeline + KMS layout + flag ref
 | `/permissions MODE` | Switch between `auto` and `ask` mid-session |
 | `/thinking 0-3` | Thinking level for every provider: `0` off · `1` low · `2` medium · `3` high · `auto` (provider default). Also `/thinking <tokens>` for a raw budget. Same knob as the **think** pills under the model chip; persists to `thinkingBudget` |
 | `/tasks` | List tasks / todos the agent has created |
+| `/plan [enter\|exit\|status]` | Toggle plan mode — read-only exploration, then step-gated execution. `status` reports the current plan without changing mode ([Chapter 18](ch18-plan-mode.md)) |
 | `/config key=val` | Override a config value for this session only |
 | `/agent NAME PROMPT` | Spawn a user-driven side-channel subagent (GUI-only, runs concurrently with main) |
 | `/agents` | List active background side-channel agents (id, name, elapsed) |
@@ -141,9 +143,38 @@ See [Chapter 20](ch20-research.md) for the full pipeline + KMS layout + flag ref
 | `/dream [FOCUS]` | Dispatch the built-in dream agent to consolidate KMS (GUI-only) — see [Chapter 9](ch09-knowledge-bases-kms.md) |
 | `/team` | Attach to the team tmux session (or show team status) |
 | `/doctor` | Run diagnostic checks |
+| `/cost` | Session spend, by provider and model |
 | `/usage` | Token usage by provider and model |
 | `/version` | Show the thClaws version and commit SHA |
+| `/system [stats \| grep <pattern>]` | Print the system prompt actually being sent this turn. `stats` shows its size breakdown by section; `grep <pattern>` searches it — useful for "is my AGENTS.md actually in there?" |
+| `/reload` | Re-read settings, skills, agents and MCP config without restarting |
+| `/reload-prompt` | Re-read only the prompt templates |
 | `/quit` | Exit (aliases: `/exit`, `/q`). In the GUI, opens a native confirm dialog ("Quit?") before closing — Cancel keeps the session open |
+
+### Automation
+
+Each of these has its own chapter; the table is the quick reference.
+
+| Command | What it does |
+|---|---|
+| `/schedule list \| show <id> \| run <id> \| pause\|resume <id> \| rm <id>` | Manage recurring (cron / interval / watch) jobs — see [Chapter 19](ch19-scheduling.md) |
+| `/loop <interval> <body>` \| `status` \| `stop` | Repeat a message on a fixed interval (default 5 min). One loop at a time — see [Chapter 31](ch31-loops-and-goals.md) |
+| `/goal start <objective> [--budget-tokens N] [--budget-time T] [--auto] [--require <path>]` \| `status` \| `show` \| `continue` \| `complete` \| `abandon` | A long-running objective the agent audits itself against, with budgets and hard limits. Pairs with `/loop`, or drives itself with `--auto` — see [Chapter 31](ch31-loops-and-goals.md) |
+| `/workflow run <goal> \| exec <path> \| list \| inspect <id> \| resume <id> \| rm <id>` | Author, review and run a multi-agent workflow script — see [Chapter 25](ch25-workflows.md) |
+
+### Cloud and deployment
+
+| Command | What it does |
+|---|---|
+| `/cloud list [--mine] \| get <slug> \| status` | Browse and install agents from the thClaws.cloud catalog — see [Chapter 27](ch27-thclaws-cloud.md) |
+| `/publish <file.html>` | Put a self-contained HTML page on the web at a private URL that expires in 3 days. Needs a thClaws.cloud token and a credit balance above zero |
+| `/deploy [--pod URL] [--token T] [--dry-run] [--full] [--no-restart]` | Ship this workspace's `.thclaws/` to a remote pod. `--dry-run` first |
+
+### Learning
+
+| Command | What it does |
+|---|---|
+| `/quiz <topic\|url\|file>` | Generate a study quiz from a topic, a URL or a local file, then play it |
 
 ### Shell escape
 

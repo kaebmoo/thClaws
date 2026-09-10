@@ -41,6 +41,7 @@ Slash commands คือ control plane ของ thClaws พิมพ์ `/` ต
 | `/load ID\|NAME` | โหลด session ด้วย id, id-prefix หรือชื่อเรื่อง |
 | `/sessions` | แสดงรายการ session ที่บันทึกไว้ (เรียงจากใหม่สุด) |
 | `/rename [NAME]` | เปลี่ยนชื่อ session ปัจจุบัน (หากไม่ใส่ argument จะล้างชื่อเรื่องออก) |
+| `/fork` | บันทึก session ปัจจุบัน แล้วเริ่ม session ใหม่ที่มีสรุปของอันเดิมติดไปด้วย — ได้ context สะอาดที่ยังจำได้ว่าทำอะไรค้างไว้ |
 | `/resume ID\|NAME` | (CLI flag `--resume`) เริ่มใหม่พร้อมโหลด session |
 | `/clear` | ล้างประวัติในหน่วยความจำ (ไม่แตะไฟล์ที่บันทึกไว้) |
 | `/history` | พิมพ์สรุปจำนวนข้อความ |
@@ -130,6 +131,7 @@ Slash commands คือ control plane ของ thClaws พิมพ์ `/` ต
 | `/permissions MODE` | สลับระหว่าง `auto` และ `ask` ระหว่าง session |
 | `/thinking 0-3` | ระดับ thinking ใช้ได้ทุก provider: `0` ปิด · `1` low · `2` medium · `3` high · `auto` (ค่า default ของ provider) หรือ `/thinking <tokens>` ระบุ budget ตรง ๆ ปุ่มเดียวกับ pill **think** ใต้ชื่อโมเดลใน sidebar บันทึกลง `thinkingBudget` |
 | `/tasks` | แสดง task / todo ที่ agent สร้างไว้ |
+| `/plan [enter\|exit\|status]` | สลับโหมดวางแผน — สำรวจแบบอ่านอย่างเดียวก่อน แล้วค่อยลงมือทีละขั้นโดยมีการอนุมัติ `status` บอกสถานะแผนปัจจุบันโดยไม่เปลี่ยนโหมด ([บทที่ 18](ch18-plan-mode.md)) |
 | `/config key=val` | เขียนทับค่า config เฉพาะ session นี้ |
 | `/agent NAME PROMPT` | Spawn user-driven side-channel subagent (GUI-only รันขนานกับ main) |
 | `/agents` | ลิสต์ side-channel agent ที่กำลังทำงาน (id, name, elapsed) |
@@ -139,9 +141,38 @@ Slash commands คือ control plane ของ thClaws พิมพ์ `/` ต
 | `/dream [FOCUS]` | Dispatch built-in dream agent เพื่อ consolidate KMS (GUI-only) — ดู [บทที่ 9](ch09-knowledge-bases-kms.md) |
 | `/team` | เข้าร่วม tmux session ของทีม (หรือแสดงสถานะทีม) |
 | `/doctor` | รันการตรวจสอบวินิจฉัย |
+| `/cost` | ค่าใช้จ่ายของ session นี้ แยกตาม provider และ model |
 | `/usage` | แสดงการใช้ token แยกตาม provider และ model |
 | `/version` | แสดงเวอร์ชัน thClaws และ commit SHA |
+| `/system [stats \| grep <pattern>]` | พิมพ์ system prompt ที่ถูกส่งจริงในเทิร์นนี้ `stats` แสดงขนาดแยกตามส่วน ส่วน `grep <pattern>` ค้นในนั้น — มีประโยชน์เวลาอยากรู้ว่า "AGENTS.md ของเราเข้าไปจริงมั้ย" |
+| `/reload` | อ่าน settings, skill, agent และ MCP config ใหม่โดยไม่ต้องรีสตาร์ท |
+| `/reload-prompt` | อ่านเฉพาะ prompt template ใหม่ |
 | `/quit` | ออกจากโปรแกรม (alias: `/exit`, `/q`) ใน GUI จะเปิด native confirm dialog ("Quit?") ก่อนปิด — กด Cancel เพื่อใช้ session ต่อ |
+
+### งานอัตโนมัติ
+
+แต่ละตัวมีบทของตัวเอง ตารางนี้เป็นแค่รายการอ้างอิงเร็วๆ
+
+| คำสั่ง | ทำอะไร |
+|---|---|
+| `/schedule list \| show <id> \| run <id> \| pause\|resume <id> \| rm <id>` | จัดการงานที่ทำซ้ำ (cron / ตามช่วงเวลา / เฝ้าไฟล์) — ดู [บทที่ 19](ch19-scheduling.md) |
+| `/loop <interval> <body>` \| `status` \| `stop` | ส่งข้อความซ้ำตามช่วงเวลา (ค่าเริ่มต้น 5 นาที) มีได้ทีละหนึ่ง loop — ดู[บทที่ 31](ch31-loops-and-goals.md) |
+| `/goal start <objective> [--budget-tokens N] [--budget-time T] [--auto] [--require <path>]` \| `status` \| `show` \| `continue` \| `complete` \| `abandon` | เป้าหมายระยะยาวที่ agent ตรวจสอบตัวเองว่าถึงหรือยัง มีงบประมาณและเพดานแข็ง ใช้คู่กับ `/loop` หรือให้มันขับตัวเองด้วย `--auto` — ดู[บทที่ 31](ch31-loops-and-goals.md) |
+| `/workflow run <goal> \| exec <path> \| list \| inspect <id> \| resume <id> \| rm <id>` | ให้เขียน ตรวจ แล้วรัน workflow หลาย agent — ดู [บทที่ 25](ch25-workflows.md) |
+
+### Cloud และการ deploy
+
+| คำสั่ง | ทำอะไร |
+|---|---|
+| `/cloud list [--mine] \| get <slug> \| status` | ดูและติดตั้ง agent จากแคตตาล็อก thClaws.cloud — ดู [บทที่ 27](ch27-thclaws-cloud.md) |
+| `/publish <file.html>` | เอาหน้า HTML ไฟล์เดียวขึ้นเว็บที่ URL ส่วนตัว หมดอายุใน 3 วัน ต้องมี token ของ thClaws.cloud และเครดิตมากกว่าศูนย์ |
+| `/deploy [--pod URL] [--token T] [--dry-run] [--full] [--no-restart]` | ส่ง `.thclaws/` ของ workspace นี้ขึ้น pod ปลายทาง ลอง `--dry-run` ก่อนเสมอ |
+
+### การเรียนรู้
+
+| คำสั่ง | ทำอะไร |
+|---|---|
+| `/quiz <topic\|url\|file>` | สร้างแบบทดสอบจากหัวข้อ URL หรือไฟล์ในเครื่อง แล้วเล่นได้เลย |
 
 ### Shell escape
 

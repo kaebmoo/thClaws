@@ -217,6 +217,10 @@ mod tests {
     }
 
     #[test]
+    // 3.14 is a familiar decimal for a formatting assertion, not an
+    // approximation of PI — the test is about "does a fractional float
+    // keep its fraction", and any value would do.
+    #[allow(clippy::approx_constant)]
     fn whole_floats_serialize_as_ints() {
         assert_eq!(data_to_csv_cell(&Data::Float(42.0)), "42");
         assert_eq!(data_to_csv_cell(&Data::Float(3.14)), "3.14");

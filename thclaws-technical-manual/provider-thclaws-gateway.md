@@ -1,6 +1,6 @@
 # thClaws Gateway Overlay
 
-`thclaws_gateway.rs` (`providers/thclaws_gateway.rs`, 203 LOC) is **not a `Provider` impl** — it's a transparent overlay that runs inside `build_provider` (`repl.rs:3188+`) and rewrites the base URL + auth value of cloud providers when the user has toggled the gateway on for that provider and has a gateway access key configured.
+`thclaws_gateway.rs` (`providers/thclaws_gateway.rs`) is **not a `Provider` impl** — it's a transparent overlay that runs inside `build_provider` (`repl.rs:3188+`) and rewrites the base URL + auth value of cloud providers when the user has toggled the gateway on for that provider and has a gateway access key configured.
 
 When active, the provider keeps its native wire format — OpenAI clients still talk Chat Completions, Anthropic still talks `/v1/messages`, Gemini still talks the GenerateContent API. The gateway is a path-prefix-routed reverse proxy that re-injects the real upstream credentials on its side, so the only knobs that change at the desktop are:
 

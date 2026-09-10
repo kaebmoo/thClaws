@@ -225,7 +225,9 @@ struct Cli {
 
     /// Run the Facebook Page Messenger bridge headless (no GUI window).
     /// Connects to the relay using the binding JWT in
-    /// ~/.config/thclaws/messenger.json (pair via the GUI first). The
+    /// ./.thclaws/messenger.json — project-scoped since dev-plan/33
+    /// Tier 2; the legacy ~/.config/thclaws/messenger.json is only read
+    /// when THCLAWS_MESSENGER_USER_CONFIG=1. Pair via the GUI first. The
     /// agent runs locally; Messenger is just the chat surface.
     /// dev-plan/31.
     #[arg(long)]

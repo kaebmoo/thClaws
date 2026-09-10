@@ -1,6 +1,6 @@
 # OpenAI Chat Completions provider
 
-`OpenAIProvider` (`providers/openai.rs`, 1429 LOC) speaks the OpenAI Chat Completions SSE format. It's the workhorse: **16 of the 25 `ProviderKind` variants** route to this single impl with different URL/auth/prefix-strip configurations. The provider was deliberately built with a configuration knob design (`with_base_url` + `with_strip_model_prefix` + `with_api_key_header` + `with_list_models_url`) so adding a new OpenAI-compat aggregator is a `match` arm in `build_provider` rather than a new file.
+`OpenAIProvider` (`providers/openai.rs`) speaks the OpenAI Chat Completions SSE format. It's the workhorse: **17 of the 31 `ProviderKind` variants** route to this single impl with different URL/auth/prefix-strip configurations. The provider was deliberately built with a configuration knob design (`with_base_url` + `with_strip_model_prefix` + `with_api_key_header` + `with_list_models_url`) so adding a new OpenAI-compat aggregator is a `match` arm in `build_provider` rather than a new file.
 
 The 16 variants: `OpenAI` (api.openai.com), `OpenRouter`, `TokenRouter`, `DashScope`, `QwenCloud`, `ZAi`, `LMStudio`, `OpenAICompat`, `DeepSeek`, `ThaiLLM`, `Nvidia`, `Minimax`, `Moonshot`, `XAi`, `Groq`, `OpenCodeGo`.
 

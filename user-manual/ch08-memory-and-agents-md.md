@@ -144,3 +144,10 @@ they cost tokens every turn. Aim for:
 
 For bigger context, put it in a regular file and let the agent `Read`
 it only when relevant.
+
+Those are guidelines, not limits — nothing is truncated. There is one
+real threshold: a single `CLAUDE.md` or `AGENTS.md` of **40 KB or more
+is flagged with a warning** on startup. It still loads in full; the
+warning exists because a file that large is past the size where a model
+reliably attends to all of it, and you probably want to split it or move
+the bulk into a file the agent reads on demand.

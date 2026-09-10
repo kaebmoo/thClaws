@@ -13,12 +13,18 @@ instructions, and uses the scripts you've already written.
 
 ## Discovery
 
-thClaws looks in these dirs on startup (in order):
+thClaws scans five locations on startup. They are listed here in scan
+order, and **later wins on a name collision** — so the most specific
+scope, your project, has the last word:
 
-1. `.thclaws/skills/` — project-scoped
-2. `~/.config/thclaws/skills/` — user global
-3. `~/.claude/skills/` — Claude Code compat
-4. Plugin-contributed dirs
+1. `~/.claude/skills/` — user, Claude Code compatible
+2. `~/.config/thclaws/skills/` — user, thClaws
+3. plugin-contributed dirs — see [Chapter 16](ch16-plugins.md)
+4. `.claude/skills/` — project, Claude Code compatible
+5. `.thclaws/skills/` — project, thClaws (**highest priority**)
+
+A skill named `deploy` in `.thclaws/skills/` therefore overrides one
+with the same name from a plugin or from your user directory.
 
 `/skills` lists what's loaded. `/skill show <name>` prints the full
 SKILL.md content + resolved path.

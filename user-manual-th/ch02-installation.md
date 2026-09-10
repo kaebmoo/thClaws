@@ -66,7 +66,7 @@ local ล้วน ๆ" ด้านล่าง
 >       --manifest-path crates/core/Cargo.toml
 >   ```
 >
-> ต้องใช้ Rust 1.85+ (ทั้งสองแบบ) และ Node.js 20+ กับ pnpm 9+ สำหรับ
+> ต้องใช้ Rust stable ตัวปัจจุบัน (ทั้งสองแบบ) และ Node.js 20+ กับ pnpm 10+ สำหรับ
 > GUI build สำหรับผู้ใช้ส่วนใหญ่เราแนะนำให้ใช้เส้นทางการติดตั้งด้วย
 > download ด้านล่างมากกว่า
 
@@ -345,8 +345,39 @@ $ rm -rf ~/.config/thclaws
 | `thclaws: command not found` หลังติดตั้ง | `~/.local/bin` ไม่ได้อยู่ใน `PATH` — เพิ่ม `export PATH="$HOME/.local/bin:$PATH"` เข้าไปใน rc ของ shell |
 | macOS แจ้งว่า "cannot be opened because the developer cannot be verified" | ทำครั้งเดียว: `xattr -d com.apple.quarantine ~/.local/bin/thclaws` |
 | Linux: `error while loading shared libraries: libssl.so.3` | ติดตั้ง OpenSSL 3 (`sudo apt install libssl3` / `sudo dnf install openssl`) |
+| Linux: `error while loading shared libraries: libwayland-client.so.0` (หรือ `libwebkit2gtk-4.1`) | binary ตัว GUI ต้องใช้ Wayland + WebKit2GTK ตอนรัน distro แบบ desktop มีให้อยู่แล้ว แต่ **เซิร์ฟเวอร์ headless และ container แบบบางไม่มี** เลือกใช้ `thclaws --cli` ที่ไม่ต้องใช้เลย หรือติดตั้งเพิ่ม — ดูด้านล่าง |
 | Windows: PowerShell ไม่รู้จัก `thclaws` | folder ไม่อยู่ใน PATH — เช็ค env var PATH อีกครั้งแล้วเปิด terminal ใหม่ |
 | หน้าต่าง GUI ไม่เปิด | ลอง `thclaws --cli` ก่อน — ถ้ารันได้ แสดงว่า webview ของ GUI ขาด dep ของระบบ (WebKit บน Linux / WebView2 บน Windows) |
+
+
+### ไลบรารีที่ GUI บน Linux ต้องใช้ตอนรัน
+
+binary **ตัว GUI** บน Linux ผูกกับ Wayland และ WebKit2GTK ตอนรัน
+Ubuntu Desktop, Fedora Workstation และรุ่นใกล้เคียงมีอยู่แล้ว แต่ VM
+บนคลาวด์ เครื่อง EC2 หรือ Docker image แบบบางมักไม่มี แล้ว `thclaws`
+จะล้มตั้งแต่เริ่มด้วยข้อความ
+`error while loading shared libraries: libwayland-client.so.0`
+
+มีสองทาง:
+
+**(ก) ใช้โหมด CLI** — ไม่ต้องพึ่งอะไรเลย:
+
+```bash
+$ thclaws --cli
+$ thclaws -p "ไฟล์ src/main.rs ทำอะไร"
+```
+
+**(ข) ติดตั้งไลบรารีเพิ่ม:**
+
+```bash
+# Debian / Ubuntu
+$ sudo apt install libwayland-client0 libwebkit2gtk-4.1-0 libsoup-3.0-0
+
+# Fedora / RHEL
+$ sudo dnf install wayland libsoup3 webkit2gtk4.1
+```
+
+binary `thclaws-cli` ที่อยู่ใน tarball เดียวกันไม่ต้องใช้ไลบรารีพวกนี้เลย
 
 ## ต่อไป
 

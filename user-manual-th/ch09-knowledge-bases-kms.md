@@ -24,7 +24,7 @@ Use case:
 มีสอง scope ที่มีโครงสร้างภายในเหมือนกัน
 
 - **User** — `~/.config/thclaws/kms/<name>/` — ใช้ได้ในทุกโปรเจกต์
-- **Project** — `.thclaws/kms/<name>/` — อยู่กับ repo และตามไปกับ git ถ้าถูก track ไว้
+- **Project** — `.thclaws/state/kms/<name>/` — อยู่กับ repo และตามไปกับ git ถ้าถูก track ไว้
 
 หากมีชื่อซ้ำกันทั้งสอง scope ฝั่ง **project** จะถูกเลือกใช้ก่อน
 
@@ -158,9 +158,9 @@ auto-learn ไม่แตะ KMS ที่คุณ curate เอง (`notes`, 
 - **คุมเสียงรบกวน** — session บางอันไม่ได้มี insight ทุกครั้ง ไม่อยากให้
   KMS หลักโดน pollute
 - **reset ง่าย** — เลิกชอบสิ่งที่ agent เรียนรู้? `rm -rf
-  .thclaws/kms/self_learn/` แล้วเริ่มใหม่
-- **review แยกได้** — `git diff .thclaws/kms/self_learn/` ดูเฉพาะที่
-  agent เรียนรู้จากตัวเอง, `git diff .thclaws/kms/notes/` ดูเฉพาะที่
+  .thclaws/state/kms/self_learn/` แล้วเริ่มใหม่
+- **review แยกได้** — `git diff .thclaws/state/kms/self_learn/` ดูเฉพาะที่
+  agent เรียนรู้จากตัวเอง, `git diff .thclaws/state/kms/notes/` ดูเฉพาะที่
   คุณ curate เอง
 
 ### Setting เพิ่มเติม
@@ -224,6 +224,31 @@ To grep all pages, call `KmsSearch(kms: "notes", pattern: "...")`.
 
 พร้อมทั้งลงทะเบียน `KmsRead` / `KmsSearch` (และ `KmsWrite` / `KmsAppend` / `KmsDelete` ที่ mutate ได้) ไว้ในรายการ tool ให้ด้วย **slash command หลายตัวด้านล่างต้องการ KMS ที่ active อย่างน้อยหนึ่งตัว** — ถ้าไม่มี KMS active เลย tools ของ KMS จะไม่ถูก register เข้า registry และ agent จะแอ็กเซส KMS ใด ๆ ทาง name ไม่ได้
 
+### การดึงข้อมูลอัตโนมัติ (ไม่ต้องบอกว่า "จาก KMS")
+
+index ด้านบนบอก agent ว่า *มีอะไรอยู่บ้าง* แต่การหวังให้โมเดล **ตัดสินใจ**
+ไปเปิดดูเองนั้นไม่แน่นอน — พอถามแบบลำลองหรือถามว่า "เล่าเรื่อง X ให้ฟังหน่อย"
+โมเดล (แม้แต่ตัวเก่งๆ) มักตอบจากข้อมูลที่เทรนมาแล้วข้าม KMS ไป thClaws จึงทำ
+**pre-retrieval แบบกำหนดแน่นอน** เพิ่มอีกชั้น: ทุกข้อความที่ส่งเข้ามา engine
+จะค้น KMS ที่ active อยู่ด้วย keyword ของข้อความนั้นเอง แล้วถ้าเจอที่ตรงมากพอ
+จะแทรกรายการชี้เป้าสั้นๆ ของ **หน้า topic** ที่ตรงกันเข้าไปในเทิร์นนั้นเลย เช่น
+
+```
+## Relevant KMS pages (auto-matched to this message)
+- `KMS: notes/auth-flow` — JWT refresh pattern we use
+```
+
+จากนั้น agent จะอ่านหน้าเหล่านั้นแล้วตอบจากมัน (พร้อมอ้างอิงว่า
+`KMS: <name>/<page>`) แทนที่จะคิดคำตอบใหม่เองหรือไปค้นเว็บซ้ำ กลไกนี้มี
+relevance เป็นตัวคุม การทักทาย งานเขียนโค้ด หรือคำถามนอกเรื่องจึงไม่ดึงอะไร
+มาเลย และหน้าประเภท provenance/audit (session digest, dream log) จะถูกข้ามไป
+เพื่อเลือกหน้า topic ที่เป็นตัวหลักแทน
+
+ผลลัพธ์คือ ถามว่า "เล่าเรื่องคอร์กี้ให้ฟังหน่อย" แล้วได้หน้าที่ *คุณ* เรียบเรียง
+ไว้เองกลับมา ไม่ต้องเติมว่า "จาก KMS" (ต้องมี BM25 search index ซึ่ง binary
+ที่ปล่อยออกมามีให้อยู่แล้ว ส่วนคนที่ `cargo install` เองต้องเปิดด้วย
+`--features kms_search_index`)
+
 ## Slash commands
 
 surface เต็ม จัดกลุ่มตาม purpose
@@ -274,11 +299,11 @@ subcommand ส่วนใหญ่รับ alias สั้น ๆ (เช่�
 created KMS 'meeting-notes' (user) → /Users/you/.config/thclaws/kms/meeting-notes
 
 ❯ /kms new --project design-decisions
-created KMS 'design-decisions' (project) → ./.thclaws/kms/design-decisions
+created KMS 'design-decisions' (project) → ./.thclaws/state/kms/design-decisions
 ```
 
 - scope ดีฟอลต์คือ **user** (ใช้ได้ในทุกโปรเจกต์)
-- ใส่ `--project` เพื่อให้ไปอยู่ใน `.thclaws/kms/` (ติดไปกับ repo)
+- ใส่ `--project` เพื่อให้ไปอยู่ใน `.thclaws/state/kms/` (ติดไปกับ repo)
 
 ### `/kms use NAME`
 
@@ -636,7 +661,7 @@ Alias: `mv`
 
 ### `/kms drop NAME [--force]`
 
-destructive — ลบ directory tree ทั้ง KMS (`<scope>/.thclaws/kms/<name>/`
+destructive — ลบ directory tree ทั้ง KMS (`<scope>/.thclaws/state/kms/<name>/`
 หรือ `~/.config/thclaws/kms/<name>/`) Aliases: `delete`, `rm`
 
 **default เป็น dry-run** ถ้าไม่ใส่ `--force` จะ print ว่าจะลบ
@@ -736,7 +761,7 @@ notes-okf/
 
 ### Import — `/kms import-okf BUNDLE-DIR NAME [--project]`
 
-สร้าง KMS **ใหม่** ชื่อ `NAME` จาก bundle บนดิสก์ ค่าเริ่มต้นเป็น user scope เติม `--project` เพื่อสร้างไว้ใต้ `./.thclaws/kms/` แทน:
+สร้าง KMS **ใหม่** ชื่อ `NAME` จาก bundle บนดิสก์ ค่าเริ่มต้นเป็น user scope เติม `--project` เพื่อสร้างไว้ใต้ `./.thclaws/state/kms/` แทน:
 
 ```
 ❯ /kms import-okf ./partner-bundle partner-knowledge
@@ -888,7 +913,7 @@ Surface สำหรับ mutate KMS ที่ agent (และ `/dream` consol
 
 ```
 /dream                 # consolidate 10 session ล่าสุด
-/dream --all           # consolidate ทุก session ใน .thclaws/sessions/
+/dream --all           # consolidate ทุก session ใน .thclaws/state/sessions/
 /dream auth            # ให้ bias ไปทาง topic "auth"
 /dream --all auth      # รวมกัน
 /agents                # ดู dream ที่ active + เริ่มเมื่อไหร่
@@ -929,12 +954,12 @@ dream agent รัน **5 pass:**
 
 #### การ review ผลลัพธ์
 
-dream agent รันด้วย `permission_mode: auto` — แก้และลบ page ได้โดยไม่ถาม **ขั้นตอน review คือ `git diff`** ถ้า project KMS ของคุณอยู่ใต้ git (ซึ่งควรจะอยู่ — `.thclaws/kms/` ก็แค่ markdown):
+dream agent รันด้วย `permission_mode: auto` — แก้และลบ page ได้โดยไม่ถาม **ขั้นตอน review คือ `git diff`** ถ้า project KMS ของคุณอยู่ใต้ git (ซึ่งควรจะอยู่ — `.thclaws/state/kms/` ก็แค่ markdown):
 
 ```bash
-git diff .thclaws/kms/                        # ดูว่าเปลี่ยนอะไร
-git checkout -- .thclaws/kms/                 # ทิ้งงานของ dream
-git add .thclaws/kms/ && git commit -m "..."  # รับงาน
+git diff .thclaws/state/kms/                        # ดูว่าเปลี่ยนอะไร
+git checkout -- .thclaws/state/kms/                 # ทิ้งงานของ dream
+git add .thclaws/state/kms/ && git commit -m "..."  # รับงาน
 ```
 
 หน้า `dream-YYYY-MM-DD.md` คือคำอธิบายของ agent เองว่าทำอะไรไปบ้าง — อ่านอันนี้ก่อน แล้วค่อย spot-check diff ที่สำคัญ ถ้า summary บอกว่า "no new insights" และเขียน stub page นั่นคือ no-op outcome ที่ valid เช่นกัน
@@ -988,6 +1013,40 @@ subagent ตัวที่สามที่ทำงานบน contradiction
 tool whitelist เหมือน `kms-linker` — `KmsRead, KmsSearch, KmsWrite, KmsAppend, TodoWrite` **ไม่มี `KmsDelete`** (reconcile รักษาทุก claim เดิม ทั้งใน `## History` หรือใน Conflict page) override ที่ `.thclaws/agents/kms-reconcile.md` ได้ถ้าทีมต้องการ policy ต่าง (เช่น "สร้าง Conflict page เสมอ ไม่ auto-resolve")
 
 `/kms reconcile` ค่าเริ่มต้น dry-run; `--apply` ลงมือ arg ตำแหน่งที่สอง narrow pass ลงเฉพาะ topic หรือ entity
+
+### `/kms maintain NAME [--apply]`
+
+**คำสั่งร่มเดียวสำหรับงานดูแลทั้งหมด** แทนที่จะรัน `lint`, `wrap-up --fix`
+และ `reconcile` แยกกัน `/kms maintain` จะส่ง subagent **`kms-maintain`**
+ที่มีมาให้ ไปรันทั้งหมดเป็น pipeline ชุดเดียว บวกอีกขั้นที่ตัวอื่นทำไม่ได้
+(กระทบยอด provenance กับ session ที่ยังมีอยู่จริง) ค่าเริ่มต้นเป็น dry-run
+ใส่ `--apply` เพื่อลงมือจริง ใช้ได้เฉพาะ GUI ชื่อพ้อง: `tidy`
+
+ห้าขั้น เรียงจากงานกลไกที่ถูกที่สุดไปหางานที่ต้องใช้วิจารณญาณมากที่สุด:
+
+1. **แก้โครงสร้าง** — ลิงก์ระหว่าง page ที่เสีย, page ที่หายไปจาก index,
+   frontmatter ที่จำเป็นแต่ขาด (งานของ `lint` + `kms-linker`)
+2. **กระทบยอดแหล่งที่มา** — glob ดู `.thclaws/state/sessions/` ที่มีอยู่จริง
+   แล้วถ้า page ไหนมี `sources:` ชี้ไปยัง `sess-…` ที่คุณลบ session ทิ้งไปแล้ว
+   จะตัดเฉพาะ id ที่ตายออก **ไม่เคยลบ page** — ความรู้ที่สร้างจาก session
+   มีอายุยืนกว่าตัว session เอง ตัดแค่ตัวชี้ที่ห้อยอยู่ (นี่คือเวอร์ชันเต็ม vault
+   ของงานที่ `/dream` ทำแบบค่อยเป็นค่อยไป)
+3. **รีเฟรชของเก่า** — อัปเดต page ที่ถูกติดธง `> ⚠ STALE` จาก re-ingest cascade
+4. **แก้ข้อขัดแย้ง** — รัน `reconcile` เต็มรูปแบบ (claim / entity / decision /
+   ความสดของแหล่ง) ทั้ง vault พร้อม rewrite ที่มี `## History` และหน้า `Conflict —`
+5. **หน้ากำพร้า** — แสดงรายการให้คุณดู ไม่แก้ไขอะไร
+
+```
+❯ /kms maintain notes
+✓ kms-maintain dispatched (id: side-9f3c, dry-run)
+
+[subagent รายงานกลับ เรียงตามลำดับขั้น]
+DRY-RUN — no changes written. Re-run with --apply to execute.
+**Structural fixed (1):** - oauth-flow: relinked to sso-config
+**Sources reconciled (2):** - corgi: dropped dead sess-… (session deleted)
+**Contradictions auto-resolved (1):** - redis-config: cites 2026 spec
+**Orphans (3, untouched):** - …
+```
 
 ## Artifacts ที่จะเห็นใน vault
 
@@ -1102,7 +1161,7 @@ Grep ทำงานกับภาษาไทยได้ทันทีเพ
 ## Troubleshooting
 
 - **"no KMS attached to this session"** — `/kms challenge`, `/kms dump`, `/kms reconcile`, และ `/kms wrap-up --fix` ต้องมี KMS อย่างน้อยหนึ่งตัวอยู่ใน `kms_active` เพื่อให้ tool ของ KMS register error message จะระบุชื่อ KMS เป้าหมาย — รัน `/kms use <name>` ก่อนเพื่อแก้
-- **KMS ไม่ขึ้นใน sidebar** — ตรวจสอบว่าโฟลเดอร์มี `index.md` ที่ใช้ได้ (สร้างเองด้วยมือถ้าคุณปั้น KMS เอง) และอยู่ใน `~/.config/thclaws/kms/` หรือ `.thclaws/kms/`
+- **KMS ไม่ขึ้นใน sidebar** — ตรวจสอบว่าโฟลเดอร์มี `index.md` ที่ใช้ได้ (สร้างเองด้วยมือถ้าคุณปั้น KMS เอง) และอยู่ใน `~/.config/thclaws/kms/` หรือ `.thclaws/state/kms/`
 - **การเปลี่ยนแปลงไม่สะท้อนในคำตอบของ agent** — `index.md` ถูกอ่านตอนเริ่ม turn ดังนั้น turn ที่กำลังรันอยู่จะยังใช้ snapshot ที่ถ่ายไว้ก่อนหน้า ให้เริ่ม turn ใหม่เพื่ออัปเดต
 - error **"no KMS named 'X'"** จาก tool call — ชื่อเป็น case-sensitive และต้องตรงกับชื่อ directory ทุกตัวอักษร ให้ตรวจสอบด้วย `/kms list`
 - **รายการ active เก่าค้างอยู่** — `.thclaws/settings.json` คือ source of truth หาก checkbox บน sidebar ไม่ตรงกับความจริง ให้แก้ไฟล์นี้ด้วยมือ

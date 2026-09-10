@@ -121,6 +121,22 @@ one member's uploads stay isolated — caps at `UPLOAD_MAX_BYTES` (25 MB; the br
 rejects oversize blobs early), and replies `{path, url}` where `url` is a shell-base-
 relative `file-asset/<rel>` the shell can drop into `<img src>` / `<a href>`.
 
+## 6b. Authoring tools
+
+Four model-callable tools in `tools/gui_shell.rs` let an agent build and
+maintain its own shell rather than the user hand-editing files. They are
+**gated** — surfaced lazily by the bundled `gui-shell` skill rather than
+sitting in every system prompt.
+
+| Tool | Approval | What it does |
+|---|---|---|
+| `GuiShellCreate` | no | Scaffolds a new shell folder with a working `window.thclaws.*` bridge |
+| `GuiShellWriteFile` | **yes** | Writes or overwrites one file inside an existing shell. Path-jailed — cannot escape the shell folder |
+| `GuiShellList` | no | Lists installed shells (project + user scope) with id, name and path |
+| `GuiShellRemove` | **yes** | Deletes a shell folder. Irreversible |
+
+The two mutating tools require approval; the two read-only ones do not.
+
 ## 7. Theme & full-screen integration
 
 The host pushes its resolved state as events the bridge intercepts in `handleShellEvent` before fanning out:
@@ -148,7 +164,7 @@ The host pushes its resolved state as events the bridge intercepts in `handleShe
 
 The full allowlist lives in `gui_shell/manifest.rs::ALLOWED_PERMISSION_PREFIXES`.
 
-Publish-safety: `cloud/pack.rs` strips `.thclaws/sessions/`, KMS data, and browser-profile cookies so a shell's local state never leaks into a catalog tarball ([`thclaws-cloud-client.md`](thclaws-cloud-client.md)).
+Publish-safety: `cloud/pack.rs` strips `.thclaws/state/sessions/`, KMS data, and browser-profile cookies so a shell's local state never leaks into a catalog tarball ([`thclaws-cloud-client.md`](thclaws-cloud-client.md)).
 
 ## 9. Preview & doctor
 

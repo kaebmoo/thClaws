@@ -188,6 +188,19 @@ agent จะ connect ผ่าน HTTP/SSE ในการเปิด session �
     …
 ```
 
+### รายการ subcommand ทั้งหมด
+
+| คำสั่ง | ทำอะไร |
+|---|---|
+| `/mcp` | แสดง server ที่ต่ออยู่พร้อม tool ของแต่ละตัว (ด้านบน) |
+| `/mcp add <name> <url-or-command>` | เพิ่ม server — ดูหัวข้อด้านบน |
+| `/mcp remove <name>` | ลบออก ชื่อพ้อง: `/mcp rm` |
+| `/mcp info <name>` | แสดง config, transport และ tool ที่ resolve ได้ของ server ตัวนั้น |
+| `/mcp search <query>` | ค้น MCP server ใน marketplace |
+| `/mcp install <name>` | ติดตั้งจาก marketplace |
+| `/mcp marketplace` | เปิดดูหมวด MCP ของ marketplace |
+| `/mcp reauth <name>` | **รัน OAuth flow ใหม่** สำหรับ remote server ที่ token หมดอายุหรือถูกเพิกถอน ชื่อพ้อง: `/mcp login` — นี่คือทางแก้เมื่อ HTTP server ที่เคยใช้ได้เริ่มตอบ 401 |
+
 ## การตั้งชื่อ tool
 
 ชื่อ tool ของ MCP ทั้งหมดจะถูกเติมนำหน้าด้วยชื่อ server + `__` เช่น

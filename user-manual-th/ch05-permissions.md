@@ -12,6 +12,8 @@ thClaws รัน tool แทนคุณ ทั้งแก้ไฟล์ ร�
 | `ask` | tool ที่เปลี่ยนข้อมูล (Edit, Write, Bash) ขออนุญาตก่อนรัน — tool อ่านอย่างเดียวยังรันอัตโนมัติ | `/permissions ask` หรือ `--permission-mode ask` |
 | `plan` | read-only exploration — tool ที่เปลี่ยนข้อมูลโดน block ทั้งหมด ใช้สำรวจ codebase ก่อนเริ่มทำงานจริง ดู[บทที่ 18](ch18-plan-mode.md) | `/plan enter` (มี slash command แยก ไม่ใช่ผ่าน `/permissions`) |
 | `linegated` | approval prompt route ไปที่ LINE chat บนมือถือแทนที่จะถามบน desktop ดู[บทที่ 21](ch21-line-and-browser-chat.md) | auto-active ตอน LINE bridge connect (pre-mode ของคุณจะถูกเก็บไว้และคืนค่าตอน disconnect); ถ้า override ด้วย `/permissions auto` ไปแล้วและอยากกลับมา ใช้ `/permissions linegated` ขณะที่ bridge ยัง connect อยู่ — ไม่ persist ลง `settings.json` (เพราะเป็น runtime state) |
+| `telegramgated` | แนวคิดเดียวกันสำหรับ Telegram — คำขออนุมัติมาเป็นปุ่ม inline keyboard ในแชท Telegram ดู[บทที่ 23](ch23-telegram.md) | **auto-active อย่างเดียว** — ต่อ Telegram bridge แล้วสลับให้เอง ตัดการเชื่อมต่อแล้วคืนโหมดเดิม สั่ง `/permissions telegramgated` ไม่ได้ ถ้าจะ override ขณะยังต่ออยู่ให้ใช้ `/permissions auto` หรือ `ask` |
+| `messengergated` | เหมือนกันอีกครั้งสำหรับ Facebook Page Messenger คำขออนุมัติมาเป็น quick-reply chip ดู[บทที่ 24](ch24-messenger.md) | **auto-active อย่างเดียว** เหมือน `telegramgated` |
 
 > **ตอน `linegated` active — surface ที่คุณพิมพ์ไม่สำคัญ**
 > ทุก approval prompt route ไปที่ LINE หมด ไม่ว่าจะพิมพ์จาก
@@ -247,6 +249,60 @@ copy / symlink ไฟล์เข้ามาก่อน ไม่มี flag �
 
 ในบริบทของ Agent Teams (บทที่ 17) sandbox จะกว้างขึ้นโดยอัตโนมัติ
 เพื่อรองรับ git worktree — ดูรายละเอียดที่นั่น
+
+## Bash sandbox ระดับ OS (`bash.sandbox`) {#bash-sandbox}
+
+sandbox ของ filesystem ด้านบนคุม **file tool** (Read/Write/Edit) เท่านั้น
+มัน **ไม่ได้** คุมว่าคำสั่ง `Bash` เขียนอะไรลงไหน — `echo x > ~/secret`
+หรือ `python -c "open('/abs','w')"` รัน shell ตรงๆ path แบบเต็มจึงหลุดออกไปได้
+hook `pre_tool_use` (บทที่ 13) *คัดกรอง* คำสั่งได้ แต่การกรองข้อความถูกหลบ
+ได้ด้วยการอำพราง (`$(printf …)`, `eval`)
+
+`bash.sandbox` เพิ่มขอบเขต **ที่ OS บังคับจริง** รอบ subprocess ของ Bash
+(และทุกอย่างที่มันแตกออกไป) — kernel เป็นคนบล็อกการเขียน จึงไม่สนว่าคำสั่ง
+จะเขียนมาแบบไหน:
+
+```json
+{
+  "bash": {
+    "sandbox": "workspace",
+    "sandbox_write_paths": ["/some/extra/dir"],
+    "sandbox_deny_read": ["~/secret-notes"]
+  }
+}
+```
+
+| โหมด | เขียนได้ที่ไหน | ใช้เมื่อ |
+|---|---|---|
+| `workspace` *(ค่าเริ่มต้น)* | workspace + `/tmp` + cache ของ package manager (`~/.cache`, `~/.npm`, `~/.cargo`, …) | งานพัฒนาปกติ — `pip`/`npm`/`cargo` ยังทำงานได้ |
+| `strict` | workspace + `/tmp` เท่านั้น | รันของที่ไม่ไว้ใจ; เครื่องมือที่ cache ไว้ใน `$HOME` จะพัง |
+| `off` | ทุกที่ | ปิดการจำกัดขอบเขต |
+
+**เปิดเป็นค่าเริ่มต้น** (`workspace`) ถ้าจะปิดให้ตั้ง
+`{ "bash": { "sandbox": "off" } }` แต่ถ้าคำสั่งที่ถูกต้องจำเป็นต้องเขียน
+นอก workspace ควรเพิ่ม path นั้นใน `sandbox_write_paths` แทนการปิดทั้งระบบ
+
+ในโหมด `workspace` และ `strict` การ **อ่าน** ไฟล์ความลับ (`~/.ssh`, `~/.aws`,
+`~/.gnupg`, credential ของ cloud, `~/.config/thclaws`) ถูกปฏิเสธด้วย บังคับโดย
+macOS Seatbelt (`sandbox-exec`) และบน Linux คือ **Landlock** (LSM ที่ไม่ต้องใช้
+user namespace จึงทำงานได้บน Ubuntu 24.04 มาตรฐานที่ `bubblewrap` ถูก AppArmor
+บล็อก โดยมี bwrap เป็นตัวสำรอง)
+
+ตัว confiner ถูก **ทดสอบตอนรันจริง** — ถ้าบนเครื่องนี้บังคับใช้ไม่ได้จริง
+thClaws จะเตือนหนึ่งครั้งแล้วถอยไปใช้การคัดกรองคำสั่งอย่างเดียว
+**แทนที่จะทำให้คำสั่งของคุณพัง** การเปิดโหมดนี้จึงปลอดภัยเสมอ: ไม่จำกัดขอบเขต
+ได้ ก็รันแบบไม่จำกัดพร้อมคำเตือน และมีผลกับ Bash ของ **subagent และ workflow**
+เหมือนกัน
+
+> **ข้อจำกัดที่ต้องรู้** v1 คุมเฉพาะ **filesystem** (ไม่ได้คุม network egress)
+> และบน Linux เส้นทาง **Landlock จำกัดเฉพาะการเขียน** — การปฏิเสธการอ่านไฟล์
+> ความลับข้างบนมีผลภายใต้ macOS Seatbelt และตัวสำรอง `bubblewrap` แต่ *ไม่มีผล*
+> ภายใต้ Landlock ซึ่งเป็นเส้นทางที่เครื่อง Linux สมัยใหม่ส่วนใหญ่ใช้
+> ให้ถือว่าการปฏิเสธการอ่านเป็นการรับประกันบน macOS และเป็น best-effort บน Linux
+> — บน Linux ถ้าจะกันความลับจากคำสั่ง shell ให้ใช้ file permission ไม่ใช่อันนี้
+
+> การซ้อนชั้น: hook `pre_tool_use` (นโยบาย/audit แบบยืดหยุ่น บทที่ 13) ทำงานก่อน
+> และปฏิเสธได้ ส่วน `bash.sandbox` คือพื้นแข็งที่รองอยู่ข้างใต้
 
 ## ด่านความปลอดภัยของ MCP
 

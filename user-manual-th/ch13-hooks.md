@@ -83,6 +83,38 @@ Hooks คือคำสั่งเชลล์ที่ทำงานเม�
 }
 ```
 
+## `pre_tool_use` gate — บล็อก tool ได้จริง
+
+`pre_tool_use` ทำงาน **แบบ synchronous ก่อน tool** จึง *ปฏิเสธ* การเรียกได้:
+**`exit 2` คือบล็อก** (tool ไม่ถูกรันเลย และ **stderr** ของ hook จะถูกส่งให้
+โมเดลเป็นเหตุผล) exit code อื่นทั้งหมดคืออนุญาต — hook ที่ทำแค่ audit
+(สูตร logging ด้านบน ซึ่ง exit 0) จึงไม่เคยบล็อกอะไร gate นี้ทำงานกับ tool
+**ทุกตัว** บนทุก surface และถูกสืบทอดไปยัง subagent กับ workflow ด้วย
+
+**อ่านคำสั่งเต็มจาก stdin** `$THCLAWS_TOOL_INPUT` มีเพดาน (~8 KB) คำสั่งยาวๆ
+จึงอาจซ่อนส่วนท้ายไว้พ้นจุดตัดได้ ตัว input เต็มๆ ของ tool (JSON) ที่**ไม่ถูก
+ตัด** ถูกส่งมาทาง **stdin** (พร้อมตั้ง `$THCLAWS_TOOL_INPUT_ON_STDIN=1`)
+ให้ตรวจจากตัวนั้น:
+
+```json
+{
+  "hooks": {
+    "pre_tool_use": "in=$(cat); [ \"$THCLAWS_TOOL_NAME\" = Bash ] && echo \"$in\" | grep -Eq '> *(/etc|/Users/[^/]+/[.])' && { echo 'write outside the project blocked' >&2; exit 2; }; exit 0",
+    "fail_closed": true
+  }
+}
+```
+
+**`fail_closed`** (ค่าเริ่มต้น `false`): เมื่อตั้งเป็น `true` gate จะ **fail
+closed** — timeout, spawn ไม่สำเร็จ หรือผลลัพธ์ใดๆ ที่ไม่ใช่ `exit 0`
+จะกลายเป็น **ปฏิเสธ** แทนที่จะอนุญาต เปิดเมื่อ hook ตัวนี้*คือ*ขอบเขต
+ความปลอดภัยของคุณเอง
+
+> hook ที่คัดกรองข้อความเป็นชั้น **อ่อน** — การอำพราง (`$(printf …)`, `eval`,
+> `base64|sh`) หลบการจับคู่ข้อความได้ ถ้าต้องการขอบเขตแบบแข็งที่ OS บังคับว่า
+> "ห้ามเขียนนอก workspace" ให้ใช้ **`bash.sandbox`**
+> ([บทที่ 5](ch05-permissions.md#bash-sandbox)) รองอยู่ข้างใต้
+
 ## การจัดการความล้มเหลว
 
 Hooks ที่จบด้วย exit status ไม่เป็น 0 จะพิมพ์ warning ไปที่ stderr

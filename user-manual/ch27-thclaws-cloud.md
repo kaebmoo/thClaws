@@ -237,6 +237,70 @@ under *Settings → Hosted keys*) and the **thClaws.cloud gateway**
 (pay-per-use proxy with credit billing — see below). The choice is a
 radio toggle when you create the workspace.
 
+### Syncing a local folder with a hosted workspace
+
+A hosted workspace isn't a dead end you can only reach through the
+browser. You can pair a local folder with one and move files both
+ways — edit on your laptop, push, keep working in the browser; or the
+reverse.
+
+```
+❯ /cloud push                 # local folder → hosted workspace
+❯ /cloud pull                 # hosted workspace → local folder
+❯ /cloud revision             # who is on which revision, and is anything dirty
+```
+
+The first `/cloud push` from an unpaired folder pairs it. After that
+the binding is remembered, so plain `push` / `pull` keep talking to the
+same workspace. Target a different one with `--workspace <slug>`.
+
+**`/cloud revision` is the one to run first.** It is strictly
+read-only — it will not wake a paused workspace, because a status
+question shouldn't cost you a pod resume — and the local half prints
+even when you are offline or logged out:
+
+```
+❯ /cloud revision
+Local:     rev 12, pushed 2 hours ago, pulled 3 days ago
+Cloud:     rev 12
+Changes:   clean — no work changed since rev 12 (3 runtime state file(s) did)
+```
+
+Two things in that output are worth understanding.
+
+**Matching revisions mean the two ends last *agreed* at that number —
+not that the files are identical today.** The `Changes:` line is what
+tells you whether this folder has drifted since then, and it is
+computed by hashing the working tree locally, so it answers even when
+the workspace is asleep.
+
+**Runtime state is counted separately.** Sessions, caches and the rest
+of `.thclaws/state/` rewrite themselves just by the engine running, so
+counting them as "your changes" would mark every folder dirty forever.
+They still ride the next push — they are tallied apart, not hidden.
+
+#### Flags
+
+| Flag | Effect |
+|---|---|
+| `--dry-run` | Report what would move; move nothing |
+| `--delete` | Also remove files on the destination that are gone from the source. Without it, sync only adds and updates |
+| `--force` | Push (or pull) through the **divergence guard** — the check that stops you overwriting changes the other end made since you last agreed |
+| `--force-rebind` | Re-point this folder at a different workspace, bypassing the binding/identity check. **Implies `--force`** — deliberately re-pointing a folder *is* an overwrite |
+| `--workspace <slug>` | Act on a named workspace instead of the bound one |
+
+Start with `--dry-run`. `--force` exists for when you know the other
+end's changes are disposable; if you are not sure, `/cloud pull
+--dry-run` first and look at what you would lose.
+
+> **Not available on a multiuser pod.** These commands act on one
+> directory tree addressed by the process working directory, and a
+> multiuser pod shares one process across every tenant — that
+> directory is the pod root holding everyone's `workspace-<id>/`. A
+> push there would ship every tenant's files into one tenant's
+> workspace; a pull would overwrite all of them. So they refuse
+> outright rather than trying to be clever.
+
 ## Pay-per-use gateway (alternative to BYOK)
 
 For users who don't want to manage Anthropic / OpenAI / Gemini
@@ -336,6 +400,8 @@ slash-command equivalent.
 | `/cloud get <slug>` | In-session slash | Install into the session's cwd (aborts on a non-empty/mismatched folder) |
 | `/cloud publish` | In-session slash | Upload the session's cwd |
 | `/cloud unbind` | In-session slash | Clear `agent.uuid` so the next publish creates a new catalog row |
+| `/cloud revision` (or `rev`) | In-session slash | Local vs cloud sync revision + whether this folder is dirty. Read-only; never wakes a paused workspace |
+| `/cloud push` / `/cloud pull` | In-session slash | Sync files with a hosted workspace. `--dry-run` · `--delete` · `--force` · `--force-rebind` · `--workspace <slug>` |
 | Settings → **Agent identity** | GUI | Edit this folder's `agent.name` / `description` |
 | `/credit` (web) | Catalog UI | Top up + view balance + browse pricing |
 | `/gateway/keys` (web) | Catalog UI | Mint `gw_v1_…` access keys |
@@ -350,7 +416,7 @@ A few things to set expectations:
   via the cloud gateway as a billing proxy. thClaws.cloud doesn't
   train or serve LLMs itself.
 - **Not session storage.** Conversation history stays in
-  `./.thclaws/sessions/` on the machine that ran the agent. The cloud
+  `./.thclaws/state/sessions/` on the machine that ran the agent. The cloud
   stores agent files, not conversations.
 - **Not required.** Every chapter before this one works with no
   network at all. The cloud is additive — install thClaws, write

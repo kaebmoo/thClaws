@@ -1307,6 +1307,7 @@ impl ProjectConfig {
         "schedule",
         "usage",
         "usage.jsonl",
+        "media-jobs.jsonl",
         "cache",
         "browser-profile",
     ];
@@ -3349,6 +3350,7 @@ mod tests {
         std::fs::write(tc.join("sessions/x.jsonl"), "s").unwrap();
         std::fs::create_dir_all(tc.join("kms/ai/pages")).unwrap();
         std::fs::write(tc.join("todos.md"), "- [ ] a").unwrap();
+        std::fs::write(tc.join("media-jobs.jsonl"), "{\"id\":\"j1\"}").unwrap();
         // A config-tier dir must NOT move.
         std::fs::create_dir_all(tc.join("agents")).unwrap();
         std::fs::write(tc.join("agents/a.md"), "x").unwrap();
@@ -3364,8 +3366,14 @@ mod tests {
             std::fs::read_to_string(tc.join("state/todos.md")).unwrap(),
             "- [ ] a"
         );
+        assert_eq!(
+            std::fs::read_to_string(tc.join("state/media-jobs.jsonl")).unwrap(),
+            "{\"id\":\"j1\"}",
+            "in-flight video jobs move with their operation refs intact"
+        );
         assert!(!tc.join("sessions").exists(), "legacy dir removed");
         assert!(!tc.join("todos.md").exists());
+        assert!(!tc.join("media-jobs.jsonl").exists());
         assert!(tc.join("agents/a.md").is_file(), "config dir untouched");
         assert_eq!(wv(tc), Some(2), "stamped v2");
         assert_eq!(

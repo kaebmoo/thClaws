@@ -206,7 +206,7 @@ input path powers takeover on a headless runner.
 ## Cookie-leak prevention on publish
 
 `crates/core/src/cloud/pack.rs`: `STRIP_PREFIXES` includes
-`.thclaws/browser-profile/`, so the on-disk browser profile (cookies,
+`.thclaws/state/browser-profile/`, so the on-disk browser profile (cookies,
 sessions) is **never** bundled into a published catalog agent. The
 profile lives outside the workspace folder for the same reason. See
 [`thclaws-cloud-client.md`](thclaws-cloud-client.md) for the full

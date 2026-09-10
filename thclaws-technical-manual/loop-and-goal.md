@@ -1,12 +1,12 @@
 # `/loop` + `/goal` — iteration scheduler + audit-driven completion
 
-Two interlocking primitives that compose into a Ralph-style overnight builder. `/loop` is the recurring-iteration scheduler (any line, any interval). `/goal` is the structured-objective + completion-audit pattern (one objective, audit-gated termination, model-callable `UpdateGoal` tool). They compose so the canonical use is `/loop 30s /goal continue` — fire the audit prompt every 30 seconds until the model verifies completion + calls `UpdateGoal { status: "complete" }`.
+Two interlocking primitives that compose into a Ralph-style overnight builder. `/loop` is the recurring-iteration scheduler (any line, any interval). `/goal` is the structured-objective + completion-audit pattern (one objective, audit-gated termination, model-callable goal tools). They compose so the canonical use is `/loop 30s /goal continue` — fire the audit prompt every 30 seconds until the model verifies completion and calls `MarkGoalComplete`.
 
-This doc covers: the slash command surface, the `LoopState` + `GoalState` types, the broadcaster pattern, the `UpdateGoal` tool, how `/goal continue` becomes an agent turn (rewrite-before-match), session-scope behavior, the embedded `goal_continue.md` template, the auto-stop logic on terminal goal status, and the testing surface.
+This doc covers: the slash command surface, the `LoopState` + `GoalState` types, the broadcaster pattern, the three goal tools, how `/goal continue` becomes an agent turn (rewrite-before-match), session-scope behavior, the embedded `goal_continue.md` template, the auto-stop logic on terminal goal status, and the testing surface.
 
 **Source modules:**
 - `crates/core/src/goal_state.rs` — `GoalState`, `GoalStatus`, global state + broadcaster, `build_audit_prompt`
-- `crates/core/src/tools/update_goal.rs` — `UpdateGoalTool` (model-callable hook to mark complete/blocked/progress)
+- `crates/core/src/tools/update_goal.rs` — `RecordGoalProgressTool` / `MarkGoalCompleteTool` / `MarkGoalBlockedTool` (model-callable hooks; authority split by intent, Phase C1)
 - `crates/core/src/default_prompts/goal_continue.md` — embedded audit prompt template
 - `crates/core/src/repl.rs` — `SlashCommand::{Loop, LoopStop, LoopStatus, GoalStart, GoalStatus, GoalContinue, GoalComplete, GoalAbandon, GoalShow}`, `parse_loop_subcommand`, `parse_goal_subcommand`, `parse_duration_secs`, CLI dispatch + rewrite-before-match
 - `crates/core/src/shell_dispatch.rs` — GUI dispatch arms; `format_goal_status` / `format_goal_show` helpers
@@ -14,7 +14,7 @@ This doc covers: the slash command surface, the `LoopState` + `GoalState` types,
 
 **Cross-references:**
 - [`agentic-loop.md`](agentic-loop.md) — what `/goal continue` runs (a regular agent turn against the audit prompt)
-- [`built-in-tools.md`](built-in-tools.md) — `UpdateGoal` tool surface
+- [`built-in-tools.md`](built-in-tools.md) — the `Tool` trait and registry these three plug into
 - [`commands.md`](commands.md) — slash command framework
 - [`sessions.md`](sessions.md) — goal state per-session (future: persist to JSONL)
 
@@ -22,7 +22,7 @@ This doc covers: the slash command surface, the `LoopState` + `GoalState` types,
 
 ## 1. Concept
 
-The pair implements the [goal-continue.md design pattern](../docs/goal-continue.md) — disciplined self-audit as the primary exit signal, with iteration timing handled separately.
+The pair implements the **goal-continue design pattern** — disciplined self-audit as the primary exit signal, with iteration timing handled separately.
 
 ```
 USER:  /goal start "ship the auth refactor" --budget-tokens 200000
@@ -34,12 +34,12 @@ LOOP fires every 30s:
   → builds audit prompt from goal_state::current() + template
   → record_iteration(0) — counter bumps
   → agent.run_turn(prompt) — model reads conversation, decides next action
-  → if model calls UpdateGoal { status: "complete" } → goal terminal
+  → if model calls MarkGoalComplete → goal terminal
   → post-turn check sees terminal status → loop auto-stops
   → emits "loop auto-stopped (goal complete)" notice
 ```
 
-If the model returns without calling `UpdateGoal`, the next loop firing happens normally. If `status: "blocked"`, the loop also auto-stops and the user sees the blocker reason.
+If the model returns without calling any of the three, the next loop firing happens normally. `MarkGoalBlocked` also auto-stops the loop, and the user sees the blocker reason.
 
 ## 2. `/loop` slash command
 
@@ -94,7 +94,7 @@ CLI path (in repl.rs run_repl): same shape but uses a tokio mpsc channel (`cli_i
 |---|---|
 | `/goal` (or `/goal status`) | Short status line |
 | `/goal show` | Full goal contents (objective, budgets, last audit, etc.) |
-| `/goal start "<objective>" [--budget-tokens N] [--budget-time T]` | Start a new goal. Registers `UpdateGoal` tool |
+| `/goal start "<objective>" [--budget-tokens N] [--budget-time T]` | Start a new goal. Registers the three goal tools |
 | `/goal continue` (or `next`) | Fire one audit-prompt iteration. Agent turn — composable with `/loop` |
 | `/goal complete [reason]` | Manual override: mark complete, auto-stop loop |
 | `/goal abandon [reason]` | Manual stop with reason, auto-stop loop |
@@ -114,7 +114,7 @@ pub struct GoalState {
     pub tokens_used: u64,                 // running counter (approximate)
     pub iterations_done: u64,
     pub status: GoalStatus,               // Active | Complete | Abandoned | Blocked
-    pub last_audit: Option<String>,       // from UpdateGoal { audit: ... }
+    pub last_audit: Option<String>,       // from RecordGoalProgress / MarkGoalComplete
     pub last_message: Option<String>,     // blocker reason, completion summary
     pub completed_at: Option<u64>,
 }
@@ -155,29 +155,43 @@ The template bakes in the audit discipline:
 - Treat uncertainty as not achieved
 - Distinguish "stopping" from "complete"
 
-The model is instructed to call `UpdateGoal { status: "complete" }` only after auditing every requirement against concrete evidence.
+The model is instructed to call `MarkGoalComplete` only after auditing every requirement against concrete evidence — and when the goal declared `--require` paths, the engine checks them too.
 
-## 5. `UpdateGoal` tool
+## 5. The three goal tools
 
-Model-callable. Schema:
+`UpdateGoal` was **split into three tools** in Phase C1
+(`a8946811`) — `tools/update_goal.rs`. Authority is separated by
+intent: one non-terminal checkpoint, two terminal transitions. The
+point is that a model cannot slip into "mark complete to escape the
+loop" by reusing the routine progress call, because completing is a
+different tool with a different required argument.
 
-```json
-{
-  "status": "complete" | "blocked" | "progress",
-  "audit": "string (optional — what was checked, what evidence)",
-  "reason": "string (optional — for blocked/complete: surface to user)"
-}
-```
+| Tool | Effect | Required arg |
+|---|---|---|
+| `RecordGoalProgress` | Status stays **Active**; stashes the audit, carried into the next iteration as `prior_audit` | `audit` |
+| `MarkGoalComplete` | Status → **Complete**, `completed_at` stamped, loop auto-stops post-turn | `audit` |
+| `MarkGoalBlocked` | Status → **Blocked**, `last_message` set, loop auto-stops post-turn | `reason` (`audit` optional — what was done before the blocker) |
 
-| `status` | Effect |
-|---|---|
-| `complete` | Goal status → Complete, `completed_at` stamped, loop auto-stops post-turn |
-| `blocked` | Goal status → Blocked, `last_message` set, loop auto-stops post-turn |
-| `progress` | Goal status stays Active, `last_audit` updated (carried to next iteration as `prior_audit`) |
+All three mutate global goal state through `goal_state::apply`, which
+fires the broadcaster: the worker persists a snapshot to the session
+JSONL, auto-stops the loop on a terminal status, and refreshes the goal
+sidebar.
 
-`requires_approval = false` — the call mutates ephemeral session state, not disk. The worker validates that a goal is actually active before allowing the call to take effect.
+**Completion is engine-gated, not just model-asserted.** When the goal
+was started with `/goal start --require <paths>`, `MarkGoalComplete`
+checks `missing_required_paths()` first. If any declared artifact is
+absent the goal **stays Active** and the tool returns the list of what
+is missing — the model cannot declare victory over a file it never
+wrote (`53ee1f82`).
 
-Registered at `/goal start`. Not in the default tool registry (the model only sees it when there's an active goal).
+`requires_approval = false` for all three: each call is a small
+in-memory state change, not a disk write. The worker validates that a
+goal is actually active before the call takes effect; with no active
+goal the call returns an explanatory error rather than failing — the
+same shape as `KmsRead` against an unknown KMS.
+
+Registered at `/goal start`, not in the default registry — the model
+only sees them while a goal is active.
 
 ## 6. Composition: `/loop /goal continue`
 
@@ -185,7 +199,7 @@ The full Ralph-style pattern:
 
 ```
 USER:  /goal start "complete the auth refactor" --budget-tokens 200000 --budget-time 1h
-       → goal state initialized, UpdateGoal tool registered
+       → goal state initialized, the three goal tools registered
 USER:  /loop 60s /goal continue
        → tokio task spawned; fires `/goal continue` every 60s
 EVERY 60s:
@@ -196,11 +210,11 @@ EVERY 60s:
        → record_iteration(0)
        → agent.run_turn(audit_prompt)
        → model: reads chat history, picks next action, possibly calls
-                Bash/Read/Edit/Write/Grep/etc., possibly calls UpdateGoal
+                Bash/Read/Edit/Write/Grep/etc., possibly records progress
        → post-turn check: goal_state.status terminal? → abort loop
        → otherwise next 60s firing happens
 EVENTUALLY:
-       → model calls UpdateGoal { status: "complete", audit: "..." }
+       → model calls MarkGoalComplete { audit: "..." }
        → goal_state.status = Complete
        → post-turn: loop aborted, "loop auto-stopped (goal complete)" emitted
 ```
@@ -250,4 +264,4 @@ No GUI E2E tests — the spawn-task / channel plumbing is verified by build + ma
 
 ## 11. Sprint chronology
 
-- **M6.29** (`dev-log/145`) — initial implementation of `/loop`, `/goal`, `UpdateGoal` tool, audit-prompt template, integration auto-stop.
+- **M6.29** (`dev-log/145`) — initial implementation of `/loop`, `/goal`, the then-single `UpdateGoal` tool, audit-prompt template, integration auto-stop. Split into three tools in Phase C1 (`a8946811`).

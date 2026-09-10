@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.123.0] — 2026-09-10
+
+thClaws' user manual is finished: thirty-four chapters, audited against the code chapter by chapter and rebuilt into the online manual. The technical manual gains the internals it was missing, and the pricing layer learns DeepSeek's real cache economics.
+
+### Added
+- **The user manual is complete.** Chapters 1–34 now cover every slash command, every tool, all three providers, the permission modes, the plan driver, one-shot schedules, the shell bridge, and `/cloud` push and pull. The four new chapters — loops and goals, Thai PII masking, thClaws Remote, and managed builds and org policy — land this release, and EN/TH parity holds throughout.
+- **The technical manual documents the internals.** PII masking, media generation, OS-level Bash confinement, and Dynamic Workflows each get their own chapter, closing the coverage gap and fixing the cross-repo links.
+- **DeepSeek cache discounts are modelled from the invoice.** Billing now reflects the cache discount rather than charging every token at the full rate.
+
+### Changed
+- **The manuals are reconciled with the code.** A chapter-by-chapter audit corrected stale paths, wrong command signatures, and out-of-date behaviour claims across both manuals — `/model` no longer forks, parallelism is a fixed 8 rather than `min(16, cores-2)`, and `messenger.json` is project-scoped. The retired Paperclip and Movie Maker chapters are dropped, every pre-workspace-v2 path in the technical manual is corrected, and the technical-manual index is rebuilt as 53 grouped topics.
+
+### Fixed
+- **DeepSeek rates were three weeks stale**, and a negative rate is now treated as a sentinel rather than a price. Cached reads are priced too, so a cached token is no longer billed at the full input rate — on real traffic that is about 2.5x less for the same work.
+- **`deepseek-flash` had a quarter of its real context window.** It is DeepSeek-V4.1-Flash and takes 1M tokens, but LiteLLM has no entry for the new id yet, so it inherited the provider's 262k default and truncated long sessions. Vendor-documented windows now override the aggregator and are re-checked on every catalogue refresh, not only when a model is first added.
+- **A subagent could write outside its `writePaths`** using `..` — `output/../escape.txt` matched the glob `output/**` as a string while the file landed at the workspace root. The destination is now resolved, through `..` and symlinks, before the globs see it. The workspace sandbox was never bypassed. Reported by [@kaebmoo](https://github.com/kaebmoo) (#204).
+- **The SDK/MCP goal tools now bridge to the Claude Code subprocess.**
+- **Video job logs land in the state tier.**
+- **Code findings from the manual audit are closed.** The manual walk-through surfaced real bugs in the engine, fixed here.
+
 ## [0.122.0] — 2026-09-09
 
 thClaws' HTTP surface learns to speak Anthropic, and the enterprise documentation is rewritten for readers who are new to enterprise software, to AI agents, or to both.

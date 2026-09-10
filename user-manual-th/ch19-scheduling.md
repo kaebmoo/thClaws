@@ -1,6 +1,6 @@
 # บทที่ 19 — การตั้งเวลา (Scheduling)
 
-ฟีเจอร์ Scheduling ช่วยให้คุณรัน prompt ของ thClaws ตามตารางเวลาแบบ cron — ทุกเช้าวันจันทร์-ศุกร์ ทุกคืนวันอาทิตย์ หรือทุก 5 นาที — โดยไม่ต้องจำว่าจะต้องพิมพ์ prompt เอง แต่ละงานที่ตั้งเวลาไว้จะ spawn เป็น subprocess `thclaws --print` ของตัวเองในไดเรกทอรีที่กำหนด ดังนั้น 2 schedule ใน 2 โปรเจกต์จึงเป็นอิสระจากกันโดยสมบูรณ์
+ฟีเจอร์ Scheduling ช่วยให้คุณรัน prompt ของ thClaws ตามตารางเวลาแบบ cron — ทุกเช้าวันจันทร์-ศุกร์ ทุกคืนวันอาทิตย์ หรือทุก 5 นาที — หรือยิงครั้งเดียวในเวลาที่คุณระบุ — โดยไม่ต้องจำว่าจะต้องพิมพ์ prompt เอง แต่ละงานที่ตั้งเวลาไว้จะ spawn เป็น subprocess `thclaws --print` ของตัวเองในไดเรกทอรีที่กำหนด ดังนั้น 2 schedule ใน 2 โปรเจกต์จึงเป็นอิสระจากกันโดยสมบูรณ์
 
 ฟีเจอร์นี้แบ่งเป็น 3 ชั้น แต่ละชั้นใช้งานได้เดี่ยว ๆ:
 
@@ -33,19 +33,20 @@ $ thclaws schedule run morning-brief
 
 ## ฟิลด์ของ schedule
 
-แต่ละ schedule เก็บข้อมูลตามฟิลด์ต่อไปนี้ มีเฉพาะ `id`, `cron`, และ `prompt` ที่จำเป็นต้องระบุ
+แต่ละ schedule เก็บข้อมูลตามฟิลด์ต่อไปนี้ `id` กับ `prompt` ต้องระบุเสมอ บวกกับ **trigger อีกหนึ่งตัวเท่านั้น** คือ `cron` (แบบทำซ้ำ) หรือ `run_at` (ยิงครั้งเดียว)
 
 | ฟิลด์ | ต้องระบุ | ค่าดีฟอลต์ | ทำอะไร |
 |---|---|---|---|
 | `id` | ✅ | — | คีย์สำหรับค้นหา ใช้เป็นชื่อโฟลเดอร์ log ด้วย |
-| `cron` | ✅ | — | Cron expression แบบ POSIX 5 ฟิลด์ ตรวจสอบความถูกต้องตอน add |
+| `cron` | trigger | — | Cron expression แบบ POSIX 5 ฟิลด์ สำหรับงานที่ทำซ้ำ ตรวจสอบความถูกต้องตอน add ถ้าเป็น one-shot จะเว้นว่าง |
+| `run_at` | trigger | — | timestamp แบบ RFC 3339 สำหรับงาน **ยิงครั้งเดียว** — ยิงแล้วปิดตัวเองอัตโนมัติ ตั้งผ่าน `--at` หรือ `--in` ดู [Schedule แบบยิงครั้งเดียว](#one-shot) ใช้ร่วมกับ `cron` ไม่ได้ |
 | `prompt` | ✅ | — | ข้อความที่จะส่งให้ `thclaws --print` หลายบรรทัดได้ |
 | `cwd` | — | ไดเรกทอรีปัจจุบัน | Working directory ที่งานจะรัน เป็นตัวกำหนดว่าจะใช้ `.thclaws/settings.json`, sandbox, memory, และ MCP config ระดับโปรเจกต์ของไดเรกทอรีไหน |
-| `model` | — | ตามที่ `cwd` กำหนด | Override ชื่อโมเดล (`gpt-4o`, `claude-sonnet-4-6` ฯลฯ) |
+| `model` | — | ตามที่ `cwd` กำหนด | Override ชื่อโมเดล (`claude-opus-5`, `gpt-5` ฯลฯ) |
 | `maxIterations` | — | ตามที่ `cwd` กำหนด | จำกัดรอบการเรียก tool ของ agent loop |
 | `resumeSession` | — | ไม่ตั้ง (stateless) | **โหมด Heartbeat** (v0.88.0+): ใส่ `--resume-session last` แล้วทุกการยิงจะต่อ session เดียวที่โตขึ้นเรื่อยๆ แทนการเริ่มใหม่ — ดู [Heartbeat](#heartbeats) |
 | `timeoutSecs` | — | 600 (10 นาที) | Timeout แบบ hard ถ้าเกินจะ kill งานและบันทึกเป็น `timed_out` ใส่ `--timeout 0` ตอน add ถ้าไม่ต้องการ timeout |
-| `enabled` | — | `true` | ถ้าเป็น `false` scheduler จะข้าม และ `schedule run` จะปฏิเสธไม่ยิง |
+| `enabled` | — | `true` | ถ้าเป็น `false` scheduler จะข้าม และ `schedule run` จะปฏิเสธไม่ยิง ใส่ `--disabled` ตอน add เพื่อเริ่มแบบปิดไว้ก่อน ส่วน one-shot ที่ยิงแล้วจะตั้งค่าตัวเองเป็น `false` |
 | `watchWorkspace` | — | `false` | ถ้า `true` daemon จะยิงงานเมื่อมีไฟล์ใน `cwd` เปลี่ยนแปลง (debounce ~2 วินาที) — ดู [Trigger เมื่อ workspace เปลี่ยนแปลง](#trigger-เมื่อ-workspace-เปลี่ยนแปลง) ด้านล่าง รองรับเฉพาะ daemon เท่านั้น in-process scheduler จะข้าม flag นี้ |
 | `lastRun` / `lastExit` | — | ไม่มี | ตั้งค่าอัตโนมัติหลังการยิงครั้งแรก |
 
@@ -63,6 +64,29 @@ POSIX แบบ 5 ฟิลด์มาตรฐาน: `minute hour day-of-mont
 | `0 9,13,17 * * *` | 09:00, 13:00, 17:00 ทุกวัน |
 
 รองรับ syntax แบบ range/list (`MON-FRI`, `1,15`) Cron expression จะถูกตรวจสอบตอนรัน `schedule add` — พิมพ์ผิดจะแสดง error ที่อ่านง่ายแทนที่จะล้มเหลวเงียบ ๆ ตอนงานยิง
+
+## Schedule แบบยิงครั้งเดียว — ยิงแล้วจบ {#one-shot}
+
+cron ไม่ใช่รูปทรงที่เหมาะกับ "ทำอันนี้ทีเดียว ตอนหลัง" เพราะ `0 30 15 24 5 *` จะกลับมา match อีกทีเดือนพฤษภาปีหน้า และถ้าเครื่องหลับอยู่ตอน 15:30 ช่องเวลานั้นก็หายไปเฉย ๆ schedule จึงถือเวลายิงแบบสัมบูรณ์แทน cron expression ได้
+
+```sh
+# ระบุเวลาตรง ๆ — RFC 3339 ใส่ offset ได้
+thclaws schedule add ship-reminder \
+  --at "2026-05-24T15:30:00Z" \
+  --prompt "check whether the release notes for v0.99 are still a draft"
+
+# ระบุแบบสัมพัทธ์ — 15m, 2h, 90s, 1d (ตัวเลขเปล่า ๆ นับเป็นวินาที)
+thclaws schedule add recheck-ci \
+  --in 45m \
+  --cwd ~/projects/web \
+  --prompt "check whether the CI run on main went green; if not, summarise the failure"
+```
+
+`--at` กับ `--in` ใช้ร่วมกันเองไม่ได้ และใช้ร่วมกับ `--cron` ก็ไม่ได้ ส่วน `--in` เป็นแค่น้ำตาลที่ถูกแปลงเป็น `run_at = now + duration` ตั้งแต่ตอน add ระบบรับ offset และแปลงเป็น UTC ให้ `2026-05-24T22:30:00+07:00` กับ `2026-05-24T15:30:00Z` จึงหมายถึงขณะเดียวกัน
+
+หลังยิงเสร็จ entry จะตั้ง `enabled` ของตัวเองเป็น `false` แต่ยังอยู่ใน store คุณจึงอ่าน log ดู exit code และเปิดกลับมาใหม่ด้วยมือได้ถ้าอยากให้ยิงซ้ำ มันไม่ได้ถูกลบทิ้ง
+
+**One-shot ตั้งใจให้ catch-up** นี่เป็นที่เดียวที่กฎ skip-catch-up ถูกกลับด้านโดยเจตนา ถ้า daemon ดับอยู่ตอนถึงเวลายิง `run_at` ที่เลยมาแล้วยังนับว่าถึงกำหนดและจะยิงใน tick ถัดไป แทนที่จะหายไปเงียบ ๆ เพราะ one-shot ที่พลาดไปคือ *งาน* ที่พลาด ส่วนนาที cron ที่พลาดไปก็แค่นาทีหนึ่งที่พลาด
 
 ## Heartbeat — schedule ที่จำได้ {#heartbeats}
 
@@ -374,7 +398,9 @@ thclaws schedule add ci-watch \
 | `/schedule rm <id>` (หรือ `remove` / `delete`) | ลบ schedule ออกจาก store |
 | `/schedule install` | Install daemon (launchd plist บน macOS, systemd-user unit บน Linux) |
 | `/schedule uninstall` | หยุด daemon และลบ supervisor entry |
-| `/schedule add` | **GUI:** เปิด modal สำหรับกรอกข้อมูล (อธิบายด้านล่าง) **CLI:** พิมพ์คำแนะนำว่าควรใช้ shell subcommand |
+| `/schedule add` (หรือ `new` / `create`) | **GUI:** เปิด modal สำหรับกรอกข้อมูล (อธิบายด้านล่าง) **CLI:** พิมพ์คำแนะนำว่าควรใช้ shell subcommand |
+| `/schedule preset list` (หรือ `ls`) | แสดง template สำเร็จรูปสำหรับดูแล KMS ทั้งสี่ตัว |
+| `/schedule preset add <id> --kms <name>` | สร้าง schedule จาก template ตัวนั้น — ดู [preset](#preset-สำเร็จรูปสำหรับการดูแล-kms) |
 
 `/schedule add` เป็นคำสั่งเดียวที่ทำงานต่างกันในแต่ละ surface เพราะ prompt หลายบรรทัดและ flag หลายตัวไม่เหมาะกับการพิมพ์บน REPL บรรทัดเดียว ดังนั้น:
 
@@ -422,7 +448,7 @@ Log ของตัว daemon (ข้อความตอน startup, การ
 
 - **ยังไม่รองรับ daemon บน Windows** `schedule install` จะแสดง error "not yet supported on this platform" บน Windows ชั้นที่ 1 และ 2 (manual run + in-process scheduler) ใช้งานข้ามแพลตฟอร์มได้ มีเฉพาะ daemon (และ `watchWorkspace` ที่ผูกกับ daemon) ที่รองรับ macOS/Linux ในตอนนี้
 - **ไม่มี IPC** Daemon และ CLI สื่อสารกันผ่าน store บนดิสก์ + PID file เท่านั้น `schedule logs --tail` แบบ live, `schedule reload`, และ metric ฝั่ง daemon ถูกเลื่อนไว้ การแก้ไข `schedules.json` จะมีผลภายใน 30 วินาทีผ่าน polling tick (ตัว reconciler ของ watcher ก็ใช้ cadence เดียวกันสำหรับการ toggle `watchWorkspace`)
-- **ไม่มีฟิลด์ catch-up policy** Skip-catch-up เป็น policy เดียวที่ใช้ การ catch-up แบบ manual ผ่านการแก้ `lastRun` คือ workaround
+- **ไม่มีฟิลด์ catch-up policy สำหรับ cron** Skip-catch-up เป็น policy เดียวสำหรับ schedule แบบทำซ้ำ การ catch-up แบบ manual ผ่านการแก้ `lastRun` คือ workaround ส่วน one-shot (`--at` / `--in`) เป็นข้อยกเว้นที่ตั้งใจไว้ — `run_at` ที่เลยมาแล้วจะยิงเสมอ
 - **ไม่มี log rotation** `~/.local/share/thclaws/daemon.log` และ `~/.local/share/thclaws/logs/<id>/*.log` จะโตขึ้นเรื่อย ๆ ตอนนี้ให้ตัดทิ้งด้วยมือ หรือเขียน cron entry ของคุณเอง
 - **รายการ ignore ของ workspace watch ถูก hardcode** `.thclaws/`, `.git/`, `node_modules/`, `target/`, `dist/`, `build/`, `.next/`, `.cache/`, `.DS_Store` ยังไม่อ่าน `.gitignore` ถ้าต้องการ control ละเอียดกว่านี้ ให้ใช้ cron อย่างเดียว
 - **ข้อจำกัดของ OS watch** `inotify` ของ Linux ค่าเริ่มต้นรองรับ 8192 watches ต่อ user; recursive watch บน tree ขนาดใหญ่อาจทะลุได้ Daemon จะ log error และข้าม watcher ตัวนั้น schedule อื่นยังทำงานต่อได้

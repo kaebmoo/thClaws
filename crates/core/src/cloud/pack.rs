@@ -33,7 +33,14 @@ pub const STRIP_SUFFIXES: &[&str] = &[".env", ".key", ".pyc", ".log"];
 /// Exact relative paths to drop — runtime artifacts not covered by a prefix or
 /// suffix. Parity with publish.py's STRIP_EXACT, plus `usage.jsonl` (the
 /// telemetry log that sits beside, not inside, `.thclaws/usage/`).
-pub const STRIP_EXACT: &[&str] = &[".thclaws/audit-findings.json", ".thclaws/usage.jsonl"];
+pub const STRIP_EXACT: &[&str] = &[
+    ".thclaws/audit-findings.json",
+    // Both of these moved under `state/` and are caught by STRIP_PREFIXES
+    // on a migrated workspace. The entries stay as the transitional net
+    // for a workspace that has not been opened since the move.
+    ".thclaws/usage.jsonl",
+    ".thclaws/media-jobs.jsonl",
+];
 
 pub fn is_strippable(rel: &Path) -> bool {
     let s = rel.to_string_lossy();

@@ -153,6 +153,9 @@ thClaws redistribute ได้ภายใต้ MIT/Apache ฟอนต์ Noto
 | `TextToVideo` | prompt | prompt → วิดีโอ (async job) |
 | `ImageToVideo` | prompt | ภาพต้นทางเป็นเฟรมแรก + prompt → วิดีโอ (async job) |
 | `MediaJobStatus` | auto | poll งาน async ด้วย `job_id` → `running` / `done` (path) / `failed` |
+| `TextToSpeech` | ถาม | ข้อความ → ไฟล์เสียงพูด (Gemini TTS) เขียนลง `output/` เหมือนสื่ออื่น เสียงบรรยายยาวๆ จึงไม่ต้องวิ่งผ่านบทสนทนา |
+| `RenderSlides` | ถาม | สไลด์ Marp แบบ markdown → PDF + PNG หน้าละไฟล์ ผ่านบริการ slide-render ของ thClaws |
+| `QuizRender` | ถาม | เรนเดอร์แบบทดสอบที่สร้างขึ้นให้กลายเป็น artifact ที่เล่นได้ — เป็นตัวที่ `/quiz` เรียกใช้ |
 
 **โมเดลและ key** (เลือกด้วยอาร์กิวเมนต์ `model`):
 
@@ -167,7 +170,7 @@ thClaws redistribute ได้ภายใต้ MIT/Apache ฟอนต์ Noto
   งานแล้วคืน `job_id` ทันที — ไฟล์ยังไม่พร้อม เรียก
   `MediaJobStatus { job_id }` เพื่อ poll: `running`, `done` (พร้อม path
   `output/…mp4`) หรือ `failed` (พร้อม error ของ provider) สถานะงานถูก
-  บันทึกที่ `.thclaws/media-jobs.jsonl` การ poll จึงรอดแม้รีสตาร์ท
+  บันทึกที่ `.thclaws/state/media-jobs.jsonl` การ poll จึงรอดแม้รีสตาร์ท
 - **คลิปยาว 4–8 วินาที** `resolution` มีผลกับ LTX และ HappyHorse
   (`720P` / `1080P` และ LTX รับ `4K` ด้วย) ส่วน Veo ไม่สนใจค่านี้ —
   render ตามขนาดมาตรฐานของ aspect ที่เลือก
@@ -206,7 +209,7 @@ GUI shell **Media Studio** ที่มีมาให้ (บทที่ 26) �
 | Tool | การอนุมัติ | ทำอะไร |
 |---|---|---|
 | `WatchVideo` | prompt | ให้ model **ดู** วิดีโอในเครื่อง: ดึง key frame แบบรู้ฉาก (เพื่อให้มัน *เห็น* ว่าเกิดอะไรขึ้น) + transcript จาก Whisper เมื่อมี `GROQ_API_KEY` ใช้รีวิว/วิจารณ์คลิป |
-| `FilmCompile` / `FilmGenerate` / `FilmJobStatus` / `FilmJobCancel` / `FilmAssetImport` | `FilmGenerate` + `FilmAssetImport` = prompt | ชุดเครื่องมือ **Movie Maker** — เปลี่ยนบท `.film` เป็นวิดีโอ AI ที่เสร็จสมบูรณ์ ซ่อนอยู่จนกว่าจะติดตั้ง agent Movie Maker (ซึ่งเปิด gate `filmscript`) `FilmGenerate` ต้องมี `budgetUsd` — เป็นทั้งเพดานเงินและการยินยอม ดูบทที่ 29 |
+| `FilmCompile` / `FilmGenerate` / `FilmJobStatus` / `FilmJobCancel` / `FilmAssetImport` | `FilmGenerate` + `FilmAssetImport` = prompt | ชุดเครื่องมือ **Movie Maker** — เปลี่ยนบท `.film` เป็นวิดีโอ AI ที่เสร็จสมบูรณ์ ซ่อนอยู่จนกว่าจะติดตั้ง agent Movie Maker (ซึ่งเปิด gate `filmscript`) `FilmGenerate` ต้องมี `budgetUsd` — เป็นทั้งเพดานเงินและการยินยอม Movie Maker เป็น catalog agent ไม่ใช่ส่วนหนึ่งของ engine ติดตั้งด้วย `/cloud get movie-maker-2` แล้วมันมีคู่มือของตัวเองมาให้ |
 
 ## Tool อื่น ๆ
 
@@ -296,6 +299,7 @@ register เฉพาะตอนมี `/goal` รันอยู่ — ลู
 | `KmsAppend` | prompt | ต่อท้ายหน้าที่มีอยู่ |
 | `KmsDelete` | prompt | ลบหน้า (ทางสุดท้าย; prefer KmsWrite สำหรับ merge หรือ supersede) |
 | `KmsCreate` | auto | Ensure ว่า KMS มีอยู่ (idempotent) `/dream` ใช้ bootstrap `dreams` audit KMS |
+| `KmsWriteSource` | ถาม | บันทึกหน้าเว็บที่ดึงมาลงโฟลเดอร์ `sources/` ของ KMS เป็นสำเนา **offline** — คือ input ชั้นที่ 1 ที่หน้า synthesis อ้างอิงถึง เก็บไว้เพื่อให้หลักฐานของหน้ายังอยู่แม้ URL ต้นทางจะหายไป |
 
 เครื่องมือเหล่านี้ **ลงทะเบียนเสมอ** ไม่ว่าจะมี KMS active หรือไม่ ก่อน fix นี้การลงทะเบียนถูก gate ด้วย `kms_active` ที่ไม่ว่าง ซึ่งทำให้ `/dream` และ side-channel agent ตัวอื่น bootstrap audit KMS จากศูนย์ไม่ได้ Agent จะเห็น `index.md` ของ KMS ที่ active แต่ละตัวใน system prompt และเรียกเครื่องมือเหล่านี้เพื่อดึงหน้าที่ต้องการ
 

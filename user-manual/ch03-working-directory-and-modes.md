@@ -218,7 +218,7 @@ LINE / browser bridge built on top of `--serve`.
 
 ## Sessions
 
-Every turn is auto-saved to `./.thclaws/sessions/<id>.jsonl`. Sessions
+Every turn is auto-saved to `./.thclaws/state/sessions/<id>.jsonl`. Sessions
 are **project-scoped** — start thClaws in a fresh directory and you
 get an empty session list.
 
@@ -230,26 +230,60 @@ sessions interact with provider / model switches.
 
 The sandbox root also holds project-scoped config and runtime state:
 
+Since **workspace v2** the directory has two tiers, and the split is
+worth knowing because it decides what travels with your agent and what
+stays on the machine.
+
+**Config tier — the agent itself.** Deployable, publishable, worth
+committing:
+
 ```
 .thclaws/
-├── settings.json     project config (model, permissions, tool lists, kms.active)
-├── mcp.json          project MCP servers
-├── agents/           agent definitions (*.md)
-├── skills/           installed skills
-├── commands/         legacy prompt-template slash commands
-├── plugins/          installed plugin bundles
-├── plugins.json      plugin registry (project scope)
-├── prompt/           prompt overrides
-├── sessions/         session history — see Chapter 7
-├── memory/           MEMORY.md + per-topic memory files — see Chapter 8
-├── kms/              project-scope knowledge bases — see Chapter 9
-├── rules/            extra *.md rules injected into the system prompt
-├── AGENTS.md         project-level agent instructions
-└── team/             Agent Teams runtime state — see Chapter 17
+├── settings.json      project config (model, permissions, tool lists, kms.active)
+├── mcp.json           project MCP servers
+├── AGENTS.md          project-level agent instructions
+├── agents/            agent definitions (*.md)
+├── skills/            installed skills
+├── commands/          legacy prompt-template slash commands
+├── plugins/           installed plugin bundles
+├── plugins.json       plugin registry (project scope)
+├── prompt/            prompt overrides
+├── rules/             extra *.md rules injected into the system prompt
+├── data/              files the agent ships with
+├── agent_workflow/    authored workflow scripts (*.js) — see Chapter 25
+└── memory/            MEMORY.md + per-topic memory files — see Chapter 8
 ```
 
-Check these into git to share with your team; add `.thclaws/sessions/`
-and `.thclaws/team/` to `.gitignore` since those are runtime state.
+**State tier — this machine's runtime.** Gitignored, never published,
+preserved across agent updates:
+
+```
+.thclaws/state/
+├── sessions/          session history — see Chapter 7
+├── kms/               project-scope knowledge bases — see Chapter 9
+├── team/              Agent Teams runtime state — see Chapter 17
+├── workflows/         workflow run state — see Chapter 25
+├── schedule/          scheduled-job state — see Chapter 19
+├── todos.md           the agent's scratchpad
+├── usage/  usage.jsonl  token accounting
+├── media-jobs.jsonl   in-flight video jobs — see Chapter 11
+├── phone-home.json    thClaws Remote binding
+├── cache/             assorted caches
+└── browser-profile/   the managed Chromium profile — see Chapter 28
+```
+
+> **Upgrading from an older version?** Nothing to do. The first time
+> thClaws opens a pre-v2 workspace it moves these entries under
+> `state/` for you — a move, not a copy, so nothing is lost. `memory/`
+> deliberately stays at the top level: it is part of the agent, not
+> machine state.
+
+Publishing an agent (`/cloud publish`) or deploying one (`/deploy`)
+carries the config tier and skips `state/` entirely, which is why a
+published agent never leaks your sessions, knowledge bases or cookies.
+
+Check these into git to share with your team; add `.thclaws/state/sessions/`
+and `.thclaws/state/team/` to `.gitignore` since those are runtime state.
 
 User-global equivalents live under `~/.config/thclaws/` (plus
 `~/.claude/` as a Claude Code fallback).

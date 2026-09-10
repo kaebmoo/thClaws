@@ -1,18 +1,18 @@
 # Chapter 21 — LINE chat & web browser bridge
 
-Drive thClaws from your phone — either as a LINE conversation
-(via the `@thClaws` OA bot) or as a chat surface in any web
-browser. Both routes share the same Rust agent loop on your
-desktop; only the surface changes. Added in v0.9.0+ across the
-plan-07 / plan-08 / plan-10 series.
+Drive thClaws from your phone. The `@thClaws` LINE OA identifies
+you and hands you a link; the chat itself happens in any web
+browser, driving the same Rust agent loop on your desktop. Only
+the surface changes. Added in v0.9.0+ across the plan-07 /
+plan-08 / plan-10 series.
 
 ## Why bother
 
 - Approve `Bash` commands from your phone while the desktop runs
   unattended.
-- Continue a chat away from your laptop — type on your phone, the
-  desktop's full tool registry (Bash, Edit, KMS, MCP, skills)
-  executes locally.
+- Continue a chat away from your laptop — type in your phone's
+  browser, and the desktop's full tool registry (Bash, Edit, KMS,
+  MCP, skills) executes locally.
 - Drive long-running tasks without leaving your machine docked at
   the desk.
 
@@ -23,12 +23,18 @@ local. The phone / browser surfaces are read+input bridges only.
 
 A small Axum service at `line.thclaws.ai` (and `chat.thclaws.ai`
 for the browser variant) holds a WebSocket connection from your
-desktop and routes LINE inbound messages / browser keystrokes to
-it. The desktop runs the agent unchanged and fans every assistant
-delta, tool call, and approval prompt back through the same WS so
-the phone or browser sees the conversation as it streams. Sessions
-in LINE are pinned to your LINE user id; sessions in the browser
-are authenticated with a one-time magic link the LINE bot mints.
+desktop and routes browser keystrokes to it. The desktop runs the
+agent unchanged and fans every assistant delta, tool call, and
+approval prompt back through the same WS so the browser sees the
+conversation as it streams.
+
+**The LINE OA is a launcher, not a chat surface.** That is the
+part people get wrong. Talking to `@thClaws` does not talk to your
+agent: the OA identifies you, hands you a pairing code, tells you
+whether your desktop is up, and mints the one-time link that opens
+the real chat at `chat.thclaws.ai`. The conversation itself lives
+in the browser. LINE keeps one job in the conversation loop —
+delivering approval prompts when no browser session is open.
 
 ## Pairing your phone (LINE)
 
@@ -43,29 +49,50 @@ One-time setup:
    *<your-line-display-name>*".
 4. The sidebar's LINE chip lights up green. You're connected.
 
-After pairing, every message you send to `@thClaws` flows into
-thClaws's chat session on the desktop. The agent runs there,
-streams responses back, and the LINE bot relays them as bubbles.
-Tool calls that need approval (Bash, Edit, Write) trigger LINE
-Quick Reply chips — tap **[Approve]** or **[Deny]** from the
-phone.
+After pairing, send the OA anything at all and it replies with a
+fresh link into the browser chat — that is where you actually
+talk to the agent. Tool calls that need approval (Bash, Edit,
+Write) come back to LINE as Quick Reply chips whenever no browser
+session is open — tap **[Approve]** or **[Deny]** from the phone.
 
-## LINE OA commands
+## What the OA replies with
 
-Once paired, the LINE bot recognizes a small set of text
-commands. Anything else is treated as a chat message.
+The OA is not a command console. Whatever you type, it looks at
+two facts — are you paired, and is your desktop online right now —
+and answers with one of three things:
 
-| You type | What happens |
+| Your state | The reply |
 |---|---|
-| `/chat` | Mints a magic link to the browser chat (see below) and replies with it. The link is single-use, 10-min TTL |
-| `/pair` | Re-issues a pairing code — useful if you disconnect thClaws then want a new session |
-| `/unpair` | Forgets this LINE user id. Next message gets a fresh pairing code, not a chat |
-| `/status` | Prints whether thClaws is reachable from the relay right now |
-| anything else | Routed to the desktop's chat session as a normal user message |
+| Not paired yet | A welcome message and a fresh pairing code |
+| Paired, desktop offline | "thClaws not active", with a pointer to `/pair` if the machine is gone for good |
+| Paired, desktop online | A single-use magic link into the browser chat |
 
-If thClaws is paired but the desktop is offline (laptop closed,
-network dropped), the bot replies "thClaws is offline" rather
-than swallowing your message silently.
+That third row is the important one: **when you're paired and
+online, every message gets a link back** — `hello`, `/chat`, a
+sticker, or a paragraph you meant for the agent. Nothing you type
+in LINE reaches your agent, and nothing is queued for it. If you
+typed a prompt into LINE by mistake, open the link and retype it
+in the browser.
+
+The one real command is **`/pair`**, which forces a fresh pairing
+code no matter what state you're in — the escape hatch when the
+thClaws install a code was bound to is gone and you need to
+register a new machine.
+
+> `/chat`, `/unpair` and `/status` are **not** things you type at
+> the OA. They are HTTP routes on the relay that the desktop and
+> the browser call; typing them into LINE just gets you the
+> ordinary link reply. Earlier releases did treat LINE as a chat
+> surface, and older notes still describe it that way.
+
+The rich menu's **Chat** button works by sending `/chat` as a
+message on your behalf — which lands in that same "paired and
+online → link" branch. It is a shortcut for one tap, not a
+distinct command.
+
+Non-text messages (stickers, photos, files) are not understood:
+they arrive as the literal text `(non-text message)` and get the
+same reply as anything else.
 
 ## Browser chat (the `/chat` path)
 
@@ -76,6 +103,11 @@ rendering. Send `/chat` to the OA and you get back a magic link:
 ```
 https://chat.thclaws.ai/launch?token=...
 ```
+
+The link is **single-use with a 5-minute TTL** — mint it when you
+are ready to open it, not in advance. (The 10-minute figure you may
+have seen is the browser *session's* idle timeout, a different
+clock that starts once you are in.)
 
 Open it in any browser — the link auto-redirects through a splash
 page (which exists to dodge LINE's URL-preview crawler that would
@@ -158,7 +190,7 @@ bridge is connected.
 ## Uploading files from the phone or browser
 
 You can attach files from either surface — the desktop saves them
-into `<workspace>/uploads/` and an `AGENT.md` in that directory
+into `<workspace>/_uploads/` and an `AGENT.md` in that directory
 tells the agent what to do with the file. Added in v0.9.6.
 
 **Caps:**
@@ -184,15 +216,15 @@ the synth was purely informational and some models would reply
 `AGENT.md` / `CLAUDE.md` can override the directive if that
 behavior was actually what you wanted.)
 
-**From LINE**: send the file as a normal LINE attachment (photo,
-video, file). The relay forwards the upload reference via the
-broker channel; the desktop fetches the bytes from LINE's CDN
-using the channel access token and saves them locally. The agent
-then sees the same synthetic message shape as the browser path,
-including the same `Read the file and respond.` directive.
+**Not from LINE.** Attaching a photo or a file in the LINE chat
+does nothing useful: the relay collapses every non-text message to
+the literal string `(non-text message)`, so you get the ordinary
+launcher reply and the file is never fetched. Open the browser
+chat and drop it there instead. (Image and voice support through
+LINE is planned, not shipped.)
 
 **Where to control behavior:** drop an `AGENT.md` at
-`<workspace>/uploads/AGENT.md` (or at the workspace root if you
+`<workspace>/_uploads/AGENT.md` (or at the workspace root if you
 prefer one rule for everything). The agent reads it as part of
 the standard CLAUDE.md / AGENT.md cascade and applies whatever
 directives it contains: "OCR every uploaded PDF and stash the
@@ -219,16 +251,22 @@ sits there waiting for you to tell the agent what to do next.
 - **LINE pairing tokens are single-use, 10-min TTL, hashed
   server-side.** A stolen pairing code is useless once the OA
   has emitted the "Paired ✓" reply.
+- **A pairing lasts 30 days.** The binding token expires on its
+  own after that, so a phone you paired last month and haven't
+  used since falls back to the welcome-and-code reply. That is
+  not a fault — send `/pair` and redeem a fresh code.
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `/chat` link shows "expired" on first tap | LINE's URL preview crawler consumed the token | Open the link from the LINE chat directly, not by tapping a forwarded copy |
-| LINE bot replies "thClaws is offline" | Desktop's WS disconnected (sleep, network) | Bring the desktop online; pairing persists |
+| LINE bot replies "thClaws not active" | Desktop's WS disconnected (sleep, network) | Bring the desktop online; pairing persists |
+| Typed a prompt into LINE and got a link back | Expected — the OA is a launcher, not a chat surface | Open the link and retype it in the browser |
 | Browser chat freezes "Opening thClaws Chat…" | Browser blocked the inline auto-submit script | Confirm the CSP allows `script-src 'self' 'unsafe-inline'` on `/launch` |
 | LINE Quick Reply buttons don't appear on approval | Browser chat is also open — approval went there instead | Either approve in the browser or close the browser tab and the next approval falls back to LINE |
-| Pairing code stays "(none)" after typing it | Code was older than 10 min, or already used | Open the Pair modal again to mint a fresh code |
+| Pairing code stays "(none)" after typing it | Code expired or was already used | Open the Pair modal again to mint a fresh code |
+| `/chat` link expired before you opened it | The magic link's TTL is 5 minutes, not 10 | Send anything to the OA again for a fresh one |
 | "browser connected" pill doesn't appear on the desktop | Magic link token TTL elapsed before you opened it | Send `/chat` again from LINE for a fresh link |
 
 ## Status command on the desktop

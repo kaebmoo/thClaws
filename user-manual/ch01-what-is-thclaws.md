@@ -11,10 +11,10 @@ natural language; it reads
 your files, runs commands, uses tools, and talks back to you while it
 works.
 
-Eight surfaces ship as one binary, sharing a single `Agent` loop,
-`Session`, and tool registry — the first seven are for a single person
+Nine surfaces ship as one binary, sharing a single `Agent` loop,
+`Session`, and tool registry — the first eight are for a single person
 (including chatting through LINE, Telegram, or Facebook Messenger on
-your phone), the eighth lets other software hire thClaws to do work.
+your phone), the ninth lets other software hire thClaws to do work.
 Beyond the binary, **[thClaws.cloud](#thclawscloud--browse-run-and-host-agents)**
 adds a catalog you browse and a hosted runtime you rent — see the
 dedicated bullet below and [Chapter 27](ch27-thclaws-cloud.md):
@@ -32,7 +32,8 @@ dedicated bullet below and [Chapter 27](ch27-thclaws-cloud.md):
   engine over WebSocket/HTTP, served from your laptop. Reach it
   remotely via SSH tunnel for "thClaws anywhere" without opening a
   port.
-- **LINE Chat** (`thclaws --line` or GUI Line Connect modal) — chat
+- **LINE Chat** (GUI → Line Connect modal; there is no `--line` flag,
+  unlike Telegram and Messenger) — chat
   with your agent through your own LINE Official Account. Goes
   through a relay tunnel at `line.thclaws.ai` that bridges the LINE
   platform and the thClaws running on your machine — the agent stays
@@ -47,6 +48,11 @@ dedicated bullet below and [Chapter 27](ch27-thclaws-cloud.md):
   Connect modal) — connect a Facebook Page once, and every Messenger
   DM to the Page runs as a turn on your desktop, with approvals shown
   as quick-reply chips (see [Chapter 24](ch24-messenger.md)).
+- **thClaws Remote** (GUI → pair with your thClaws.cloud account) —
+  the desktop dials *out* and holds a tunnel open, so you can talk to
+  the agent on your own machine from the cloud dashboard with no public
+  IP and no inbound port. Unlike the chat bridges it binds to your
+  cloud account rather than a messaging platform.
 - **AI Agent (API server)** (`thclaws --serve` + HTTP API) — lets
   *other software* (orchestrators, external clients, schedulers) call
   thClaws as an agent over the same HTTP API — details in later
@@ -75,7 +81,7 @@ dedicated bullet below and [Chapter 27](ch27-thclaws-cloud.md):
   `/kms reconcile` to dedupe and resolve contradictions across pages.
   Built from existing primitives — `/kms ingest`, `kms-reconcile`,
   the session_end hook — no new agent prompts; just wiring. One flag
-  to enable, `rm -rf .thclaws/kms/self_learn/` to reset. See
+  to enable, `rm -rf .thclaws/state/kms/self_learn/` to reset. See
   [Chapter 9 §Self-improving AI Agent](ch09-knowledge-bases-kms.md#self-improving-ai-agent-auto-learn).
 - **Four tiers of agent orchestration.**
   - **`Task` tool** — model-driven subagents that block the parent's
@@ -113,13 +119,15 @@ dedicated bullet below and [Chapter 27](ch27-thclaws-cloud.md):
     walks up from cwd and injects every match into the system prompt,
     the same way git resolves `.gitignore`
     ([Chapter 8](ch08-memory-and-agents-md.md)).
-  - **Memory store** at `~/.local/share/thclaws/memory/` — longer-lived
-    facts the agent has learned about you, your preferences, and each
-    project, classified as `user` / `feedback` / `project` /
-    `reference` and indexed as markdown files.
+  - **Memory store** — longer-lived facts the agent has learned about
+    you, your preferences, and each project, classified as `user` /
+    `feedback` / `project` / `reference` and indexed as markdown files.
+    Inside a project it lives at `.thclaws/memory/`, so it travels with
+    the repo; with no project it falls back to
+    `~/.local/share/thclaws/memory/`.
   - **KMS (knowledge bases)** — per-project and per-user wikis the
     agent searches and reads on demand. Drop markdown pages under
-    `.thclaws/kms/<name>/pages/`, tick the box in the sidebar, and
+    `.thclaws/state/kms/<name>/pages/`, tick the box in the sidebar, and
     the agent gets a table of contents every turn plus a full
     mutation surface (`KmsRead` / `KmsSearch` / `KmsWrite` /
     `KmsAppend` / `KmsDelete`). Search two ways: line-grep by regex,
@@ -166,7 +174,7 @@ dedicated bullet below and [Chapter 27](ch27-thclaws-cloud.md):
   Code auth), OpenAI (Chat Completions + Responses/Codex), Google
   Gemini & Gemma, Alibaba DashScope (Qwen), DeepSeek, Z.ai (GLM Coding
   Plan), NVIDIA NIM, NSTDA Thai LLM (OpenThaiGPT, Typhoon, Pathumma,
-  THaLLE), OpenRouter, Moonshot, xAI, Groq, Azure AI Foundry, Ollama (local,
+  THaLLE), OpenRouter, TokenRouter, Moonshot, xAI, Groq, MiniMax, Qwen Cloud, AtlasCloud, Meta, 9router, OpenCode Go, Azure AI Foundry, Ollama (local,
   local Anthropic-compatible, and Ollama Cloud), LMStudio, self-hosted
   vLLM / llama.cpp / LiteLLM, plus a generic **OpenAI-compatible** slot
   (`oai/*`) for Portkey / Helicone / internal proxies — auto-detected by
@@ -265,7 +273,7 @@ dedicated bullet below and [Chapter 27](ch27-thclaws-cloud.md):
   never locks you in.
 - **Session resume.** `thclaws --resume last` picks up where you left
   off; `thclaws --resume <id>` jumps to a specific session. Sessions
-  live as JSONL under `.thclaws/sessions/` — git-friendly,
+  live as JSONL under `.thclaws/state/sessions/` — git-friendly,
   grep-friendly, never opaque.
 - **Settings.** Every runtime knob — permission mode, thinking budget,
   allowed/disallowed tools, provider endpoints, KMS attachments,

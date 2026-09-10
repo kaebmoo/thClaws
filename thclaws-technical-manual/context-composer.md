@@ -309,7 +309,7 @@ See [`agentic-loop.md`](agentic-loop.md) §11 for how the plan reminder interact
 
 `build_todos_reminder()` (`agent.rs:580`):
 
-1. Reads `<cwd>/.thclaws/todos.md` via `std::env::current_dir()`. **One FS read per turn.**
+1. Reads `<cwd>/.thclaws/state/todos.md` via `std::env::current_dir()`. **One FS read per turn.**
 2. If the file is missing OR empty → `None` (no reminder).
 3. If every item is `[x]` completed → `None` (closed-out lists don't need surfacing).
 4. Otherwise: caps the raw text to 80 lines / 6 KB via `truncate_for_prompt` (M6.18 BUG M6 — pre-fix the full file went into every prompt) and returns a reminder telling the model to surface the list to the user before asking what to work on.
@@ -431,7 +431,7 @@ The composer applies bounded caps at every "free-text inlined into the system pr
 | `MEMORY.md` index | 200 lines / 25 KB | `truncate_index` (memory-specific message text) |
 | Per memory entry body | 80 lines / 8 KB | `truncate_for_prompt` |
 | KMS index (per active KMS) | 200 lines / 25 KB | `truncate_for_prompt` (matches `MEMORY.md` cap) |
-| `.thclaws/todos.md` | 80 lines / 6 KB | `truncate_for_prompt` |
+| `.thclaws/state/todos.md` | 80 lines / 6 KB | `truncate_for_prompt` |
 | `find_claude_md` (CLAUDE.md / AGENTS.md cascade) | **NO cap** | — see L1 deferred |
 
 The shared `truncate_for_prompt(raw, max_lines, max_bytes, label)` helper:
@@ -513,7 +513,7 @@ Plus the per-turn additions when applicable:
 
 [~5 KB plan reminder — Layer-1 instructions when no plan submitted]
 
-## Existing todos (.thclaws/todos.md)
+## Existing todos (.thclaws/state/todos.md)
 
 A scratchpad todo list from a prior session is present in this workspace. ...
 
@@ -545,7 +545,7 @@ crates/core/src/
 ├── agent.rs
 │   ├── run_turn_multipart            (dynamic layer entry; rebuilds per turn)
 │   ├── build_plan_reminder           (Layer-1 + Layer-2 plan-mode prose)
-│   ├── build_todos_reminder          (.thclaws/todos.md inlined with cap)
+│   ├── build_todos_reminder          (.thclaws/state/todos.md inlined with cap)
 │   └── compact() call w/ system token deduction (M6.18 H1)
 │
 ├── context.rs

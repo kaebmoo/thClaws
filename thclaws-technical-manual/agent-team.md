@@ -4,7 +4,7 @@ Multi-process parallel agents coordinated through filesystem mailboxes. The user
 
 Distinct from **subagent** (in-process recursive `Task` tool — same process, shared tool registry, depth-tracked) and from **TaskCreate** (in-memory progress scratchpad, no LLM involvement). Agent team is the only thClaws primitive where work happens in a separate process; everything else lives in the agent loop's address space.
 
-This doc covers: the three-tier delegation hierarchy (vs subagent vs TaskCreate), on-disk layout under `.thclaws/team/`, the data model (`TeamConfig` / `TeamMember` / `TeamMessage` / `TeamTask` / `AgentStatus` / `ProtocolMessage`), all 10 team tools (`TeamCreate` / `SpawnTeammate` / `SendMessage` / `CheckInbox` / `TeamStatus` / `TeamTaskCreate/List/Claim/Complete` / `TeamMerge`), the lead lifecycle (registration, inbox poller, `handle_team_messages`, EOF cleanup), the teammate lifecycle (subprocess spawn → env vars → system-prompt addendum → inbox loop → idle notification → shutdown protocol), tool-registry differences (lead vs teammate), worktree auto-creation + `TeamMerge`, tmux integration, the lead/teammate hard-blocks in BashTool + the merge-conflict carve-out for Write/Edit, agent-name validation + shell-escape (M6.34 TEAM1+TEAM2), scoped teammate kill (M6.34 TEAM3), `team_grounding_prompt` framing under three provider conditions, the `agent_team.md` / `lead.md` / `worktree.md` prompts, JSON file locking + `with_file_lock_shared` reads, and the testing surface.
+This doc covers: the three-tier delegation hierarchy (vs subagent vs TaskCreate), on-disk layout under `.thclaws/state/team/`, the data model (`TeamConfig` / `TeamMember` / `TeamMessage` / `TeamTask` / `AgentStatus` / `ProtocolMessage`), all 10 team tools (`TeamCreate` / `SpawnTeammate` / `SendMessage` / `CheckInbox` / `TeamStatus` / `TeamTaskCreate/List/Claim/Complete` / `TeamMerge`), the lead lifecycle (registration, inbox poller, `handle_team_messages`, EOF cleanup), the teammate lifecycle (subprocess spawn → env vars → system-prompt addendum → inbox loop → idle notification → shutdown protocol), tool-registry differences (lead vs teammate), worktree auto-creation + `TeamMerge`, tmux integration, the lead/teammate hard-blocks in BashTool + the merge-conflict carve-out for Write/Edit, agent-name validation + shell-escape (M6.34 TEAM1+TEAM2), scoped teammate kill (M6.34 TEAM3), `team_grounding_prompt` framing under three provider conditions, the `agent_team.md` / `lead.md` / `worktree.md` prompts, JSON file locking + `with_file_lock_shared` reads, and the testing surface.
 
 **Source modules:**
 - `crates/core/src/team.rs` — `TeamConfig` / `TeamMember` / `TeamMessage` / `TeamTask` / `AgentStatus` / `ProtocolMessage`, `Mailbox` (single-file inbox per agent), `TaskQueue` (per-task files + `_hwm`), all 10 team tools, `register_team_tools`, `is_team_lead` / `set_is_team_lead`, `set_lead_team_dir` / `kill_my_teammates` (M6.34 TEAM3), `is_valid_agent_name` (M6.34 TEAM1), `shell_escape` (M6.34 TEAM2), `lead_resolving_merge_conflict` (Write/Edit carve-out gate), `with_file_lock` / `with_file_lock_shared`, `has_tmux` / `is_inside_tmux`, `make_idle_notification` / `parse_protocol_message`
@@ -22,7 +22,7 @@ This doc covers: the three-tier delegation hierarchy (vs subagent vs TaskCreate)
 - [`subagent.md`](subagent.md) — explicitly contrasts: same process / recursion ceiling / shared tools vs subprocess / mailbox / per-team git branch
 - [`permissions.md`](permissions.md) — teammates spawn with `--accept-all` (auto-approve) + `--permission-mode auto`; `is_team_lead()` + `is_teammate_process()` static flags drive the BashTool / Write / Edit lead/teammate guards
 - [`agentic-loop.md`](agentic-loop.md) — every teammate subprocess runs the same `Agent::run_turn` loop; the lead's `handle_team_messages` invokes the same loop with an XML-framed teammate prompt
-- [`sessions.md`](sessions.md) — each teammate subprocess has its own session under its own `.thclaws/sessions/` (tmux pane sessions are independent of the lead's session)
+- [`sessions.md`](sessions.md) — each teammate subprocess has its own session under its own `.thclaws/state/sessions/` (tmux pane sessions are independent of the lead's session)
 - [`built-in-tools.md`](built-in-tools.md) §Team — concise tool surface
 
 ---
@@ -33,7 +33,7 @@ This doc covers: the three-tier delegation hierarchy (vs subagent vs TaskCreate)
 |---|---|---|---|
 | Mechanism | In-memory `TaskStore` | Recursive in-process `Agent::run_turn` | `thclaws --team-agent <name>` subprocess |
 | LLM involvement | None | Same process, shared registry | New process, fresh registry, fresh session |
-| Coordination | None | Tool result text → caller's history | Filesystem mailboxes (`.thclaws/team/inboxes/<name>.json`) |
+| Coordination | None | Tool result text → caller's history | Filesystem mailboxes (`.thclaws/state/team/inboxes/<name>.json`) |
 | State sharing | None (own store) | Inherits parent's tools / system / approver / cancel | Subprocess inherits env + `--team-dir` flag; otherwise independent |
 | Crash blast radius | Process-local | Same process — child panic kills parent | Subprocess crash; lead observes via mailbox status (or doesn't — see TEAM-M4 deferred gap) |
 | Spawn cost | Microseconds | Microseconds | Hundreds of ms (fork + exec + provider handshake) |
@@ -46,10 +46,10 @@ The system prompt's `team_grounding_prompt` (§14) explicitly tells the model wh
 
 ## 2. On-disk layout
 
-Everything under `<project>/.thclaws/team/`:
+Everything under `<project>/.thclaws/state/team/`:
 
 ```
-.thclaws/team/
+.thclaws/state/team/
 ├── config.json              # TeamConfig: members + roles + isolation
 ├── inboxes/
 │   ├── lead.json            # JSON array of TeamMessage
@@ -80,7 +80,7 @@ Plus, when worktree isolation is on:
 └── backend/                 # checked out on branch team/backend
 ```
 
-The `.thclaws/team/` directory is **NOT** under any user-home path — it's per-project. Distinct from Anthropic's SDK convention of `~/.claude/teams/` + `~/.claude/tasks/` (which the system prompt explicitly warns the model NOT to reference).
+The `.thclaws/state/team/` directory is **NOT** under any user-home path — it's per-project. Distinct from Anthropic's SDK convention of `~/.claude/teams/` + `~/.claude/tasks/` (which the system prompt explicitly warns the model NOT to reference).
 
 ---
 
@@ -219,7 +219,7 @@ THCLAWS_PROJECT_ROOT='/abs/path/to/project' \
 cd '/abs/path/to/.worktrees/frontend' && \
 '/Users/jimmy/.cargo/bin/thclaws' --cli \
   --team-agent 'frontend' \
-  --team-dir '/abs/path/to/.thclaws/team' \
+  --team-dir '/abs/path/to/.thclaws/state/team' \
   --permission-mode auto --accept-all \
   --model 'claude-sonnet-4-6'   # only when agent_def specifies
 ```
@@ -845,7 +845,7 @@ From the M6.34 audit:
 - **TEAM-M12** — `agent_def.instructions` injected twice (system prompt + initial inbox message body). Cosmetic.
 - **TEAM-M13** — `fs2::lock_exclusive` doesn't give in-process mutual exclusion on Linux (flock per-OFD). Cross-process exclusion works.
 - **TEAM-M14** — No automatic worktree cleanup at session end. Orphan worktrees + branches accumulate without manual `TeamMerge --cleanup`.
-- **TEAM-M15** — Lead's `Mailbox` uses relative path `.thclaws/team`; lead's `cd` via BashTool drifts the resolved path.
+- **TEAM-M15** — Lead's `Mailbox` uses relative path `.thclaws/state/team`; lead's `cd` via BashTool drifts the resolved path.
 
 **LOW (TEAM-L1 through TEAM-L15)**: claim() busy check race (only with same-agent-id-in-multiple-processes), POLL_INTERVAL_MS=1000 IO load, `read_unread` reads-then-filters, `to_string_pretty` verbosity, TeamMerge no clean-tree preflight, `claim_next` swallows all errors as race, protocol-message false positives, hardcoded lead name, teammate ctrl_c could affect lead pane (depends on tmux process-group), `init_agent` "alive" string semantics, unauthenticated `from` field (single-user threat model), idle-notification spam, sandbox doesn't enforce `agent_team.md`'s "don't touch `.thclaws/`" rule for teammates, teammate has SpawnTeammate registered (probably should be lead-only).
 

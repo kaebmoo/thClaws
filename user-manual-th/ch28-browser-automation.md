@@ -41,13 +41,42 @@ PATH** (Playwright เป็น package ของ Node)
 }
 ```
 
-- **ค่าเริ่มต้นบน Desktop:** *headed* — หน้าต่าง Chromium จริงจะเปิดข้าง
-  แอปตอน agent ใช้ browser tool ครั้งแรก คุณดูและแตะโต้ตอบเองได้
-- **ค่าเริ่มต้นบน Cloud:** *headless* — บน runner ไม่มีหน้าต่าง ดังนั้น
-  **live view ในแท็บ Browser คือหน้าต่างของคุณ** (ดูด้านล่าง)
+ถ้าไม่ได้ตั้ง `browserHeadless` ระบบจะตัดสินให้เองว่า headed หรือ headless
+
+| ที่ไหน | ได้เป็น | เพราะอะไร |
+|---|---|---|
+| Desktop ที่มีจอ | **headed** | หน้าต่าง Chromium จริงเปิดข้างแอปตอน agent ใช้ browser tool ครั้งแรก ดูหรือแตะโต้ตอบเองได้ |
+| Linux ที่ไม่มี `DISPLAY` / `WAYLAND_DISPLAY` | **headless** | ไม่มีที่ให้แสดงหน้าต่าง |
+| Cloud runner | **headless** | เหตุผลเดียวกัน และ **live view ในแท็บ Browser คือหน้าต่างของคุณ** (ดูด้านล่าง) |
 
 ไม่มีการดาวน์โหลดอะไรจนกว่าจะใช้จริง: Chromium เปิดแบบ **lazy** ตอน
-browser tool call แรก — workspace ที่ไม่ได้ใช้จึงไม่เสียทรัพยากร
+browser tool call แรก ตอน takeover หรือตอนเริ่ม screencast — desktop
+แบบ headed จึงไม่เด้งหน้าต่าง Chrome ตอนเปิดแอป และ workspace ที่ไม่ได้ใช้
+ก็ไม่ต้องจ่ายค่า ~150 MB ให้ browser ที่ไม่มีใครเรียก
+
+### บน thClaws.cloud มันปิดอยู่จนกว่าคุณจะขอ
+
+Cloud runner ตั้ง `THCLAWS_BROWSER_ENABLED=0` ซึ่งพลิก **ค่าเริ่มต้น**
+ให้ปิดทั้ง fleet — runner ที่ไม่มีวันเปิดเบราว์เซอร์ก็ไม่ควรแบกมันไว้
+hosted workspace จึงไม่มี browser tool จนกว่าคุณจะ opt in
+
+```json
+{ "browserEnabled": true }
+```
+
+ค่านี้เป็น setting จริงที่วางทับค่าเริ่มต้น มันจึงชนะ ส่วน env var แค่ขยับ
+ค่าเริ่มต้น ไม่สามารถ override workspace ที่ขอเบราว์เซอร์ไว้แล้วได้
+
+### ปุ่มปรับอื่น ๆ
+
+พวกนี้เป็น environment variable สำหรับคนที่แพ็กเกจ thClaws มากกว่าคนใช้งาน
+ทั่วไป
+
+| ตัวแปร | ผล |
+|---|---|
+| `THCLAWS_BROWSER_ENABLED=0` | ปิดค่าเริ่มต้นทั้ง fleet (ตามข้างบน) |
+| `THCLAWS_BROWSER_MCP_CMD` | แทนที่คำสั่ง launch ทั้งบรรทัด image ของ cloud runner ตั้งเป็น `mcp-server-playwright --no-sandbox` ซึ่งเป็น server ที่ติดตั้งมาแล้ว pod cold start จึงไม่ต้องแตะ npm registry ส่วนค่าเริ่มต้นบน desktop คือ `npx -y @playwright/mcp@latest` |
+| `THCLAWS_BROWSER_VIEWPORT="W,H"` | ขนาด viewport thClaws ตั้งค่าเริ่มต้นเป็น viewport desktop แบบกว้าง เพราะค่า 1280×720 ของ Playwright เองทำให้หลายเว็บ render ออกมาเหมือนมือถือ |
 
 > **ไม่มี Node?** บนเครื่องที่ไม่มี `npx` แท็บ Browser จะแสดงคำแนะนำ
 > การติดตั้งแทนที่จะ error และ agent ก็แค่รันโดยไม่มี browser tool
@@ -118,6 +147,8 @@ profile อยู่ **นอกโฟลเดอร์ workspace** และ�
 |---|---|
 | แท็บ Browser ขึ้น "command not found" | ติดตั้ง Node.js ให้ `npx` อยู่ใน PATH แล้ว restart thClaws |
 | ไม่มีแท็บ Browser เลย | `browserEnabled` เป็น `false` หรือไม่ได้ติดตั้ง Node |
+| ไม่มีแท็บ Browser บน hosted workspace | ปกติ — cloud runner ปิดค่าเริ่มต้นไว้ ให้ตั้ง `"browserEnabled": true` |
+| หน้าเว็บ render เหมือนมือถือ | viewport แคบไป ตั้ง `THCLAWS_BROWSER_VIEWPORT="1600,1000"` |
 | agent "มองไม่เห็น" chart / canvas | บอกให้มันถ่าย screenshot — มันอ่านพิกเซลด้วย vision ไม่ใช่แค่ accessibility tree |
 | อยากให้ไม่มีหน้าต่างบน desktop | ตั้ง `"browserHeadless": true` |
 | หลุด login หลัง pod restart บน cloud | แก้แล้วใน v0.52.0 — อัปเดตถ้ายังเก่ากว่านี้ |

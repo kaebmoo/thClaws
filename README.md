@@ -159,7 +159,7 @@ cargo run -- --cli                    # CLI REPL
 cargo run -- -p "explain crates/core" # one-shot
 ```
 
-**Prerequisites:** Rust 1.85+, Node.js 20+, pnpm 9+. The helper enforces frontend-before-cargo order (the GUI build embeds `frontend/dist/index.html` at compile time via `include_str!`). See [CONTRIBUTING.md](CONTRIBUTING.md) for the full PR workflow.
+**Prerequisites:** current stable Rust (what CI builds on — nothing pins an MSRV), Node.js 20+, pnpm 10+ (`frontend/package.json` pins `packageManager: pnpm@10.x`, so corepack refuses 9). The helper enforces frontend-before-cargo order (the GUI build embeds `frontend/dist/index.html` at compile time via `include_str!`). See [CONTRIBUTING.md](CONTRIBUTING.md) for the full PR workflow.
 
 ### Where we need help right now
 

@@ -3712,10 +3712,21 @@ mod tests {
     #[tokio::test]
     async fn parallelizable_tools_run_concurrently() {
         use crate::tools::Tool;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
-        struct SleepyTool;
+        /// Records the high-water mark of concurrent `call()` bodies.
+        ///
+        /// The earlier version of this test timed the turn and asserted it
+        /// finished under 330 ms — a wall-clock bound on a loaded CI runner,
+        /// which is a flake waiting to happen. Counting overlap answers the
+        /// same question ("did these two actually run at the same time?")
+        /// without depending on how fast the machine is.
+        struct SleepyTool {
+            live: Arc<AtomicUsize>,
+            peak: Arc<AtomicUsize>,
+        }
         #[async_trait::async_trait]
         impl Tool for SleepyTool {
             fn name(&self) -> &'static str {
@@ -3731,35 +3742,50 @@ mod tests {
                 true
             }
             async fn call(&self, _input: Value) -> Result<String> {
+                let now = self.live.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak.fetch_max(now, Ordering::SeqCst);
+                // Long enough that a sequential runner could not have both
+                // bodies in flight at once, short enough not to slow the suite.
                 tokio::time::sleep(Duration::from_millis(200)).await;
+                self.live.fetch_sub(1, Ordering::SeqCst);
                 Ok("slept".into())
             }
         }
 
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
         let mut reg = ToolRegistry::new();
-        reg.register(Arc::new(SleepyTool));
+        reg.register(Arc::new(SleepyTool {
+            live: live.clone(),
+            peak: peak.clone(),
+        }));
         let provider = ScriptedProvider::new(vec![
             two_tool_script("Sleep", "t1", "Sleep", "t2"),
             text_script(&["done"]),
         ]);
         let agent = Agent::new(provider, reg, "test", "");
 
-        let start = Instant::now();
         let outcome = collect_agent_turn(agent.run_turn("go".into()))
             .await
             .unwrap();
-        let elapsed = start.elapsed();
 
         assert_eq!(outcome.text, "done");
         assert_eq!(
             outcome.tool_calls,
             vec!["Sleep".to_string(), "Sleep".to_string()]
         );
-        // Two 200ms sleeps: concurrent ≈200ms, sequential ≈400ms. The bound
-        // sits well below the sequential floor and above concurrent+overhead.
-        assert!(
-            elapsed < Duration::from_millis(330),
-            "took {elapsed:?} — looks sequential, not concurrent"
+        // Both bodies in flight at once is the whole claim. A sequential
+        // runner never gets the counter above 1, however slow the machine is.
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            2,
+            "peak concurrency was {} — the two Sleep calls did not overlap",
+            peak.load(Ordering::SeqCst)
+        );
+        assert_eq!(
+            live.load(Ordering::SeqCst),
+            0,
+            "a Sleep call never finished"
         );
 
         // Results land in tool_use order regardless of completion order.

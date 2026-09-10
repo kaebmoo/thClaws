@@ -42,7 +42,7 @@ The right side of the window hosts a set of context-sensitive sidebars that appe
 | Sidebar | Trigger | Purpose |
 |---|---|---|
 | **Goal** | `/goal start` active | Shows current goal + iteration budget + token consumption — see [chapter 19](ch19-scheduling.md) |
-| **Todo** | `TodoWrite` called | Live checklist from `.thclaws/todos.md` — see [chapter 18](ch18-plan-mode.md) |
+| **Todo** | `TodoWrite` called | Live checklist from `.thclaws/state/todos.md` — see [chapter 18](ch18-plan-mode.md) |
 | **Plan** | Plan mode active | Step-by-step plan with approve / cancel / skip controls |
 | **Research** | `/research` running or recent | Iteration progress, score history, phase log — see [chapter 20](ch20-research.md) |
 | **Background agents** | `/dream` / `/agent` / `/translator` running | Live elapsed time + last tool call for every side-channel agent; auto-prunes finished entries after 5 min — covered below |
@@ -58,9 +58,19 @@ When the panel is dismissed but agents are still running, the collapsed chevron 
 
 ### Tab bar
 
-Four main tabs, plus the settings gear on the right.
+Up to seven tabs, plus the settings gear on the right. Four are always
+there; three appear only when the feature behind them is switched on, so
+a fresh install shows **Chat · Terminal · Files** and nothing else.
 
-#### 1. Terminal tab
+Chat is the leftmost tab and the one a fresh window opens on.
+
+#### 1. Chat tab
+
+A streaming chat panel that shares history with the Terminal tab (same agent, same session). Messages render as Markdown; tool calls show collapsible `[tool: Name]` blocks; token usage appears after each assistant response.
+
+Use the Chat tab when you prefer a conversational UI; use the Terminal tab when you want to see raw output and run slash commands.
+
+#### 2. Terminal tab
 
 An embedded xterm.js terminal running `thclaws --cli` (the same REPL you get from the CLI). Keystrokes go through a PTY bridge to the child process; output streams back via base64-encoded frames.
 
@@ -72,12 +82,6 @@ Key behaviors worth knowing:
 - **Ctrl+C** is context-sensitive: if the current typed line is non-empty, it clears the line (like `Ctrl+U` in bash); if the line is empty, it passes through as SIGINT.
 - **Resize** — the terminal size follows the window, propagated via `portable-pty` resize.
 - **Ctrl+L** clears the screen.
-
-#### 2. Chat tab
-
-A streaming chat panel that shares history with the Terminal tab (same agent, same session). Messages render as Markdown; tool calls show collapsible `[tool: Name]` blocks; token usage appears after each assistant response.
-
-Use the Chat tab when you prefer a conversational UI; use the Terminal tab when you want to see raw output and run slash commands.
 
 #### 3. Files tab
 
@@ -131,7 +135,37 @@ Files are written through the same working-directory sandbox the agent uses, so 
 
 #### 4. Team tab
 
-Always present. When no team exists it shows an empty-state pointer ("No team agents running — ask the agent to create a team"). Once the agent calls `TeamCreate`, each teammate gets its own pane in this tab — click a pane to focus, scroll to browse history, type into it to send input. The agent only has access to the team-spawning tools (`TeamCreate`, `SpawnTeammate`, `SendMessage`, …) when `teamEnabled: true` is set in `.thclaws/settings.json`; the tab itself surfaces regardless. See [chapter 17](ch17-agent-teams.md) for the team concept.
+**Shown only when `teamEnabled: true`** is set in `.thclaws/settings.json` — the same flag that gives the agent the team tools (`TeamCreate`, `SpawnTeammate`, `SendMessage`, …). With the flag off there is no Team tab at all. With it on but no team yet, the tab shows an empty state ("No team agents running — ask the agent to create a team"); once the agent calls `TeamCreate`, each teammate gets its own pane — click a pane to focus, scroll to browse history, type into it to send input. See [chapter 17](ch17-agent-teams.md) for the team concept.
+
+
+#### 5. UI tab
+
+**Shown only when a GUI Shell is installed.** A GUI Shell is an
+installable HTML frontend that an agent ships with itself — Media Studio
+is one. The tab is a picker: choose a shell and it loads in an iframe,
+talking to the engine over the `window.thclaws.*` bridge rather than
+your conversation. See [chapter 26](ch26-gui-shells.md).
+
+(It was called "Shell" until the PTY-backed Shell tab below took that
+name.)
+
+#### 6. Shell tab
+
+**Shown only when `shellTabEnabled: true`** — off by default. A real
+terminal: it spawns your `$SHELL` and pipes stdio through xterm.js.
+
+This is *not* the Terminal tab. Terminal is the agent's REPL, where what
+you type is a prompt or a slash command. Shell is a plain shell with no
+agent in it — the same thing you would get from your terminal app, in a
+tab.
+
+#### 7. Browser tab
+
+**Shown only when `browserEnabled` is set.** Status and live activity
+for the Chromium instance the engine manages for browser automation:
+what page it is on, what the agent just did, a live view, and takeover
+so you can drive it yourself mid-run. See
+[chapter 28](ch28-browser-automation.md).
 
 ### Settings menu (gear icon)
 
@@ -213,9 +247,9 @@ Terminal tab and Chat tab **share the same session**. History scrolls together; 
 | Secrets backend choice | `~/.config/thclaws/secrets.json` |
 | API keys (keychain mode) | OS keychain, service `thclaws`, account `api-keys` (JSON blob) |
 | API keys (.env mode) | `~/.config/thclaws/.env` |
-| Sessions | `.thclaws/sessions/` (project-scoped) — see [chapter 7](ch07-sessions.md) |
+| Sessions | `.thclaws/state/sessions/` (project-scoped) — see [chapter 7](ch07-sessions.md) |
 | KMS (user) | `~/.config/thclaws/kms/` — see [chapter 9](ch09-knowledge-bases-kms.md) |
-| KMS (project) | `.thclaws/kms/` inside the working directory |
+| KMS (project) | `.thclaws/state/kms/` inside the working directory |
 | MCP servers (user) | `~/.config/thclaws/mcp.json` |
 | MCP servers (project) | `.mcp.json` or `.thclaws/mcp.json` |
 | Skills (user) | `~/.config/thclaws/skills/` (with `~/.claude/skills/` as fallback) — see [chapter 12](ch12-skills.md) |

@@ -199,6 +199,8 @@ payload-hash cache.
 
 - `@takes>1`, `@hold`, voice cloning (`voice:@sample`), and `dialogue_sync: post`
   parse but are deferred.
-- A user-manual companion (task-oriented "install Movie Maker, prep art, write a
-  `.film`, preview cost, generate, review") is a separate deliverable
-  (`user-manual/ch29-movie-maker.md`).
+- The task-oriented guide ("install Movie Maker, prep art, write a `.film`,
+  preview cost, generate, review") ships with the **Movie Maker catalog
+  agent**, not with the user manual — Movie Maker is something you
+  `/cloud get`, so its walkthrough travels with it. This page stays as the
+  engine-side reference for the `filmscript` gate and the `Film*` tools.

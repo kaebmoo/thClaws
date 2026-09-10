@@ -59,7 +59,7 @@ Mode A เป็น default Mode B (Tier 2) ใช้สำหรับเรี
    ซ้าย คลิก node ของ tool-call ใน tree เพื่อกาง คลิก
    "Summarise" ให้ agent อธิบาย call นั้นใน 1 บรรทัด
 4. ปิด tab → session ของ shell ถูก persist ที่
-   `./.thclaws/sessions/<id>.jsonl` (ที่เดียวกับ session ของ
+   `./.thclaws/state/sessions/<id>.jsonl` (ที่เดียวกับ session ของ
    Chat/Terminal เพิ่ม field `shell: { id, version }` ใน
    metadata — ยัง `cat` ได้ปกติ)
 5. เปิดใหม่ภายหลัง → เลือก session เดิมจาก Sessions browser
@@ -348,14 +348,32 @@ Shell คือ HTML + CSS + JS ไม่ต้องมี build step
 ### Starter template
 
 ```sh
-git clone https://github.com/thclaws/gui-shell-template my-shell
-cd my-shell
-make dev          # ใต้ฮูด: thclaws shell dev .
+thclaws shell new dashboard ./my-shell     # scaffold จาก template
+thclaws shell preview ./my-shell           # serve พร้อม hot reload
 ```
 
-`make dev` mount folder ของคุณเป็น shell ชั่วคราวพร้อม file-watch
-+ auto-reload แก้ `index.html` / `main.js` / `manifest.json`
-save แล้ว iframe refresh เอง ไม่ต้อง rebuild thClaws
+`shell new` รับ template id — `chat-enhanced`, `grid`, `form`,
+`dashboard`, `kanban`, `document`, `report` — แล้วเขียน shell ที่ใช้งานได้
+ลงในโฟลเดอร์ปลายทาง (ถ้าโฟลเดอร์ไม่ว่างจะถูกปฏิเสธ เว้นแต่ใส่ `--force`)
+
+`shell preview` รัน shell กับ **mock agent** ที่ `http://localhost:<port>/`
+และ reload ทุกครั้งที่ save คุณจึงพัฒนา UI ได้โดยไม่เปลืองโทเคน ใส่
+`--port 0` เพื่อให้เลือกพอร์ตว่างให้เอง
+
+คำสั่งที่เหลือสำหรับการพัฒนา
+
+| คำสั่ง | ทำอะไร |
+|---|---|
+| `thclaws shell check <path>` | lint โฟลเดอร์ แจ้ง warning และ error และ exit 1 ถ้ามี error |
+| `thclaws shell pack <path>` | รวมเป็นไฟล์ HTML เดียว โดย inline ไฟล์ข้างเคียงเข้าไป |
+| `thclaws shell login` / `logout` | ยืนยันตัวตนสำหรับการ publish |
+| `thclaws shell publish <path>` | publish shell |
+
+> **มีชื่อไฟล์ manifest สองแบบ และใช้แทนกันไม่ได้** คำสั่งฝั่งพัฒนา
+> (`new` / `preview` / `check` / `pack` / `publish`) อ่าน **`shell.json`**
+> ส่วน registry ตอนรัน — ตัวที่ทำให้ shell โผล่ใน picker — ค้นหาโฟลเดอร์จาก
+> **`manifest.json`** shell ที่ lint ผ่านแต่ไม่เคยโผล่ใน picker มักเป็นเคสนี้
+> คือมี `shell.json` แต่ไม่มี `manifest.json`
 
 ### Bridge — `window.thclaws.*`
 
@@ -421,15 +439,43 @@ thclaws.ui.onFullscreen((active) => {            // ยิงทันที + �
 myExitButton.onclick = () => thclaws.ui.exitFullscreen();
 ```
 
-> **ทั้ง surface wire ครบแล้ว** ตั้งแต่ Tier 3 ทุก method ของ bridge
-> backed ครบทั้งเส้น: `run` / `cancel` / `on` / `streamTurn` (คืน
-> `text` / `tool_call` / `tool_result`) / `callTool` + `tools.invoke` /
-> `storage.get` + `set` + `delete` (เพดาน 10 MB ต่อ shell) /
-> `approvals.subscribe` + `respond` (แสดง widget approve/deny ของ shell
-> เองแทน system modal) / `awaitApproval` / `uploadFile` (ดันไฟล์ → คืน URL
-> ที่ serve ได้) / `permissions.list` + `has` / `model.*` + `kms.*` +
-> `research.*` / `fileUrl` / `ui.*` ทุกคำขอที่ host ตอบไม่ได้จะ
-> self-reject หลัง 15 นาที จึงไม่มี hang
+คำขอใด ๆ ที่ host ตอบไม่ได้จะ self-reject หลัง 15 นาที shell จึงไม่มีทาง
+ค้างเพราะคำตอบหาย
+
+### ส่วนที่เหลือของ bridge
+
+บล็อกข้างบนคือสิ่งที่ shell ส่วนใหญ่ต้องใช้ นอกเหนือจากนั้น bridge ยังเปิด
+หน้าตั้งค่าต่าง ๆ ของแอปให้ด้วย แต่ละอันมี permission ของตัวเอง — shell จึง
+เป็นแผงควบคุมได้ ไม่ใช่แค่หน้า chat ทุกอย่างเป็น async และอะไรที่ไม่ประกาศไว้
+ใน manifest จะ throw ตอนเรียก
+
+| Namespace | Method | Permission |
+|---|---|---|
+| `thclaws.sessions` | `list()` · `load(id)` · `new()` · `rename(id, title)` · `delete(id)` | `session.list` สำหรับ list, `session.read` สำหรับ load, `session.write` สำหรับที่เหลือ |
+| `thclaws.model` | `get()` · `list()` · `set(id)` · `onChange(cb)` · `current` | `model.read` / `model.write` |
+| `thclaws.mode` | `get()` · `set(mode)` — permission mode (บทที่ 5) | `mode.write` (ทั้งคู่) |
+| `thclaws.memory` | `getCore()` · `setCore(text)` | `memory.read` / `memory.write` |
+| `thclaws.kms` | `list()` · `browse(name)` · `create(name)` · `ingest(kms, path)` | `kms.read` / `kms.write` |
+| `thclaws.research` | `list()` · `get(id)` | `research.read` |
+| `thclaws.schedule` | `list()` · `create(prompt, cron)` · `delete(id)` · `setEnabled(id, on)` | `schedule.read` / `schedule.write` |
+| `thclaws.heartbeat` | `get()` · `set(interval)` | `schedule.read` / `schedule.write` |
+| `thclaws.skills` | `list()` · `get(name)` · `install(url, opts)` · `save(name, body)` · `delete(name)` | `skills.read` / `skills.write` |
+| `thclaws.plugins` | `list()` · `install(url, opts)` · `setEnabled(name, on)` · `remove(name)` | `plugins.read` / `plugins.write` |
+| `thclaws.connectors` | `list()` · `add({name, url, headers})` · `remove(name)` — MCP server, HTTP เท่านั้น | `connectors.read` / `connectors.write` |
+| `thclaws.llm` | `complete({prompt, system, maxTokens})` — เรียกโมเดลครั้งเดียว ไม่มี agent loop ไม่มี tool | `llm.complete` |
+| `thclaws.keys` | `set(provider, key)` — **เขียนอย่างเดียว** ไม่มี getter | `keys.write` |
+| `thclaws.profile` | `get()` | — |
+| `thclaws.permissions` | `list()` · `has(action)` — ถามว่าตัวเองได้สิทธิ์อะไรมา | — |
+
+มีสองตัวที่ควรคิดให้ดีก่อนประกาศ `keys.write` ให้ shell เขียน API key ของ
+provider ลง config ของ user ได้ ออกแบบให้เขียนอย่างเดียว shell จึงช่วยตั้งค่า
+key ให้ได้ แต่อ่านกลับไม่ได้เลย ส่วน `connectors.write` ให้ shell ลงทะเบียน
+MCP server ได้ ซึ่งเท่ากับเพิ่ม tool ให้ agent ของ user — ประกาศต่อเมื่อนั่น
+คือสิ่งที่ shell ของคุณมีไว้ทำจริง ๆ
+
+`thclaws.llm.complete` เป็นทางออกสำหรับกรณีที่อยากได้โมเดลแต่ไม่เอา agent —
+ไม่มี tool ไม่มี approval ไม่มีประวัติ session มีแต่ completion ถ้าอยากได้
+agent loop จริง ๆ ให้ใช้ `thclaws.run()`
 
 Bridge คือ **API ทั้งหมด** Shell แตะ filesystem ของ workspace
 ไม่ได้ แตะ network ไม่ได้ (ถ้าไม่ประกาศ `network.outbound:<host>`
@@ -449,35 +495,48 @@ Bridge คือ **API ทั้งหมด** Shell แตะ filesystem ขอ
 | `network.outbound:<host>` | `fetch()` ไปยัง host นั้น (CSP inject ตอน serve) |
 | `approval.inline` | shell แสดง widget approve/deny ของตัวเอง (`thclaws.approvals.*`) แทน system modal |
 | `model.read` / `model.write` | `thclaws.model.*` — ดู / สลับ model |
-| `kms.read` / `research.read` | `thclaws.kms.*` / `thclaws.research.*` — อ่าน knowledge base / research job ตรง ๆ |
+| `mode.write` | `thclaws.mode.*` — อ่านหรือเปลี่ยน permission mode |
+| `memory.read` / `memory.write` | `thclaws.memory.*` — ข้อความ core memory |
+| `kms.read` / `kms.write` | `thclaws.kms.*` — browse, create, ingest |
+| `research.read` | `thclaws.research.*` — research job |
+| `schedule.read` / `schedule.write` | `thclaws.schedule.*` และ `thclaws.heartbeat.*` |
+| `skills.read` / `skills.write` | `thclaws.skills.*` — list, install, แก้ไข, ลบ skill |
+| `plugins.read` / `plugins.write` | `thclaws.plugins.*` |
+| `connectors.read` / `connectors.write` | `thclaws.connectors.*` — ลงทะเบียน MCP server |
+| `llm.complete` | `thclaws.llm.complete()` — เรียกโมเดลเปล่า ๆ |
+| `keys.write` | `thclaws.keys.set()` — เขียน API key ของ provider (อ่านไม่ได้) |
+| `session.read` / `session.list` / `session.write` | `thclaws.sessions.*` |
 
 การประกาศ `tools.invoke:<name>` ตัวใดตัวหนึ่งจะ **จำกัด** ให้ shell เรียกได้
 เฉพาะ tool ที่ประกาศ (`tools.invoke:*` = ทุกตัว); ถ้าไม่ประกาศเลยจะเรียกได้ไม่จำกัด
 
 User จะเห็น list นี้ก่อนติดตั้ง อะไรที่ไม่ประกาศจะ throw ตอน call
 
-### Doctor
+### การ lint
 
 ```sh
-thclaws shell doctor my-shell
+thclaws shell check ./my-shell
 # ตรวจ: manifest ถูกต้อง, entry มีจริง, permission สมเหตุสมผล,
 # ไม่มี Tauri-only API ที่จะพังใน Mode B, ไม่มี external link ที่
 # ทำให้ token leak ทาง Referer
 ```
+
+ถ้ามีอะไรเป็น error จะ exit 1 จึงเอาไปใส่ CI หรือ pre-commit hook ได้เลย
+(เอกสารเก่าบางฉบับเรียกคำสั่งนี้ว่า `shell doctor` ตัวจริงคือ `check`)
 
 ---
 
 ## Session และ persistence
 
 Shell session คือ session ของ thClaws ปกติ format JSONL เหมือนกัน
-ที่เดียวกัน (`./.thclaws/sessions/<id>.jsonl`) กลไก `--resume`
+ที่เดียวกัน (`./.thclaws/state/sessions/<id>.jsonl`) กลไก `--resume`
 เดียวกัน เพิ่มแค่ field `shell: { id, version }` ใน session
 header ที่เป็น optional — session ที่ไม่ใช่ shell ยังเขียน JSONL
 เหมือนเดิมทุกตัวอักษร ดังนั้น `cat` ยังใช้ได้กับทุก session
 
 ```sh
 # ดู session ของ shell เหมือน session อื่น
-cat ./.thclaws/sessions/sess-abc123.jsonl | head -3
+cat ./.thclaws/state/sessions/sess-abc123.jsonl | head -3
 # {"type":"header","id":"sess-abc123","shell":{"id":"image-generator","version":"0.1.0"},…}
 # {"type":"user","content":"generate a picture of a sunset"}
 # {"type":"assistant","content":[…]}
@@ -504,28 +563,19 @@ budget accounting เดิมจะ track usage shell ที่ใช้เก�
 
 ---
 
-## สิ่งที่ยังไม่มีใน Tier 1
+## ช่องว่างที่ยังเหลืออยู่
 
-Tier 1 ส่ง Mode A พร้อม built-in shell 1 ตัว (Session Explorer)
-และ bridge surface `run` / `cancel` / `on("text"|"done"|"error")`
-ช่องที่ขาดอยู่ลง Tier 2 / 3 ตาม
-[dev-plan/33](../dev-plan/33-gui-shell.md):
+ทุกอย่างที่แผน tier เดิมบอกว่ายังไม่มี ตอนนี้ ship แล้ว — ทั้ง picker,
+custom shell, bridge surface ที่กว้างขึ้น, serve mode, การ enforce
+permission และ CLI สำหรับพัฒนา ล้วนอธิบายไว้ข้างบนแล้ว ที่ยังควรรู้คือ
 
-- **ยังไม่มี picker UI** new-tab menu มีตัวเลือกเดียว ("Open
-  Session Explorer") Tier 2 เพิ่ม grid
-- **ยังไม่มี custom shell** discover ได้แค่ built-in ที่ฝังมา
-  Tier 2 เพิ่ม discovery จาก `~/.config/thclaws/gui-shell/` +
-  `./.thclaws/gui-shell/`
-- **ยังไม่มี `tools.invoke` / `storage` ใน bridge** Tier 1 มีแค่
-  `run` / `cancel` / `on` Tier 2 ขยาย surface
-- **ยังไม่มี serve mode** Mode B (`--serve --gui-shell`) ลง
-  Tier 2
-- **ยังไม่ enforce permission** manifest ประกาศ permission ได้ใน
-  Tier 1 แต่ไม่ check ตอน call Tier 3 enforce
-- **ยังไม่มี SDK / dev mode** `thclaws shell dev` + starter
-  template ลง Tier 3
-
----
+- **`shell.json` กับ `manifest.json`** CLI ฝั่งพัฒนากับ registry ตอนรัน
+  อ่านชื่อไฟล์คนละตัว (ดูข้างบน) จนกว่าจะรวมกันได้ shell ที่คุณจะทั้งพัฒนา
+  และติดตั้งในเครื่องต้องมีทั้งสองไฟล์
+- **Mode B คือ shell ทั้งตัว ไม่ใช่แท็บเดียว** `--serve --gui-shell` เปิด
+  shell นั้นตัวเดียวและไม่มีอย่างอื่น ไม่มีวิธี serve ตัว picker เอง
+- **ยังไม่มี grid แสดง worker/agent สด ๆ** UI ของ shell แสดงผลลัพธ์ที่
+  stream ออกมาได้ แต่ไม่มีแดชบอร์ดรวมของ run ที่รันพร้อมกัน
 
 ## Security model — แต่ละ mode ป้องกันอะไรจริง
 
@@ -574,7 +624,7 @@ Tier 1 ส่ง Mode A พร้อม built-in shell 1 ตัว (Session Expl
 | List shell ที่ติดตั้ง (Tier 3) | `thclaws shell list` |
 | เขียน shell ใหม่ (Tier 3) | clone template, `make dev` |
 | ลบ shell (Tier 3) | `thclaws shell remove <id>` |
-| ดู session ของ shell | `cat ./.thclaws/sessions/<id>.jsonl` |
+| ดู session ของ shell | `cat ./.thclaws/state/sessions/<id>.jsonl` |
 
 ---
 

@@ -17,7 +17,7 @@ This doc covers what shipped in Tier 1, the HMAC handshake the routing layer mus
 
 **Cross-references:**
 - [`serve-mode.md`](serve-mode.md) — single-tenant `--serve`; this doc is the multi-user superset.
-- [`sandbox.md`](sandbox.md) — `check_in` / `check_write_for_user` invariants the per-user boundary builds on.
+- [`permissions.md`](permissions.md) — `check_in` / `check_write_for_user` invariants the per-user boundary builds on.
 - [`sessions.md`](sessions.md) — `SessionStore` + JSONL append model; multi-tenant routes each user's JSONL to their own subdir.
 - dev-plan/35 (workspace-private) — full Tier 1/2/3 roadmap including this doc's "Tier 1 done means" acceptance.
 

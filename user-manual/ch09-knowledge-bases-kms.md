@@ -24,7 +24,7 @@ Rule of thumb: memory is for things about *you* and *how you work*. AGENTS.md is
 Two scopes, identical internal structure:
 
 - **User** — `~/.config/thclaws/kms/<name>/` — available in every project
-- **Project** — `.thclaws/kms/<name>/` — lives with the repo, follows it into git if tracked
+- **Project** — `.thclaws/state/kms/<name>/` — lives with the repo, follows it into git if tracked
 
 When the same name exists in both scopes, the **project** version wins.
 
@@ -161,11 +161,11 @@ Auto-learn never touches your hand-curated KMSes (`notes`,
   Quarantining auto-ingest in its own KMS keeps your real vaults
   clean.
 - **Easy reset.** Don't like what the agent learned? `rm -rf
-  .thclaws/kms/self_learn/` and start over. Your other vaults
+  .thclaws/state/kms/self_learn/` and start over. Your other vaults
   unaffected.
-- **Reviewable separately.** `git diff .thclaws/kms/self_learn/`
+- **Reviewable separately.** `git diff .thclaws/state/kms/self_learn/`
   shows only what the agent learned from itself; `git diff
-  .thclaws/kms/notes/` shows only what you curated by hand.
+  .thclaws/state/kms/notes/` shows only what you curated by hand.
 
 ### Settings
 
@@ -288,11 +288,11 @@ Create a new KMS and seed starter files (including `manifest.json`). Aliases: `c
 created KMS 'meeting-notes' (user) → /Users/you/.config/thclaws/kms/meeting-notes
 
 ❯ /kms new --project design-decisions
-created KMS 'design-decisions' (project) → ./.thclaws/kms/design-decisions
+created KMS 'design-decisions' (project) → ./.thclaws/state/kms/design-decisions
 ```
 
 - Default scope is **user** (available in every project)
-- `--project` puts it in `.thclaws/kms/` (lives with the repo)
+- `--project` puts it in `.thclaws/state/kms/` (lives with the repo)
 
 ### `/kms use NAME`
 
@@ -522,7 +522,7 @@ The **one-command maintenance umbrella**. Instead of running `lint`, `wrap-up --
 The five stages, run in order (cheap mechanical cleanup first, judgment-heavy work last):
 
 1. **Structural fixes** — broken page links, pages missing from the index, missing required frontmatter (the `lint` + `kms-linker` job).
-2. **Source reconciliation** — globs your live `.thclaws/sessions/`, and for any page whose `sources:` lists a `sess-…` whose session you've since **deleted**, drops just that dead id from `sources:`. **Pages are never deleted** — knowledge built from a session outlives the session; only the dangling pointer goes. (This is the full-vault version of the cleanup `/dream` does incrementally.)
+2. **Source reconciliation** — globs your live `.thclaws/state/sessions/`, and for any page whose `sources:` lists a `sess-…` whose session you've since **deleted**, drops just that dead id from `sources:`. **Pages are never deleted** — knowledge built from a session outlives the session; only the dangling pointer goes. (This is the full-vault version of the cleanup `/dream` does incrementally.)
 3. **Stale refresh** — refreshes pages flagged `> ⚠ STALE` by the re-ingest cascade.
 4. **Contradiction reconciliation** — the full `reconcile` pass (claims / entities / decisions / source-freshness) across the whole vault, with `## History` rewrites and `Conflict —` pages.
 5. **Orphans** — listed for your review, never modified.
@@ -670,7 +670,7 @@ confirmation, then runs `/kms drop NAME --force`).
 
 ### `/kms drop NAME [--force]`
 
-Destructive — removes the entire KMS directory tree (`<scope>/.thclaws/kms/<name>/` or `~/.config/thclaws/kms/<name>/`). Aliases: `delete`, `rm`.
+Destructive — removes the entire KMS directory tree (`<scope>/.thclaws/state/kms/<name>/` or `~/.config/thclaws/kms/<name>/`). Aliases: `delete`, `rm`.
 
 **Dry-run is the default.** Without `--force` it prints how many pages and sources *would* be removed but doesn't touch disk:
 
@@ -768,7 +768,7 @@ During export the frontmatter is normalised to OKF's vocabulary — your `catego
 
 ### Import — `/kms import-okf BUNDLE-DIR NAME [--project]`
 
-Creates a **new** KMS named `NAME` from a bundle on disk. Defaults to user scope; add `--project` to create it under `./.thclaws/kms/` instead:
+Creates a **new** KMS named `NAME` from a bundle on disk. Defaults to user scope; add `--project` to create it under `./.thclaws/state/kms/` instead:
 
 ```
 ❯ /kms import-okf ./partner-bundle partner-knowledge
@@ -922,7 +922,7 @@ After a few weeks of work, your KMS accumulates duplicates: two pages on the sam
 
 ```
 /dream                 # consolidate the 10 most recent sessions
-/dream --all           # consolidate every session under .thclaws/sessions/
+/dream --all           # consolidate every session under .thclaws/state/sessions/
 /dream auth            # bias the consolidation toward "auth"
 /dream --all auth      # combine the two
 /agents                # see the active dream + when it started
@@ -963,12 +963,12 @@ The `dreams` KMS is auto-created (project-scope) on the first `/dream` invocatio
 
 #### Reviewing the changes
 
-The dream agent runs with `permission_mode: auto` — it edits and deletes pages without prompting you. **The review step is `git diff`.** If your project KMS lives under git (which it should — `.thclaws/kms/` is just markdown):
+The dream agent runs with `permission_mode: auto` — it edits and deletes pages without prompting you. **The review step is `git diff`.** If your project KMS lives under git (which it should — `.thclaws/state/kms/` is just markdown):
 
 ```bash
-git diff .thclaws/kms/                        # see what changed
-git checkout -- .thclaws/kms/                 # discard the dream's work
-git add .thclaws/kms/ && git commit -m "..."  # accept it
+git diff .thclaws/state/kms/                        # see what changed
+git checkout -- .thclaws/state/kms/                 # discard the dream's work
+git add .thclaws/state/kms/ && git commit -m "..."  # accept it
 ```
 
 The `dream-YYYY-MM-DD.md` summary page is the agent's own narration of what it did — read that first, then spot-check the diffs that matter. If the summary says "no new insights" and writes a stub page, that's a valid no-op outcome.
@@ -1148,7 +1148,7 @@ For mixed Thai/English technical content, stick with English tech terms and Thai
 ## Troubleshooting
 
 - **"no KMS attached to this session"** — `/kms challenge`, `/kms dump`, `/kms reconcile`, and `/kms wrap-up --fix` need at least one KMS in `kms_active` so KMS tools register. The error message names the target KMS — run `/kms use <name>` first.
-- **KMS not visible in sidebar** — make sure the folder has a valid `index.md` (create one manually if you've built the KMS by hand) and that it lives in `~/.config/thclaws/kms/` or `.thclaws/kms/`.
+- **KMS not visible in sidebar** — make sure the folder has a valid `index.md` (create one manually if you've built the KMS by hand) and that it lives in `~/.config/thclaws/kms/` or `.thclaws/state/kms/`.
 - **Changes not reflected in agent responses** — the `index.md` is read on turn start; a running turn uses the snapshot taken before it began. Start a new turn.
 - **"no KMS named 'X'"** error from a tool call — the name is case-sensitive and must match the directory name exactly. Check with `/kms list`.
 - **Stale active list** — `.thclaws/settings.json` is the source of truth. Edit by hand if the sidebar checkboxes ever disagree with reality.

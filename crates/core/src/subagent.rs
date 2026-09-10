@@ -52,6 +52,31 @@ struct PathScopedWriteTool {
     patterns: Vec<String>,
 }
 
+/// Where a write will actually land: `..`/`.` collapsed, symlinks
+/// followed as far as the path exists. A file that doesn't exist yet has
+/// no canonical form of its own, so canonicalise its longest existing
+/// ancestor and re-join the tail — the tail can't hide a symlink,
+/// because it isn't there.
+///
+/// Mirrors `Sandbox::validate_against`, deliberately: the two must agree
+/// on the destination or the glob check and the write check are looking
+/// at different files.
+fn resolve_destination(abs: &std::path::Path) -> std::path::PathBuf {
+    let lexical = crate::sandbox::lexical_normalize(abs);
+    if let Ok(canonical) = lexical.canonicalize() {
+        return canonical;
+    }
+    let mut ancestor = lexical.parent();
+    while let Some(p) = ancestor {
+        if let Ok(canonical) = p.canonicalize() {
+            let tail = lexical.strip_prefix(p).unwrap_or(std::path::Path::new(""));
+            return canonical.join(tail);
+        }
+        ancestor = p.parent();
+    }
+    lexical
+}
+
 impl PathScopedWriteTool {
     fn check(&self, input: &Value) -> Result<()> {
         let Some(raw) = WRITE_PATH_KEYS
@@ -69,10 +94,19 @@ impl PathScopedWriteTool {
         } else {
             cwd.join(p)
         };
-        let rel = abs
-            .strip_prefix(&cwd)
+        // Match where the write LANDS, not how it was spelled. Globbing
+        // the raw path let `output/../escape.txt` satisfy `output/**`
+        // while the file appeared at the workspace root: the glob saw
+        // the `..`, the filesystem resolved it away (public issue #204).
+        let resolved = resolve_destination(&abs);
+        // cwd is canonicalised to match — otherwise a symlinked working
+        // directory (macOS `/tmp` → `/private/tmp`) makes every strip
+        // fail and every relative glob stop matching.
+        let base = cwd.canonicalize().unwrap_or(cwd);
+        let rel = resolved
+            .strip_prefix(&base)
             .map(|r| r.to_path_buf())
-            .unwrap_or(abs);
+            .unwrap_or(resolved);
         let cand = rel.to_string_lossy().replace('\\', "/");
         if self.globs.is_match(&cand) {
             Ok(())
@@ -1592,6 +1626,99 @@ mod tests {
         assert!(
             format!("{err}").contains("writePaths"),
             "expected writePaths denial, got: {err}"
+        );
+    }
+
+    /// Public issue #204: `output/../traversal.txt` matched the glob
+    /// `output/**` as a string while the write landed at the workspace
+    /// root. The three rows are the reporter's own control table.
+    #[tokio::test]
+    async fn write_paths_scoping_resolves_parent_traversal() {
+        struct OkWrite;
+        #[async_trait]
+        impl Tool for OkWrite {
+            fn name(&self) -> &'static str {
+                "Write"
+            }
+            fn description(&self) -> &'static str {
+                "mock"
+            }
+            fn input_schema(&self) -> Value {
+                json!({})
+            }
+            async fn call(&self, _input: Value) -> Result<String> {
+                Ok("wrote".into())
+            }
+        }
+        let scoped = PathScopedWriteTool {
+            inner: Arc::new(OkWrite),
+            globs: Arc::new(build_write_globset(&["output/**".to_string()]).unwrap()),
+            patterns: vec!["output/**".into()],
+        };
+
+        assert_eq!(
+            scoped
+                .call(json!({"path": "output/allowed.txt", "content": "x"}))
+                .await
+                .unwrap(),
+            "wrote"
+        );
+
+        for escape in [
+            "outside.txt",
+            "output/../traversal.txt",
+            // Deeper and doubled — one `..` stripped is not a fix.
+            "output/a/b/../../../traversal.txt",
+            "output/./../traversal.txt",
+        ] {
+            let err = scoped
+                .call(json!({"path": escape, "content": "x"}))
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{err}").contains("writePaths"),
+                "{escape} should be refused, got: {err}"
+            );
+        }
+
+        // `..` that stays inside the scope is still legal — the fix
+        // resolves paths, it does not ban a character.
+        assert_eq!(
+            scoped
+                .call(json!({"path": "output/sub/../kept.txt", "content": "x"}))
+                .await
+                .unwrap(),
+            "wrote"
+        );
+    }
+
+    /// The other half of #204's suggested fix: a symlink must be followed
+    /// before the globs see the path, or `output/link/escape.txt` walks
+    /// out the same way `..` did.
+    #[test]
+    fn resolve_destination_follows_symlinks_and_new_tails() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("output")).unwrap();
+        std::fs::create_dir(root.join("elsewhere")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("elsewhere"), root.join("output/link")).unwrap();
+
+        // A file that does not exist yet still resolves, via its parent.
+        assert_eq!(
+            resolve_destination(&root.join("output/new.txt")),
+            root.join("output/new.txt")
+        );
+        // `..` collapses even when nothing along the way exists.
+        assert_eq!(
+            resolve_destination(&root.join("output/../up.txt")),
+            root.join("up.txt")
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            resolve_destination(&root.join("output/link/escape.txt")),
+            root.join("elsewhere/escape.txt"),
+            "a symlinked directory must resolve before the globs match"
         );
     }
 }

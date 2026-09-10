@@ -220,7 +220,7 @@ browser tab จะ attach session เดียวกัน ดู[บทที�
 
 ## Session
 
-ทุก turn จะถูกบันทึกอัตโนมัติลงไฟล์ `./.thclaws/sessions/<id>.jsonl`
+ทุก turn จะถูกบันทึกอัตโนมัติลงไฟล์ `./.thclaws/state/sessions/<id>.jsonl`
 Session จะ **ผูกกับโปรเจกต์** — เมื่อคุณเริ่ม thClaws ใน directory ใหม่
 ก็จะเจอรายการ session ที่ยังว่างเปล่า
 
@@ -230,143 +230,52 @@ session โต้ตอบกับการเปลี่ยน provider / mod
 
 ## ใน `.thclaws/` มีอะไรบ้าง
 
-root ของ sandbox ยังใช้เก็บ config และ runtime state ระดับโปรเจกต์ด้วย:
+ตั้งแต่ **workspace v2** โฟลเดอร์นี้แบ่งเป็นสองชั้น และควรรู้ไว้ เพราะมันคือ
+ตัวตัดสินว่าอะไรติดไปกับ agent และอะไรอยู่กับเครื่อง
+
+**ชั้น config — ตัว agent เอง** deploy ได้ publish ได้ ควร commit:
 
 ```
 .thclaws/
-├── settings.json     project config (model, permissions, tool lists, kms.active)
-├── mcp.json          project MCP servers
-├── agents/           agent definitions (*.md)
-├── skills/           installed skills
-├── commands/         legacy prompt-template slash commands
-├── plugins/          installed plugin bundles
-├── plugins.json      plugin registry (project scope)
-├── prompt/           prompt overrides
-├── sessions/         session history — see Chapter 7
-├── memory/           MEMORY.md + per-topic memory files — see Chapter 8
-├── kms/              project-scope knowledge bases — see Chapter 9
-├── rules/            extra *.md rules injected into the system prompt
-├── AGENTS.md         project-level agent instructions
-└── team/             Agent Teams runtime state — see Chapter 17
+├── settings.json      config ระดับโปรเจกต์ (model, permission, รายการ tool, kms.active)
+├── mcp.json           MCP server ของโปรเจกต์
+├── AGENTS.md          คำสั่งระดับโปรเจกต์
+├── agents/            นิยาม agent (*.md)
+├── skills/            skill ที่ติดตั้งไว้
+├── commands/          slash command แบบ prompt template (ของเดิม)
+├── plugins/           plugin bundle ที่ติดตั้ง
+├── plugins.json       ทะเบียน plugin (ระดับโปรเจกต์)
+├── prompt/            prompt ที่ override ไว้
+├── rules/             ไฟล์ *.md เพิ่มเติมที่ฉีดเข้า system prompt
+├── data/              ไฟล์ที่ติดไปกับ agent
+├── agent_workflow/    สคริปต์ workflow ที่เขียนไว้ (*.js) — ดูบทที่ 25
+└── memory/            MEMORY.md และไฟล์ memory รายหัวข้อ — ดูบทที่ 8
 ```
 
-เช็คพวกนี้เข้า git เพื่อแชร์กับทีมได้ แต่ควรใส่ `.thclaws/sessions/`
-และ `.thclaws/team/` ไว้ใน `.gitignore` เพราะทั้งคู่เป็น runtime state
+**ชั้น state — runtime ของเครื่องนี้** อยู่ใน gitignore ไม่เคยถูก publish
+และรอดข้ามการอัปเดต agent:
 
-ส่วนของระดับผู้ใช้ทั้งระบบจะอยู่ใต้ `~/.config/thclaws/` (และมี
-`~/.claude/` เป็น fallback ของ Claude Code)
-
-### `settings.json` reference
-
-runtime toggle ทั้งหมดอยู่รวมกันในไฟล์ JSON ไฟล์เดียว โหลดตามลำดับ
-ความสำคัญ:
-
-1. CLI flag (สูงสุด)
-2. `.thclaws/settings.json` (ระดับโปรเจกต์ — commit ลง repo ได้)
-3. `~/.config/thclaws/settings.json` (ระดับผู้ใช้ทั้งระบบ)
-4. `~/.claude/settings.json` (fallback ของ Claude Code)
-5. compile-time default ใน binary (ต่ำสุด)
-
-`settings.json` ไม่เก็บ API key — key อยู่ใน OS keychain หรือไฟล์
-`.env` ตามที่คุณเลือกตอนเปิดใช้ครั้งแรก (ดูข้างบน)
-
-ครั้งแรกที่เปิด thClaws ในโปรเจกต์ใหม่ จะ bootstrap ไฟล์ template
-ที่ list ทุก field พร้อม default ไว้ให้ — เปิด `.thclaws/settings.json`
-แล้วแก้ค่าตามต้องการ ลบ field หรือเซ็ตเป็น `null` คือใช้ default
-
-#### Model + การคุม turn
-
-| Key | Type | Default | ดูเพิ่ม |
-|---|---|---|---|
-| `model` | string | `"claude-sonnet-4-6"` | [บทที่ 6](ch06-providers-models-api-keys.md) |
-| `maxTokens` | number | `32000` | (max output tokens ต่อ turn) |
-| `maxIterations` | number | `50` | (cap ของ tool-call loop ต่อ turn) |
-| `thinkingBudget` | number | *(ไม่ตั้ง = auto)* | [บทที่ 6](ch06-providers-models-api-keys.md) — ระดับ thinking ในรูป token budget: `0` ปิด, `2048` low, `10000` medium, `32000` high; `/thinking` และ pill บน sidebar เขียนค่านี้ให้ |
-| `searchEngine` | string | `"auto"` | (`auto` / `tavily` / `brave` / `serpapi` / `duckduckgo`) |
-
-#### Permissions + tools
-
-| Key | Type | Default | ดูเพิ่ม |
-|---|---|---|---|
-| `permissions` | `"auto"` / `"ask"` หรือ `{allow, deny}` | `"auto"` | [บทที่ 5](ch05-permissions.md) |
-| `allowedTools` | string[] | `null` | [บทที่ 5](ch05-permissions.md) |
-| `disallowedTools` | string[] | `null` | [บทที่ 5](ch05-permissions.md) |
-
-#### Knowledge bases + memory
-
-| Key | Type | Default | ดูเพิ่ม |
-|---|---|---|---|
-| `kms` | `{active: string[]}` | `{active: []}` | [บทที่ 9](ch09-knowledge-bases-kms.md) |
-| `autoLearn` | bool | `false` | [บทที่ 9 §Self-improving](ch09-knowledge-bases-kms.md#self-improving-ai-agent-auto-learn) |
-| `autoLearnKms` | string | `"self_learn"` | [บทที่ 9 §Self-improving](ch09-knowledge-bases-kms.md#self-improving-ai-agent-auto-learn) |
-| `autoLearnReconcileHours` | number | `6` | [บทที่ 9 §Self-improving](ch09-knowledge-bases-kms.md#self-improving-ai-agent-auto-learn) |
-
-#### Plan mode + skills + subagents
-
-| Key | Type | Default | ดูเพิ่ม |
-|---|---|---|---|
-| `planContextStrategy` | `"compact"` / `"clear"` | `"compact"` | [บทที่ 18](ch18-plan-mode.md) |
-| `skillsListingStrategy` | `"full"` / `"names-only"` / `"discover-tool-only"` | `"full"` | [บทที่ 12](ch12-skills.md) |
-| `extract_save_skill_models` | string / string[] | `null` | [บทที่ 12](ch12-skills.md) (override built-in skill model) |
-| `translator_subagent_model` | string | `null` | [บทที่ 15](ch15-subagents.md) |
-
-#### Agent Teams
-
-| Key | Type | Default | ดูเพิ่ม |
-|---|---|---|---|
-| `teamEnabled` | bool | `false` | [บทที่ 17](ch17-agent-teams.md) |
-
-#### Provider routing
-
-| Key | Type | Default | ดูเพิ่ม |
-|---|---|---|---|
-| `openrouterFreeOnly` | bool | `false` | [บทที่ 6](ch06-providers-models-api-keys.md) |
-| `gatewayUseFor` | string[] | `[]` | [บทที่ 6](ch06-providers-models-api-keys.md) (เช่น `["openai", "anthropic"]`) |
-
-#### GUI
-
-| Key | Type | Default | ดูเพิ่ม |
-|---|---|---|---|
-| `windowWidth` | number | `null` (auto จาก monitor) | [บทที่ 4](ch04-desktop-gui-tour.md) |
-| `windowHeight` | number | `null` (auto จาก monitor) | [บทที่ 4](ch04-desktop-gui-tour.md) |
-| `guiScale` | number | `null` (1.0) | [บทที่ 4](ch04-desktop-gui-tour.md) (clamp 0.5–3.0) |
-| `showRawResponse` | bool | `false` | (debug: dump raw text ของ assistant ลง stderr) |
-
-#### ไฟล์พี่น้องของ `settings.json`
-
-settings ที่ schema ใหญ่หรือเปลี่ยนบ่อยอยู่แยกไฟล์ ไม่ปนใน
-`settings.json`:
-
-- **`.thclaws/mcp.json`** — registry ของ MCP server ที่จะ spawn
-  ตอน start (รูปแบบ `{"mcpServers": {...}}` เดียวกับที่ Claude
-  Code ใช้) — ดู[บทที่ 14](ch14-mcp.md)
-- **`.thclaws/hooks/<event>.sh`** — shell script รัน lifecycle
-  event 8 ตัว (pre_tool_use, post_tool_use, session_start ฯลฯ)
-  — ดู[บทที่ 13](ch13-hooks.md)
-- **`.thclaws/AGENTS.md`** หรือ `CLAUDE.md` — instruction ระดับ
-  โปรเจกต์ที่ฉีดเข้า system prompt — ดู[บทที่ 8](ch08-memory-and-agents-md.md)
-- **`.env` ในโปรเจกต์ หรือ OS keychain** — API key (ไม่อยู่ใน
-  settings.json) — ดู[บทที่ 6](ch06-providers-models-api-keys.md)
-
-#### ตัวอย่าง
-
-```json
-{
-  "model": "claude-sonnet-4-6",
-  "permissions": "auto",
-  "maxTokens": 32000,
-  "maxIterations": 50,
-  "thinkingBudget": 10000,
-  "searchEngine": "auto",
-  "planContextStrategy": "compact",
-  "skillsListingStrategy": "full",
-  "kms": { "active": ["project-notes"] },
-  "autoLearn": true,
-  "openrouterFreeOnly": false,
-  "gatewayUseFor": [],
-  "teamEnabled": false,
-  "windowWidth": null,
-  "windowHeight": null,
-  "guiScale": null
-}
 ```
+.thclaws/state/
+├── sessions/          ประวัติ session — ดูบทที่ 7
+├── kms/               ฐานความรู้ระดับโปรเจกต์ — ดูบทที่ 9
+├── team/              runtime state ของ Agent Teams — ดูบทที่ 17
+├── workflows/         state ของ workflow ที่รันไป — ดูบทที่ 25
+├── schedule/          state ของงานตั้งเวลา — ดูบทที่ 19
+├── todos.md           กระดาษทดของ agent
+├── usage/  usage.jsonl  บัญชี token
+├── media-jobs.jsonl   งานวิดีโอที่ยังทำอยู่ — ดูบทที่ 11
+├── phone-home.json    binding ของ thClaws Remote
+├── cache/             cache ต่างๆ
+└── browser-profile/   โปรไฟล์ Chromium ที่ engine ดูแล — ดูบทที่ 28
+```
+
+> **อัปเกรดมาจากเวอร์ชันเก่า?** ไม่ต้องทำอะไร ครั้งแรกที่ thClaws เปิด
+> workspace แบบก่อน v2 มันจะย้ายรายการเหล่านี้ลง `state/` ให้เอง เป็นการ
+> *ย้าย* ไม่ใช่คัดลอก จึงไม่มีอะไรหาย ส่วน `memory/` จงใจให้อยู่ชั้นบน
+> เพราะเป็นส่วนหนึ่งของตัว agent ไม่ใช่ state ของเครื่อง
+
+การ publish agent (`/cloud publish`) หรือ deploy (`/deploy`) จะพาเฉพาะชั้น
+config ไป และข้าม `state/` ทั้งก้อน นั่นคือเหตุผลที่ agent ที่เผยแพร่ออกไป
+ไม่เคยมี session, ฐานความรู้ หรือ cookie ของคุณติดไปด้วย
+

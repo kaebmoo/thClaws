@@ -50,7 +50,13 @@ The dream agent is shipped inside the binary as a markdown file with YAML frontm
 fn seed_builtins(&mut self) {
     const BUILTINS: &[(&str, &str)] = &[
         ("dream", include_str!("default_prompts/dream.md")),
-        // … also: translator, kms-linker, kms-reconcile, kms-maintain
+        ("translator", include_str!("default_prompts/translator.md")),
+        ("summarizer", include_str!("default_prompts/summarizer.md")),
+        ("content-extractor", include_str!("default_prompts/content-extractor.md")),
+        ("folder-indexer", include_str!("default_prompts/folder-indexer.md")),
+        ("kms-linker", include_str!("default_prompts/kms-linker.md")),
+        ("kms-reconcile", include_str!("default_prompts/kms-reconcile.md")),
+        ("kms-maintain", include_str!("default_prompts/kms-maintain.md")),
     ];
     for (fallback_name, raw) in BUILTINS {
         if let Some(agent) = Self::parse_agent_md_str(raw, fallback_name) {
@@ -100,8 +106,8 @@ color: purple
 Notable choices:
 
 - **No `model:` field.** The dream agent uses the session's active model. Pre-fix the agent def hardcoded `claude-opus-4-7`, which routed through the session's CURRENT provider — so users on OpenAI hit `404: model claude-opus-4-7 does not exist` even with an Anthropic key set. Long-context judgment models (Opus / GPT-4.1 / Sonnet 4.6) work best for this task; pick one before invoking `/dream` if you care. Override per-project via `model:` in `.thclaws/agents/dream.md`.
-- **Tool whitelist is tight.** `Read`/`Glob`/`Grep` exist so the agent can mine `.thclaws/sessions/*.jsonl` files; `KmsRead`/`KmsSearch` for survey; `KmsWrite`/`KmsAppend`/`KmsDelete` for mutation; `KmsCreate` for bootstrapping the `dreams` audit KMS; `SessionRename` for the Pass-2 auto-rename; `TodoWrite` for tracking which pass it's on. Notably absent: `Bash`, `Edit`, `Write`, `Memory*`, `Task`, `WebSearch`, `WebFetch`. The dream agent can only modify the KMS + session metadata (titles) — it can't touch project source, can't recurse into more subagents, can't reach the network.
-- **`permissionMode: auto`** — the agent's KMS mutations land directly. The user-facing review pattern is `git diff .thclaws/kms/`, not in-modal approval. A user who wants approval-gated dreaming can override the AgentDef.
+- **Tool whitelist is tight.** `Read`/`Glob`/`Grep` exist so the agent can mine `.thclaws/state/sessions/*.jsonl` files; `KmsRead`/`KmsSearch` for survey; `KmsWrite`/`KmsAppend`/`KmsDelete` for mutation; `KmsCreate` for bootstrapping the `dreams` audit KMS; `SessionRename` for the Pass-2 auto-rename; `TodoWrite` for tracking which pass it's on. Notably absent: `Bash`, `Edit`, `Write`, `Memory*`, `Task`, `WebSearch`, `WebFetch`. The dream agent can only modify the KMS + session metadata (titles) — it can't touch project source, can't recurse into more subagents, can't reach the network.
+- **`permissionMode: auto`** — the agent's KMS mutations land directly. The user-facing review pattern is `git diff .thclaws/state/kms/`, not in-modal approval. A user who wants approval-gated dreaming can override the AgentDef.
 - **`maxTurns: 120`** — consolidation across multiple KMS + 10 sessions can take many turns. Default is 200; 120 is a comfortable ceiling that still bounds runaway behavior.
 
 ### Primary knowledge KMS
@@ -112,7 +118,7 @@ The current prompt resolves a **primary knowledge KMS** once at the top of the r
 
 The body is a multi-pass loop (1 → 2 → 2b → 3 → 3b → 4):
 
-1. **Survey + skip + source-reconcile.** `KmsRead` the primary KMS index (and any other active KMS). `KmsRead` the `dreams` index — it holds per-session digests (`sess-<id>`) and run summaries (`dream-YYYY-MM-DD`); the digests are the **resume markers** (a session with a current digest is skippable). Glob `.thclaws/sessions/*.jsonl` (10 most recent by default, all with `--all`). Skip a session when a `dreams` digest exists for it AND that digest's `last_message_at` ≥ file mtime. **Source-reconcile sweep:** glob the *full* live-session set and, for any page (topic or `sess-*`) whose `sources:` lists a `sess-<id>` with no live file (user deleted the session), drop just that dead id — **never delete the page**. (The full-vault analogue of this lives in `/kms maintain`; see [kms.md](kms.md) §15.)
+1. **Survey + skip + source-reconcile.** `KmsRead` the primary KMS index (and any other active KMS). `KmsRead` the `dreams` index — it holds per-session digests (`sess-<id>`) and run summaries (`dream-YYYY-MM-DD`); the digests are the **resume markers** (a session with a current digest is skippable). Glob `.thclaws/state/sessions/*.jsonl` (10 most recent by default, all with `--all`). Skip a session when a `dreams` digest exists for it AND that digest's `last_message_at` ≥ file mtime. **Source-reconcile sweep:** glob the *full* live-session set and, for any page (topic or `sess-*`) whose `sources:` lists a `sess-<id>` with no live file (user deleted the session), drop just that dead id — **never delete the page**. (The full-vault analogue of this lives in `/kms maintain`; see [kms.md](kms.md) §15.)
 2. **Read + skip-empty + auto-rename.** Read each surviving session JSONL. **Skip empty sessions** (no `user`/`assistant` messages — only header/plan/goal/rename events): no digest, no rename. Otherwise auto-rename if the title is missing or matches the `sess-<8hex>` shape.
 3. *(Pass 2b)* **Per-session digest → `dreams`.** For every non-empty session, `KmsWrite` a **thin** digest page named by session id (`sess-<id>`) to `dreams`: 1–3 sentences on what the session was about + `folded_into: [<topic-slugs>]` + `last_message_at` (load-bearing for Pass 1's skip filter). The digest is provenance, **not** a second copy of the knowledge — that lives in the Pass 3 topic page.
 4. *(Pass 3)* **Consolidate into canonical topic pages → primary knowledge KMS.** For each topic worth curating: pick a topic-named page (`corgi`, `auth-conventions`), `KmsSearch` first, and enrich the **one canonical page** (`KmsAppend`/merge-`KmsWrite`) rather than creating parallels — merging across sessions. Full-fidelity (the page must be ≥ as useful as re-doing the research). When the primary KMS *is* `dreams`, these topic pages live in `dreams` alongside the digests, distinguished by name.
@@ -129,7 +135,7 @@ The original "two-way, pass-based" rule (Pass 3 → active KMS, Pass 4 → `drea
 
 ### `--all` flag
 
-`shell_dispatch.rs`'s Dream arm encodes the `--all` flag into the user message as `[scope: ALL_SESSIONS — process every .jsonl file under .thclaws/sessions/, not just the 10 most recent. Widen Pass 3b targeted reconciliation to every page Pass 3 touched.]`. The dream prompt reads this scope hint in Pass 1 to widen the glob; with no hint it defaults to "10 most recent".
+`shell_dispatch.rs`'s Dream arm encodes the `--all` flag into the user message as `[scope: ALL_SESSIONS — process every .jsonl file under .thclaws/state/sessions/, not just the 10 most recent. Widen Pass 3b targeted reconciliation to every page Pass 3 touched.]`. The dream prompt reads this scope hint in Pass 1 to widen the glob; with no hint it defaults to "10 most recent".
 
 The active KMS list reaches the dream agent through the same `kms::system_prompt_section` injection as any other agent — it sees `## Knowledge bases` listing the attached KMS by name, which it uses as the authoritative list to operate on.
 
@@ -180,7 +186,7 @@ pub fn delete_page(kref: &KmsRef, page_name: &str) -> Result<PathBuf> {
 
 Path safety reuses `writable_page_path` — the same validator that `write_page` and `append_to_page` use. That means `KmsDelete` can't traverse outside the KMS pages dir, can't delete the reserved `index` / `log` / `SCHEMA` pages, and can't be tricked by `..` segments or absolute paths.
 
-`remove_index_bullet` strips any line in `index.md` containing `(pages/<stem>.md)` and rewrites the file. `append_log_header` adds `## [YYYY-MM-DD] deleted | <stem>` to `log.md` so the `git diff .thclaws/kms/` review surface shows both the page removal and the log entry side-by-side.
+`remove_index_bullet` strips any line in `index.md` containing `(pages/<stem>.md)` and rewrites the file. `append_log_header` adds `## [YYYY-MM-DD] deleted | <stem>` to `log.md` so the `git diff .thclaws/state/kms/` review surface shows both the page removal and the log entry side-by-side.
 
 Registration sites for `KmsDeleteTool`:
 - [`repl.rs`](../thclaws/crates/core/src/repl.rs) — CLI `start_session` (gated on `!config.kms_active.is_empty()`) and the print-mode session builder
@@ -281,7 +287,7 @@ The full GUI test suite (`cargo test --features gui`) was 957 tests passing pre-
 
 What's **not** unit-tested:
 - The dispatch path (`shell_dispatch::dispatch_chat` for `SlashCommand::Dream`) — it's a thin shim over `spawn_side_channel`, which has its own existing test surface in `side_channel.rs`. End-to-end dream behavior is validated by manual GUI testing against a real KMS + sessions.
-- The dream system prompt's actual consolidation behavior — that's prompt engineering, not unit-testable. Verification comes from running `/dream` in a project, reviewing `git diff .thclaws/kms/`, and tightening the prompt if the agent over- or under-consolidates.
+- The dream system prompt's actual consolidation behavior — that's prompt engineering, not unit-testable. Verification comes from running `/dream` in a project, reviewing `git diff .thclaws/state/kms/`, and tightening the prompt if the agent over- or under-consolidates.
 
 ---
 
@@ -290,7 +296,7 @@ What's **not** unit-tested:
 - **Session mining is bounded at 10 most-recent files.** A project with hundreds of sessions per week may miss insights from older sessions. Future: `/dream --since 2026-04-01` or sliding window driven by KMS frontmatter `last_consolidated`.
 - **No KmsList tool.** The dream agent enumerates active KMS via the system-prompt section and pages via `index.md`. A first-class `KmsList` tool would be more robust if the system-prompt rendering ever changes shape.
 - **No "candidate output" mode.** The dream agent edits in place and relies on git diff for review. The Anthropic Dreams pattern (input never modified; output is a new memory_store) would require a tempdir/branch parallel KMS — significantly more work, deferred to v2.
-- **Single AgentDef.** Only one built-in agent (`dream`). The `seed_builtins` table is set up to take more (`&[(&str, &str)]`); future built-ins (e.g. `kms-lint`, `session-summarizer`) would slot in here.
+- ~~**Single AgentDef.**~~ **Closed.** `seed_builtins` now seeds eight: `dream`, `translator`, `summarizer`, `content-extractor`, `folder-indexer`, `kms-linker`, `kms-reconcile`, `kms-maintain`. The KMS maintenance agents are the ones to know about here — `/kms maintain` is the full-vault analogue of dream's incremental source-reconcile sweep, and `/kms reconcile` handles the pages dream's Pass 3b deliberately leaves alone.
 - **Daemon-driven scheduled dreams.** `/dream` is user-driven only. A `/schedule add --cron '0 3 * * 0' --dream` shortcut could run weekly dreams via the existing schedule daemon (see [`schedule.md`](schedule.md)). Not implemented.
 - **No CLI surface.** `/dream` is GUI-only because it needs the chat surface to render the side bubble. CLI users can run a long-form `Task(agent: "dream", prompt: "...")` but it blocks the parent's turn.
 

@@ -36,7 +36,7 @@ Prices are **what you pay** — upstream cost with the 1.25× platform markup al
 
 A context marked **`?`** was never published by the provider — it is that provider's blanket default, kept because a missing window breaks model pickers. Treat it as a lower bound, not a specification.
 
-630 models across 14 providers.
+625 models across 14 providers.
 
 ### Anthropic
 
@@ -222,7 +222,7 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `cohere/command-r-plus-08-2024` | 128k | $3.12 | — | $12.50 |
 | `cohere/command-r7b-12-2024` | 128k | $0.05 | — | $0.19 |
 | `cohere/north-mini-code:free` | 256k | free | — | free |
-| `deepseek/deepseek-chat` | 164k | $0.40 | — | $1.11 |
+| `deepseek/deepseek-chat` | 164k | $0.32 | — | $1.29 |
 | `deepseek/deepseek-chat-v3-0324` | 164k | $0.36 | — | $1.42 |
 | `deepseek/deepseek-chat-v3.1` | 33k | $0.31 | — | $1.19 |
 | `deepseek/deepseek-r1` | 64k | $0.88 | — | $3.12 |
@@ -235,7 +235,8 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `deepseek/deepseek-v4-flash-0731` | 1.04858M | $0.08 | — | $0.22 |
 | `deepseek/deepseek-v4-flash-vision-exp` | 1.04858M | $0.28 | — | $0.83 |
 | `deepseek/deepseek-v4-pro` | 1.04858M | $1.19 | — | $2.39 |
-| `deepseek/deepseek-v4-pro-0813` | 1.04858M | $0.72 | — | $2.17 |
+| `deepseek/deepseek-v4-pro-0813` | 1.04858M | $1.31 | — | $3.94 |
+| `deepseek/deepseek-v4.1-flash` | 1.04858M | $0.38 | — | $1.50 |
 | `dots-studio/dots-3-note-preview:free` | 512k | free | — | free |
 | `google/gemini-2.5-flash` | 1.04858M | $0.38 | — | $3.12 |
 | `google/gemini-2.5-flash-lite` | 1.04858M | $0.12 | $0.01 | $0.50 |
@@ -298,7 +299,7 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `minimax/minimax-m2` | 197k | $0.32 | — | $1.27 |
 | `minimax/minimax-m2-her` | 66k | $0.38 | — | $1.50 |
 | `minimax/minimax-m2.1` | 197k | $0.38 | free | $1.50 |
-| `minimax/minimax-m2.5` | 197k | $0.34 | $0.19 | $1.35 |
+| `minimax/minimax-m2.5` | 197k | $0.38 | $0.19 | $1.50 |
 | `minimax/minimax-m2.7` | 197k | $0.38 | — | $1.50 |
 | `minimax/minimax-m3` | 1.04858M | $0.38 | — | $1.50 |
 | `mistralai/codestral-2508` | 256k | $0.38 | — | $1.12 |
@@ -334,7 +335,6 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `nousresearch/hermes-3-llama-3.1-405b` | 131k | $1.25 | — | $1.25 |
 | `nousresearch/hermes-3-llama-3.1-70b` | 131k | $0.88 | — | $0.88 |
 | `nousresearch/hermes-4-405b` | 131k | $1.25 | — | $3.75 |
-| `nousresearch/hermes-4-70b` | 131k | $0.16 | — | $0.50 |
 | `nvidia/nemotron-3-nano-30b-a3b` | 262k | $0.06 | — | $0.25 |
 | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | 256k | free | — | free |
 | `nvidia/nemotron-3-super-120b-a12b` | 262k | $0.11 | — | $0.50 |
@@ -400,11 +400,7 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `openai/o3-pro` | 200k | $25.00 | — | $100.00 |
 | `openai/o4-mini` | 200k | $1.38 | $0.34 | $5.50 |
 | `openai/o4-mini-high` | 200k | $1.38 | — | $5.50 |
-| `openrouter/auto-beta` | 2M | $-1250000 | — | $-1250000 |
-| `openrouter/bodybuilder` | 128k | $-1250000 | — | $-1250000 |
 | `openrouter/free` | 200k | free | — | free |
-| `openrouter/fusion` | 1M | $-1250000 | — | $-1250000 |
-| `openrouter/pareto-code` | 200k | $-1250000 | — | $-1250000 |
 | `perceptron/perceptron-mk1` | 33k | $0.19 | — | $1.88 |
 | `perplexity/sonar` | 127k | $1.25 | — | $1.25 |
 | `perplexity/sonar-deep-research` | 128k | $2.50 | — | $10.00 |
@@ -426,7 +422,7 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `qwen/qwen3-235b-a22b-2507` | 262k | $0.28 | — | $1.10 |
 | `qwen/qwen3-235b-a22b-thinking-2507` | 131k | $0.29 | — | $2.88 |
 | `qwen/qwen3-30b-a3b` | 41k | $0.15 | — | $0.62 |
-| `qwen/qwen3-30b-a3b-instruct-2507` | 262k | $0.06 | — | $0.24 |
+| `qwen/qwen3-30b-a3b-instruct-2507` | 262k | $0.11 | — | $0.38 |
 | `qwen/qwen3-30b-a3b-thinking-2507` | 131k | $0.25 | — | $3.00 |
 | `qwen/qwen3-32b` | 41k | $0.10 | — | $0.35 |
 | `qwen/qwen3-8b` | 41k | $0.15 | — | $0.57 |
@@ -446,7 +442,7 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `qwen/qwen3-vl-32b-instruct` | 131k | $0.13 | — | $0.52 |
 | `qwen/qwen3-vl-8b-instruct` | 131k | $0.15 | — | $0.57 |
 | `qwen/qwen3-vl-8b-thinking` | 131k | $0.22 | — | $2.62 |
-| `qwen/qwen3.5-122b-a10b` | 262k | $0.36 | — | $3.00 |
+| `qwen/qwen3.5-122b-a10b` | 262k | $0.33 | — | $2.60 |
 | `qwen/qwen3.5-27b` | 262k | $0.24 | — | $1.95 |
 | `qwen/qwen3.5-35b-a3b` | 262k | $0.39 | — | $1.56 |
 | `qwen/qwen3.5-397b-a17b` | 262k | $0.69 | — | $4.38 |
@@ -663,11 +659,10 @@ A context marked **`?`** was never published by the provider — it is that prov
 
 ### DeepSeek
 
-| Model | Context | Input ($/M) | Output ($/M) |
-|---|---:|---:|---:|
-| `deepseek-v4-flash` | 1.04858M | $0.18 | $0.35 |
-| `deepseek-v4-flash-vision-exp` | 262k? | $0.18 | $0.35 |
-| `deepseek-v4-pro` | 1.04858M | $0.54 | $1.09 |
+| Model | Context | Input ($/M) | Cached in ($/M) | Output ($/M) |
+|---|---:|---:|---:|---:|
+| `deepseek-flash` | 262k? | $0.43 | $0.0086 | $1.72 |
+| `deepseek-v4-pro` | 1.04858M | $1.90 | $0.06 | $5.69 |
 
 ### MiniMax
 

@@ -12,6 +12,8 @@ those happen without your nod.
 | `ask` | Mutating tools (Edit, Write, Bash) prompt for approval before running. Read-only tools run automatically. | `/permissions ask` or `--permission-mode ask` |
 | `plan` | Read-only exploration — all mutating tools are blocked. Use it to survey a codebase before doing any work. See [Chapter 18](ch18-plan-mode.md). | `/plan enter` (separate slash command — not via `/permissions`) |
 | `linegated` | Approval prompts route to your LINE chat on the phone instead of asking on the desktop. See [Chapter 21](ch21-line-and-browser-chat.md). | Auto-activates when the LINE bridge connects (pre-LINE mode is stashed and restored on disconnect). If you overrode with `/permissions auto` and want it back without disconnecting LINE, run `/permissions linegated` while the bridge is still connected — not persisted to `settings.json` (runtime state only). |
+| `telegramgated` | Same idea for Telegram: approvals arrive as inline-keyboard buttons in your Telegram chat. See [Chapter 23](ch23-telegram.md). | **Auto-activates only** — connecting the Telegram bridge switches to it, disconnecting restores the previous mode. `/permissions telegramgated` is not accepted; use `/permissions auto` or `ask` to override while still connected. |
+| `messengergated` | Same again for Facebook Page Messenger, with approvals as quick-reply chips. See [Chapter 24](ch24-messenger.md). | **Auto-activates only**, same as `telegramgated`. |
 
 > **While `linegated` is active, the surface you typed from doesn't
 > matter.** Every approval prompt routes to LINE — whether you typed
@@ -223,8 +225,12 @@ falls back to command-screening only **rather than breaking your commands**. So
 turning the mode on is always safe: it either confines, or runs
 unconfined-with-warning. It applies to **subagent and workflow** Bash
 identically. Notes: v1 is **filesystem-only** (no network egress control), and
-the Linux/Landlock path is **write-confinement only** (secret-read masking is
-macOS-only for now).
+on Linux the **Landlock path is
+write-confinement only** — the secret-read denial above holds under macOS
+Seatbelt and the `bubblewrap` fallback, but *not* under Landlock, which is
+the path most modern Linux hosts take. Treat read-denial as a macOS
+guarantee and a Linux best-effort: on Linux, keep a secret out of a shell
+command's reach with file permissions, not with this.
 
 > Layering: the `pre_tool_use` hook (soft policy/audit, Chapter 13) runs
 > first and can deny; `bash.sandbox` is the hard floor under it.

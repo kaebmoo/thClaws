@@ -33,17 +33,37 @@ Three ways:
 | `/plan exit` (or `/plan cancel`) | Restores the prior mode. Clears any active plan. |
 | `/plan status` | Prints the current mode + plan summary. |
 
+Each subcommand has aliases, so you needn't remember the exact word: `enter` also answers to `on` and `start`; `exit` also answers to `off`, `cancel`, `stop` and `abort`; `status` also answers to `show`. Anything else prints the usage line.
+
+If nothing was stashed — you were dropped straight into plan mode — exiting lands you in `ask`, the safe default, rather than in whatever the session happened to start with.
+
 While in plan mode the sidebar shows a cyan **PLAN** pill in the header. Other modes (`AUTO`, `ASK`) show as a dim outlined pill.
 
 ## What's blocked in plan mode
 
-Any tool that mutates files or runs commands is **hard-blocked at the dispatch gate**. The model gets a structured "Blocked: {tool} not available in plan mode. Use Read / Grep / Glob to explore. When you have enough context, call SubmitPlan." tool result, reads it, and switches to read-only exploration.
+There is no hand-maintained blocklist. The rule is one line:
 
-Blocked: `Write`, `Edit`, `Bash` (with mutating commands), `DocxEdit` / `XlsxEdit` / `PptxEdit` / `*Create` document tools, `WebFetch`, `WebSearch`, MCP tools that mutate, `TodoWrite`.
+> **In plan mode, every tool that would have asked for your approval is refused instead.**
 
-Available: `Read`, `Grep`, `Glob`, `Ls`, the four plan tools (`SubmitPlan` / `UpdatePlanStep` / `EnterPlanMode` / `ExitPlanMode`), and `AskUserQuestion` (so the model can still clarify scope mid-plan).
+Anything whose `requires_approval` is true gets **hard-blocked at the dispatch gate**, and the model gets a structured "Blocked: {tool} is not available in plan mode. Use Read / Grep / Glob / Ls to explore the codebase. When you have enough context, call SubmitPlan…" tool result. It reads that and switches to read-only exploration.
 
-`TodoWrite` is specifically blocked even though it'd otherwise be allowed — the structured `SubmitPlan` flow is the right replacement when the user can see the plan live in the sidebar.
+Tying the two together means the list can't drift: a new tool that asks for approval is automatically unavailable during planning, with nobody having to remember to add it.
+
+What that works out to:
+
+**Blocked** — `Write`, `Edit`, **all** of `Bash`, the `Docx*` / `Xlsx*` / `Pptx*` document tools, `WebFetch`, `WebSearch`, `TodoWrite`, and any MCP tool that asks for approval.
+
+**Available** — `Read`, `Grep`, `Glob`, `Ls`, the four plan tools (`SubmitPlan` / `UpdatePlanStep` / `EnterPlanMode` / `ExitPlanMode`), and `AskUserQuestion`, so the model can still clarify scope mid-plan.
+
+Two of those are worth spelling out.
+
+**`Bash` is blocked outright, not selectively.** Its approval gate is unconditional, so during the plan phase the model cannot run *any* shell command — not `ls`, not `git log`, not `cargo check`. If your plan depends on the model knowing what a command outputs, tell it before you enter plan mode, or approve the plan and let it find out in step 1. This surprises people who expect read-only shell to slip through.
+
+**`TodoWrite` is not a special case.** It asks for approval, so it's refused by the same rule as everything else. The effect is the one you want — `SubmitPlan` is the right way to show a plan when the user can watch it live — but it isn't a hand-written exception.
+
+### Subagents during the plan phase
+
+`Task` and `Skill` don't require approval, so the model *can* spawn a subagent while planning. That is safe: a subagent inherits the parent's permission mode, so it starts in Plan mode too and hits the same gate. It can read and search on the parent's behalf; it cannot write anything the parent couldn't.
 
 ## The plan sidebar
 
@@ -93,11 +113,77 @@ If the model finishes 3 consecutive turns without progressing the plan (no `Upda
 
 The threshold is intentional — long single-turn jobs (a slow Bash command, a heavy refactor) all happen *within* one turn, so they never trigger. Only a model genuinely looping (read, think, reply, read again, think, reply, never commit) crosses 3 turns.
 
+**The banner fires once, not once per turn.** It appears on the turn the counter first hits 3 and then goes quiet. Any plan mutation re-arms it — an `UpdatePlanStep`, a Skip, or your own click on Continue — so it can warn you again after the next three unproductive turns instead of nagging every turn in between.
+
 ### Footer
 
 Shows the running tally:
 - *During execution:* "2 of 7 steps complete" (dim grey)
 - *When all done:* "✓ All 7 steps complete" (accent colour, bold)
+
+## The driver: what happens after you click Approve
+
+Approve doesn't just unblock the tools and hope. The shared session runs
+a **driver** that pushes the plan forward one step at a time. After every
+agent turn it looks at the plan and decides what to do next:
+
+1. If the earliest unfinished step is **Failed**, it stops and waits.
+   The sidebar's Retry / Skip / Abort buttons are yours; the driver will
+   not push past a step you haven't resolved. (An earlier version did,
+   and burned a downstream step's whole retry budget on work that was
+   never unblocked in the first place.)
+2. Otherwise it finds the first step that is still `Todo` or
+   `InProgress`, and sends the model a continuation prompt for exactly
+   that step.
+3. When the last step goes `Done`, the driver stops and the permission
+   mode restores itself.
+
+So "Approve once, walk away" is a real guarantee rather than a hope
+about model behaviour — the loop is in the engine, not in the prompt.
+
+### Per-step retry budget
+
+Each step gets **3 attempts**. If the model burns all three without
+transitioning the step to `Done` or `Failed`, the driver force-marks it
+`Failed` with the note:
+
+> `max retries per step exceeded (3 attempts) — the agent looped without committing to done or failed. Use the sidebar Retry / Skip / Abort buttons to recover.`
+
+That's the same Failed state as any other, so you get the same Retry /
+Skip / Abort row. **Retry resets the counter**, giving the step a fresh
+three attempts.
+
+The budget is per step, not global, so one bad step can't consume the
+whole run's iteration cap and starve the steps after it.
+
+### Step-boundary compaction
+
+Crossing from one step to the next is a natural place to shed history,
+so the driver compacts there — once per boundary, and only when at least
+one step is already done (before that there's nothing worth compacting).
+
+Plan-tool results are always preserved untouched: they're the
+breadcrumbs the model uses to know what it has already finished. Only
+ordinary tool results from before the boundary are replaced with a short
+placeholder.
+
+Two strategies, set in `.thclaws/settings.json`:
+
+```json
+{ "planContextStrategy": "compact" }
+```
+
+| Value | What it does |
+|---|---|
+| `"compact"` | **Default.** Structural shrink — old non-plan tool results become placeholders, the shape of history stays |
+| `"clear"` | Wipes history outright, keeping only the first user message for grounding |
+
+`clear` is the aggressive option, worth it only on very long plans
+(20+ steps) where compaction alone isn't keeping up. It forces the model
+to rely entirely on each step's recorded `output` and the plan structure
+in its system reminder, so a plan whose later steps need detail from
+earlier conversation will do worse under it. Anything other than these
+two values falls back to `compact`.
 
 ## Sequential gating
 
@@ -145,7 +231,9 @@ In CLI mode (`thclaws --cli`), plan mode works identically at the data-model lev
 ─────────────────────────────────────────────
 ```
 
-Same status glyphs as the GUI (`✓` done, `◉` in progress, `✕` failed). Failure notes render dim-italic-ish below the step. The CLI doesn't get the stalled-turn detector, replan badge, or completion celebration — those are sidebar-specific affordances.
+Same status glyphs as the GUI (`✓` done, `◉` in progress, `✕` failed). Failure notes render dim-italic-ish below the step.
+
+**The CLI has no driver.** That's the real difference, and it's bigger than the missing sidebar. The step-by-step loop, the per-step retry budget, the step-boundary compaction and the stalled-turn banner all live in the shared-session worker that the GUI and `--serve` run — the CLI REPL has none of them. Plan state, the sequential gate and the plan tools work exactly the same, but *you* drive the steps by prompting, instead of clicking Approve and walking away. Use the CLI for plan mode when you want the structure and the visible checklist; use the GUI when you want the plan to run itself.
 
 ## Persistence across `/load`
 
@@ -159,7 +247,7 @@ So you can interrupt, save, come back tomorrow, and the model picks up exactly w
 
 ## Working with `TodoWrite` outside plan mode
 
-`TodoWrite` is the **casual scratchpad** for the model's own task tracking. It writes to `.thclaws/todos.md` as a markdown checklist. The user only sees it if they open the file — there's no live UI.
+`TodoWrite` is the **casual scratchpad** for the model's own task tracking. It writes to `.thclaws/state/todos.md` as a markdown checklist. The user only sees it if they open the file — there's no live UI.
 
 Use `TodoWrite` when:
 - The model wants to jot down "things I'm working on" for itself

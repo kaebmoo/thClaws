@@ -324,7 +324,7 @@ the gateway. With it, those forged tokens carry the attacker's
 `aud` and get rejected before any billing logic runs.
 
 Full threat model + rotation procedure live in
-[`dev-plan/09-cloud-gateway.md`](../../dev-plan/09-cloud-gateway.md)
+`dev-plan/09-cloud-gateway.md` (workspace-only)
 (workspace-only).
 
 ---

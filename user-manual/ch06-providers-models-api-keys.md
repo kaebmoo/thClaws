@@ -12,6 +12,9 @@ chip in the sidebar (Desktop GUI, v0.7.2+).
 | xAI | `xai/*` | `XAI_API_KEY` | xAI Grok; `xai/grok-4.3` default |
 | Groq | `groq/*` | `GROQ_API_KEY` | Groq LPU (very fast); `groq/llama-3.3-70b-versatile` default |
 | TokenRouter | `tokenrouter/*` | `TOKENROUTER_API_KEY` | Unified router to 300+ models (`tokenrouter/<vendor>/<model>`) |
+| AtlasCloud | `atlascloud/*` | `ATLASCLOUD_API_KEY` | Hosted OpenAI-compatible router; `atlascloud/qwen/qwen3.5-flash` default |
+| Meta | `meta/*` | `META_API_KEY` | Meta's hosted API; `meta/muse-spark-1.2` default |
+| 9router | `9router/*` | `NINEROUTER_API_KEY` | **Self-hosted** router — set `NINEROUTER_BASE_URL` (default `http://localhost:20128/v1`); the base URL is editable in Settings |
 | Anthropic | `claude-*` | `ANTHROPIC_API_KEY` | Extended thinking, prompt caching (system + tools) |
 | Anthropic Agent SDK | `agent/*` | — (uses Claude Code's own auth) | Drives the `claude` CLI under your Claude Pro / Max subscription instead of API billing. v0.9.6 added an in-process MCP bridge so the model gets thClaws's tool registry (KMS, Memory, MCP-contributed, Bash, Edit, …) in addition to Claude Code's built-ins — no need to switch to `claude-*` for tool parity. Task / Team / Skill / Plan / AskUserQuestion are intentionally not bridged. |
 | OpenAI | `gpt-*`, `o1-*`, `o3*`, `o4-*` | `OPENAI_API_KEY` | Chat Completions; automatic prompt caching |
@@ -69,6 +72,13 @@ conversation is saved, a new one starts with the new provider.
 | `opus`   | `claude-opus-4-6` |
 | `haiku`  | `claude-haiku-4-5` |
 | `flash`  | `gemini-2.5-flash` |
+| `openthaigpt` | `thaillm/OpenThaiGPT-ThaiLLM-8B-Instruct-v7.2` |
+| `typhoon` | `thaillm/Typhoon-S-ThaiLLM-8B-Instruct` |
+| `pathumma` | `thaillm/Pathumma-ThaiLLM-qwen3-8b-think-3.0.0` |
+| `thalle` | `thaillm/THaLLE-0.2-ThaiLLM-8B-fa` |
+
+The last four are the NSTDA Thai LLM models — `/model typhoon` is a lot
+easier to type than the full id.
 
 ```
 ❯ /model sonnet

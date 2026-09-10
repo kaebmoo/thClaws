@@ -20,7 +20,15 @@ use std::sync::Mutex;
 static LOCK: Mutex<()> = Mutex::new(());
 
 fn log_path() -> PathBuf {
-    std::path::Path::new(".thclaws").join("media-jobs.jsonl")
+    // Runtime state, so it belongs in the state tier: that one string is
+    // what the publish filter, the deploy uploader and the pod-side
+    // extract all key on. While it sat at the top of `.thclaws/` it was
+    // shipped with published agents AND overwritten by a deploy, losing
+    // the provider-side operation refs of any render still in flight.
+    // Legacy workspaces are migrated by `LEGACY_STATE_ENTRIES`.
+    std::path::Path::new(".thclaws")
+        .join("state")
+        .join("media-jobs.jsonl")
 }
 
 /// Terminal + in-flight states. Stringly-typed for forward-compatible

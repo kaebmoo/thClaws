@@ -457,7 +457,7 @@ Three tools register **always** (not conditional on entry presence — the agent
 | `MemoryWrite` | **yes** | `{name: string, content: string}` | Create or replace an entry. Frontmatter preserved; `created:` stamped on new, `updated:` always today. Auto-updates `MEMORY.md` |
 | `MemoryAppend` | **yes** | `{name: string, content: string}` | Append a chunk; bumps `updated:`. Creates with bare body if missing |
 
-`MemoryWrite` and `MemoryAppend` bypass `Sandbox::check_write` to land inside the resolved memory root — same intentional carve-out pattern as `TodoWrite` (`.thclaws/todos.md`) and `KmsWrite` (`.thclaws/kms/...`). Path safety enforced via `memory::writable_entry_path` (no `..` / separators / control chars / reserved `MEMORY` stem; canonicalized inside the memory root).
+`MemoryWrite` and `MemoryAppend` bypass `Sandbox::check_write` to land inside the resolved memory root — same intentional carve-out pattern as `TodoWrite` (`.thclaws/state/todos.md`) and `KmsWrite` (`.thclaws/state/kms/...`). Path safety enforced via `memory::writable_entry_path` (no `..` / separators / control chars / reserved `MEMORY` stem; canonicalized inside the memory root).
 
 ---
 
@@ -494,12 +494,12 @@ The `register_task_tools` returns the `SharedTaskStore` so the REPL can read the
 | Name | `TodoWrite` |
 | Approval | yes |
 | Schema | `{todos: [{id: string, content: string, status: "pending"\|"in_progress"\|"completed"}]}` |
-| Persists | `<cwd>/.thclaws/todos.md` (markdown) |
+| Persists | `<cwd>/.thclaws/state/todos.md` (markdown) |
 
 Casual self-tracking scratchpad. Writes the entire todo list as a markdown checklist (`- [x]`, `- [-]`, `- [ ]` for completed/in_progress/pending). REPLACES the entire list (full state replacement, not append).
 
 Distinct from the structured plan tools above:
-- TodoWrite: invisible to the user (only visible if they open `.thclaws/todos.md`), no driver, no sequential gating, no audit
+- TodoWrite: invisible to the user (only visible if they open `.thclaws/state/todos.md`), no driver, no sequential gating, no audit
 - SubmitPlan + UpdatePlanStep: sidebar-rendered with checkmarks, sequential gating, per-step verification, audit
 
 The model is instructed (via the tool's description) to read existing `todos.md` at session start and resume / replace based on user intent — don't silently start fresh on top of stale work.
@@ -578,14 +578,14 @@ Five tools — `TextToImage`, `ImageToImage`, `TextToVideo`, `ImageToVideo`, `Me
 - **`provider.rs`** — `ImageProvider` / `VideoProvider` traits, `ImageRequest` / `VideoRequest` (the latter carries `resolution` + `duration_seconds` + optional `init_image`), `JobState` (`Running { pct } | Done { bytes } | Failed { msg }`), `ProviderJobRef`, and `resolve_endpoint(native_key_vars, native_base, gateway_segment)` (native key env-var cascade + gateway overlay).
 - **`registry.rs`** — `all()` (image: `gemini`, `openai`, `qwen`), `video_all()` (video: `veo`, `dashscope_video`), `resolve()` / `resolve_video()` map a `(provider, model)` pair to an impl. Each provider's `resolve_model()` accepts ids + aliases.
 - **`providers/{gemini,openai,qwen,veo,dashscope_video}.rs`** — one file per backend.
-- **`job.rs`** — append-only JSONL job store at `.thclaws/media-jobs.jsonl` (latest line per id wins). Video is intrinsically async: the `*Video` tools `submit()` and return a `job_id`; `MediaJobStatus` reloads the ref and `poll()`s the provider, downloading the clip on `Done`.
+- **`job.rs`** — append-only JSONL job store at `.thclaws/state/media-jobs.jsonl` (latest line per id wins). Video is intrinsically async: the `*Video` tools `submit()` and return a `job_id`; `MediaJobStatus` reloads the ref and `poll()`s the provider, downloading the clip on `Done`.
 - **`mod.rs`** — `save_image` → `output/img-<ts>-<sha8>.<ext>`, `save_video` → `output/vid-<ts>-<sha8>.mp4`, plus `sniff_ext` / `sniff_video_ext` content sniffers. `save_under_output` anchors that `output/` at the **active sandbox root**, so in a multiuser `--serve` pod each user's media lands under their own `workspace-<id>/output/` (per-user isolation, dev-plan/42), not a shared process-cwd dir; the returned path stays workspace-relative.
 
 | Tool | Approval | Backends (model → key) |
 |---|---|---|
 | `TextToImage` / `ImageToImage` | prompt | Gemini `gemini-3.1-{flash,pro}-image` (`GEMINI_API_KEY`/`GOOGLE_API_KEY`), OpenAI `gpt-image-2` (`OPENAI_API_KEY`), Qwen `qwen-image-2.0[-pro]` (`DASHSCOPE_API_KEY`) |
 | `TextToVideo` / `ImageToVideo` | prompt | Veo `veo-3.1-{fast,,lite}-generate-preview` (Google key; `durationSeconds` clamped 4–8), DashScope `happyhorse-1.0-{t2v,i2v}` (`DASHSCOPE_API_KEY`; `720P`/`1080P`) |
-| `MediaJobStatus` | auto | reads `.thclaws/media-jobs.jsonl`, polls the owning provider |
+| `MediaJobStatus` | auto | reads `.thclaws/state/media-jobs.jsonl`, polls the owning provider |
 
 `ImageToVideo` sends the local first-frame image inline as a base64 data URI (DashScope `input.media[].first_frame`; Veo equivalent) — no upload round-trip.
 
@@ -645,6 +645,29 @@ Markdown → EPUB, joining the Docx/Xlsx/Pptx/Pdf document family (see
 artifact.
 
 ---
+
+## 9i. Folder indexing — FolderIndex
+
+`tools/folder_index.rs`. Builds or refreshes an `index.md` cataloguing a
+folder — the **deterministic** half of folder indexing, as opposed to
+having the model read every file and summarise. `action: "plan"` reports
+what would be indexed; the index is **resumable**, so a second run
+extends an existing `index.md` instead of rebuilding it. No approval:
+it writes one file inside the folder it was pointed at.
+
+## 9j. Slide rendering — RenderSlides
+
+`tools/slide_render.rs`. Renders a Marp markdown deck to a PDF plus
+per-slide PNGs through the thClaws slide-render service (Marp +
+headless Chromium). The service is metered on the thclaws.cloud
+gateway; a self-hosted deployment points at its own instance.
+
+## 9k. Speech — TextToSpeech
+
+`tools/speech_gen.rs`. Synthesizes speech from text, provider-abstracted
+behind the same shape as the other media tools (Gemini TTS today).
+Output is written to disk and the path returned, so a long narration
+never travels through the conversation as base64.
 
 ## 10. Code organization
 

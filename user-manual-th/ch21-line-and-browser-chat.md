@@ -1,18 +1,17 @@
 # บทที่ 21 — LINE chat & web browser bridge
 
-ขับ thClaws จากมือถือ — ไม่ว่าจะเป็นการคุยผ่าน LINE (ผ่าน OA bot
-`@thClaws`) หรือใช้หน้า chat ในเว็บเบราว์เซอร์ตัวไหนก็ได้ ทั้งสอง
-ช่องทางใช้ Rust agent loop เดียวกันบน desktop ของคุณ เปลี่ยน
-แค่ surface เท่านั้น เพิ่มมาตั้งแต่ v0.9.0+ ผ่านชุด plan-07 /
-plan-08 / plan-10
+ขับ thClaws จากมือถือ LINE OA `@thClaws` ทำหน้าที่ระบุตัวคุณและส่ง
+link ให้ ส่วนตัวแชทเกิดในเว็บเบราว์เซอร์ตัวไหนก็ได้ โดยขับ Rust
+agent loop เดียวกันบน desktop ของคุณ เปลี่ยนแค่ surface เท่านั้น
+เพิ่มมาตั้งแต่ v0.9.0+ ผ่านชุด plan-07 / plan-08 / plan-10
 
 ## ทำไมต้องใช้
 
 - approve คำสั่ง `Bash` จากมือถือ ขณะที่ desktop รันอัตโนมัติ
   อยู่บ้าน
-- คุยกับ agent ต่อจากที่ไหนก็ได้ — พิมพ์บนมือถือ ส่วน tool
-  registry เต็มชุดบน desktop (Bash, Edit, KMS, MCP, skills) ยัง
-  รันในเครื่อง
+- คุยกับ agent ต่อจากที่ไหนก็ได้ — พิมพ์ในเบราว์เซอร์บนมือถือ
+  ส่วน tool registry เต็มชุดบน desktop (Bash, Edit, KMS, MCP,
+  skills) ยังรันในเครื่อง
 - สั่งงานยาว ๆ โดยไม่ต้องนั่งติดโต๊ะ
 
 desktop ไม่หายไปไหน — code, secret, tool ทั้งหมดยังอยู่ในเครื่อง
@@ -22,12 +21,18 @@ desktop ไม่หายไปไหน — code, secret, tool ทั้งห
 
 Axum service เล็ก ๆ ที่ `line.thclaws.ai` (และ `chat.thclaws.ai`
 สำหรับ browser variant) ถือ WebSocket จาก desktop ของคุณไว้
-แล้ว route LINE inbound message / browser keystroke เข้าไปให้
-desktop รัน agent ตามปกติและ fan out ทุก assistant delta, tool
-call, approval prompt กลับผ่าน WS เดิม — มือถือหรือเบราว์เซอร์
-เห็น conversation ที่ stream ออกมาเรียลไทม์ session ฝั่ง LINE
-ผูกกับ LINE user id, session ฝั่งเบราว์เซอร์ auth ด้วย magic
-link ที่ LINE bot mint ให้
+แล้ว route browser keystroke เข้าไปให้ desktop รัน agent ตามปกติ
+และ fan out ทุก assistant delta, tool call, approval prompt กลับ
+ผ่าน WS เดิม — เบราว์เซอร์จึงเห็น conversation ที่ stream ออกมา
+เรียลไทม์
+
+**LINE OA เป็น launcher ไม่ใช่ chat surface** นี่คือจุดที่คนเข้าใจ
+ผิดกันบ่อย การคุยกับ `@thClaws` ไม่ได้คุยกับ agent ของคุณ หน้าที่
+ของ OA คือระบุตัวคุณ ส่ง pairing code ให้ บอกว่า desktop ของคุณ
+ออนไลน์อยู่ไหม และ mint link ใช้ครั้งเดียวที่พาไปเปิดแชทจริงที่
+`chat.thclaws.ai` ตัวบทสนทนาอยู่ในเบราว์เซอร์ LINE เหลืองานเดียว
+ใน loop ของการสนทนา คือส่ง approval prompt ให้ตอนที่ไม่มี browser
+session เปิดอยู่
 
 ## pair มือถือ (LINE)
 
@@ -42,27 +47,45 @@ setup ครั้งเดียว:
    *<line-display-name-ของคุณ>*"
 4. chip LINE บน sidebar เปลี่ยนเป็นเขียว — เชื่อมต่อแล้ว
 
-หลัง pair ทุก message ที่ส่งให้ `@thClaws` จะไหลเข้า chat
-session ของ thClaws บน desktop agent รันที่ฝั่งนั้น stream
-response กลับมา แล้ว LINE bot relay มาเป็น bubble tool call ที่
-ต้อง approve (Bash, Edit, Write) จะ trigger LINE Quick Reply
-chip — แตะ **[Approve]** หรือ **[Deny]** จากมือถือ
+หลัง pair แล้ว ส่งอะไรให้ OA ก็ได้ มันจะตอบกลับด้วย link ใหม่เข้า
+browser chat ซึ่งเป็นที่ที่คุณคุยกับ agent จริง ๆ ส่วน tool call ที่
+ต้อง approve (Bash, Edit, Write) จะกลับมาที่ LINE เป็น Quick Reply
+chip เมื่อไม่มี browser session เปิดอยู่ — แตะ **[Approve]** หรือ
+**[Deny]** จากมือถือ
 
-## คำสั่ง LINE OA
+## OA ตอบอะไรกลับมาบ้าง
 
-หลัง pair แล้ว LINE bot รู้จัก text command ชุดเล็ก ๆ ที่เหลือ
-ถือเป็น chat message
+OA ไม่ใช่ console สำหรับพิมพ์คำสั่ง ไม่ว่าคุณพิมพ์อะไรลงไป มันจะดู
+ข้อเท็จจริงสองอย่าง — pair แล้วหรือยัง และ desktop ออนไลน์อยู่ไหม
+ตอนนี้ — แล้วตอบกลับด้วยหนึ่งในสามอย่าง
 
-| คุณพิมพ์ | เกิดอะไรขึ้น |
+| สถานะของคุณ | สิ่งที่ตอบกลับ |
 |---|---|
-| `/chat` | mint magic link ไปยัง browser chat (ดูข้างล่าง) แล้วตอบกลับมา link ใช้ครั้งเดียว, TTL 10 นาที |
-| `/pair` | ออก pairing code ใหม่ — มีประโยชน์ตอน disconnect thClaws แล้วอยากเริ่ม session ใหม่ |
-| `/unpair` | ลืม LINE user id นี้ message ถัดไปจะได้ pairing code ใหม่ ไม่ใช่ chat |
-| `/status` | บอกว่า thClaws ติดต่อจาก relay ได้อยู่ไหมตอนนี้ |
-| อย่างอื่น | route ไปเป็น user message ตามปกติให้ chat session บน desktop |
+| ยังไม่ได้ pair | ข้อความต้อนรับพร้อม pairing code ใหม่ |
+| pair แล้ว desktop ออฟไลน์ | "thClaws not active" พร้อมชี้ไปที่ `/pair` ถ้าเครื่องนั้นหายไปถาวร |
+| pair แล้ว desktop ออนไลน์ | magic link ใช้ครั้งเดียวเข้า browser chat |
 
-ถ้า pair แล้วแต่ desktop offline (พับ laptop, เน็ตหลุด) bot จะ
-ตอบ "thClaws is offline" แทนที่จะกลืน message เงียบ ๆ
+แถวที่สามคือแถวสำคัญ — **เมื่อ pair แล้วและออนไลน์ ทุกข้อความจะได้
+link กลับมา** ไม่ว่าจะเป็น `hello`, `/chat`, สติกเกอร์ หรือย่อหน้ายาว ๆ
+ที่คุณตั้งใจส่งให้ agent สิ่งที่คุณพิมพ์ใน LINE ไม่ไปถึง agent และไม่ถูก
+เก็บเข้าคิวไว้ให้ด้วย ถ้าเผลอพิมพ์ prompt ลงใน LINE ให้เปิด link แล้ว
+พิมพ์ใหม่ในเบราว์เซอร์
+
+คำสั่งจริงมีตัวเดียวคือ **`/pair`** ซึ่งบังคับออก pairing code ใหม่ไม่ว่า
+คุณจะอยู่ในสถานะไหน เป็นทางออกสำหรับตอนที่ thClaws เครื่องที่ code ผูกอยู่
+หายไปแล้วและต้องลงทะเบียนเครื่องใหม่
+
+> `/chat`, `/unpair` และ `/status` **ไม่ใช่** สิ่งที่พิมพ์ใส่ OA แต่เป็น
+> HTTP route บน relay ที่ desktop กับเบราว์เซอร์เรียกใช้ พิมพ์ลงไปใน LINE
+> ก็ได้แค่ link ตอบกลับตามปกติ release เก่า ๆ เคยใช้ LINE เป็น chat surface
+> จริง และเอกสารเก่าบางฉบับยังอธิบายไว้แบบนั้นอยู่
+
+ปุ่ม **Chat** ใน rich menu ทำงานด้วยการส่งข้อความ `/chat` แทนคุณ ซึ่งก็ตกลง
+ไปในสาขา "pair แล้วและออนไลน์ → link" อันเดียวกัน มันเป็นทางลัดให้แตะครั้งเดียว
+ไม่ใช่คำสั่งคนละตัว
+
+ข้อความที่ไม่ใช่ text (สติกเกอร์ รูป ไฟล์) ระบบไม่เข้าใจ มันจะมาถึงในรูป
+ข้อความตรงตัวว่า `(non-text message)` แล้วได้คำตอบเดียวกับอย่างอื่น
 
 ## browser chat (เส้นทาง `/chat`)
 
@@ -73,6 +96,11 @@ code block, response ยาว ๆ, markdown ลำบาก ส่ง `/chat` �
 ```
 https://chat.thclaws.ai/launch?token=...
 ```
+
+link นี้ **ใช้ครั้งเดียวและมี TTL 5 นาที** — ให้ขอตอนพร้อมจะเปิดจริง
+ไม่ใช่ขอเผื่อไว้ล่วงหน้า (ตัวเลข 10 นาทีที่อาจเคยเห็นคือ idle timeout
+ของ *session* ในเบราว์เซอร์ ซึ่งเป็นนาฬิกาคนละเรือนที่เริ่มนับหลังคุณ
+เข้าไปแล้ว)
 
 เปิดในเบราว์เซอร์ตัวไหนก็ได้ — link auto-redirect ผ่านหน้า
 splash (มีไว้เลี่ยง URL-preview crawler ของ LINE ที่จะใช้ token
@@ -151,7 +179,7 @@ routing มือถือ/เบราว์เซอร์ active เฉพา
 ## upload ไฟล์จากมือถือหรือเบราว์เซอร์
 
 attach ไฟล์จาก surface ไหนก็ได้ — desktop บันทึกไฟล์ลง
-`<workspace>/uploads/` แล้ว `AGENT.md` ในไดเรกทอรีนั้นบอก agent
+`<workspace>/_uploads/` แล้ว `AGENT.md` ในไดเรกทอรีนั้นบอก agent
 ว่าควรทำอะไรกับไฟล์ เพิ่มใน v0.9.6
 
 **ลิมิต:**
@@ -175,15 +203,14 @@ FYI (ก่อน v0.9.7 synthetic เป็นข้อมูลล้วน �
 "อยากให้ทำอะไรกับสิ่งนี้?") project-level `AGENT.md` /
 `CLAUDE.md` override directive ได้ ถ้านั่นคือพฤติกรรมที่ต้องการ
 
-**จาก LINE:** ส่งไฟล์เป็น LINE attachment ปกติ (รูป, วิดีโอ,
-ไฟล์) relay forward upload reference ผ่าน broker channel;
-desktop ดึง byte จาก CDN ของ LINE ด้วย channel access token
-แล้ว save ในเครื่อง agent จึงเห็น synthetic message รูปแบบ
-เดียวกับ path ของ browser รวมถึง directive `Read the file and
-respond.` ตัวเดียวกัน
+**ทำจาก LINE ไม่ได้** การแนบรูปหรือไฟล์ในแชท LINE ไม่เกิดประโยชน์
+อะไร เพราะ relay ยุบทุกข้อความที่ไม่ใช่ text ให้เหลือสตริงตรงตัวว่า
+`(non-text message)` คุณจึงได้แค่คำตอบ launcher ตามปกติ และไฟล์ไม่เคย
+ถูกดึงมาเลย ให้เปิด browser chat แล้ว drop ไฟล์ตรงนั้นแทน (การรองรับ
+รูปและเสียงผ่าน LINE อยู่ในแผน ยังไม่ได้ ship)
 
 **คุม behavior ที่ไหน:** วาง `AGENT.md` ไว้ที่
-`<workspace>/uploads/AGENT.md` (หรือที่ workspace root ถ้าอยาก
+`<workspace>/_uploads/AGENT.md` (หรือที่ workspace root ถ้าอยาก
 กฎเดียวสำหรับทุกอย่าง) agent อ่านเป็นส่วนหนึ่งของ cascade
 CLAUDE.md / AGENT.md ปกติ แล้วทำตาม directive ที่อยู่ในนั้น:
 "OCR PDF ที่ upload ทุกตัวแล้วเก็บ text ใน `kms/sources/`",
@@ -207,16 +234,22 @@ CLAUDE.md / AGENT.md ปกติ แล้วทำตาม directive ที�
 - **LINE pairing token ใช้ครั้งเดียว, TTL 10 นาที, hash ฝั่ง
   server** pairing code ที่ถูกขโมยไปใช้ไม่ได้แล้วหลัง OA emit
   reply "Paired ✓"
+- **การ pair มีอายุ 30 วัน** binding token จะหมดอายุเองหลังจากนั้น
+  มือถือที่ pair ไว้เมื่อเดือนก่อนแล้วไม่ได้ใช้เลยจึงตกกลับไปได้คำตอบ
+  แบบต้อนรับพร้อม code ใหม่ ไม่ใช่ความผิดพลาด — ส่ง `/pair` แล้ว
+  redeem code ใหม่ได้เลย
 
 ## troubleshooting
 
 | อาการ | สาเหตุที่น่าจะใช่ | วิธีแก้ |
 |---|---|---|
 | link `/chat` ขึ้น "expired" ตั้งแต่แตะครั้งแรก | URL preview crawler ของ LINE กิน token ไปก่อน | เปิด link จาก LINE chat ตรง ๆ ไม่ใช่จาก copy ที่ forward ต่อ |
-| LINE bot ตอบ "thClaws is offline" | WS ฝั่ง desktop หลุด (sleep, network) | เปิด desktop กลับมา; pairing ยังอยู่ |
+| LINE bot ตอบ "thClaws not active" | WS ฝั่ง desktop หลุด (sleep, network) | เปิด desktop กลับมา; pairing ยังอยู่ |
+| พิมพ์ prompt ลงใน LINE แล้วได้ link กลับมา | ปกติ — OA เป็น launcher ไม่ใช่ chat surface | เปิด link แล้วพิมพ์ใหม่ในเบราว์เซอร์ |
 | browser chat ค้างที่ "Opening thClaws Chat…" | เบราว์เซอร์ block script auto-submit inline | check ว่า CSP อนุญาต `script-src 'self' 'unsafe-inline'` บน `/launch` |
 | ปุ่ม Quick Reply ของ LINE ไม่ขึ้นตอน approval | browser chat เปิดอยู่ด้วย — approval ไปที่นั่นแทน | approve ในเบราว์เซอร์ หรือปิด tab แล้ว approval รอบหน้าจะตกไปที่ LINE |
-| pairing code ค้าง "(none)" หลังพิมพ์ส่ง | code เกิน 10 นาที หรือถูกใช้ไปแล้ว | เปิด Pair modal อีกครั้งเพื่อ mint code ใหม่ |
+| pairing code ค้าง "(none)" หลังพิมพ์ส่ง | code หมดอายุ หรือถูกใช้ไปแล้ว | เปิด Pair modal อีกครั้งเพื่อ mint code ใหม่ |
+| link `/chat` หมดอายุก่อนได้เปิด | TTL ของ magic link คือ 5 นาที ไม่ใช่ 10 | ส่งอะไรให้ OA อีกครั้งเพื่อขอ link ใหม่ |
 | pill "browser connected" ไม่โผล่บน desktop | TTL ของ magic link token หมดก่อนคุณเปิด | ส่ง `/chat` จาก LINE ใหม่เพื่อขอ link ใหม่ |
 
 ## status command บน desktop

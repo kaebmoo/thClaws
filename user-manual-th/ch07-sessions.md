@@ -11,7 +11,7 @@
 
 ## เซสชันถูกเก็บไว้ที่ไหน
 
-เซสชันเป็นแบบ **project-scoped** โดยเก็บไว้ที่ `./.thclaws/sessions/`
+เซสชันเป็นแบบ **project-scoped** โดยเก็บไว้ที่ `./.thclaws/state/sessions/`
 ภายใน working directory ของคุณ หากเปิด thClaws ในโฟลเดอร์ใหม่เอี่ยม
 รายการเซสชันก็จะว่างเปล่า
 
@@ -28,7 +28,7 @@ hex string สั้น ๆ ที่สร้างจาก nanosecond wall-cl
 
 ```
 ❯ /save
-saved → ./.thclaws/sessions/s-4f3a2b1c.jsonl
+saved → ./.thclaws/state/sessions/s-4f3a2b1c.jsonl
 ```
 
 `/save` จะบังคับ flush ข้อมูล มีประโยชน์ก่อนรันคำสั่งที่เสี่ยง เพื่อให้มั่นใจว่าไฟล์บนดิสก์ตรงกับในหน่วยความจำ
@@ -96,7 +96,7 @@ session title cleared
   กด Enter เพื่อบันทึก, Esc หรือคลิกด้านนอกเพื่อยกเลิก เหตุการณ์ rename
   จะถูก append ต่อท้าย JSONL เหมือน `/rename` ปกติ
 - **Delete** — เปิด native OS confirm dialog ยืนยันก่อนลบ ถ้ายืนยัน
-  ไฟล์เซสชันใน `.thclaws/sessions/` จะถูกลบออก (undo ไม่ได้)
+  ไฟล์เซสชันใน `.thclaws/state/sessions/` จะถูกลบออก (undo ไม่ได้)
 
 ## `--resume` — CLI flag สำหรับสคริปต์
 
@@ -118,20 +118,18 @@ thclaws --resume last
 
 - คุณเปิด thClaws จากศูนย์ (ไม่ได้ใช้ `--resume`)
 - คุณรัน `/provider <name>` (สลับ provider family เสมอ)
-- คุณรัน `/model <new-model>` แล้ว **model ใหม่อยู่คนละ provider family
-  กับอันเดิม** (เช่น `claude-sonnet-4-6` → `gpt-4o`) — เพราะประวัติ
-  ที่สร้างตาม wire schema ของ Anthropic (content blocks แบบ
-  `tool_use` / `tool_result`) ไม่สามารถ replay เข้า OpenAI / Gemini
-  ได้ตรง ๆ จะ error หรือเพี้ยน
 - คุณกดปุ่ม `+` ที่ส่วน Sessions ของ sidebar
 - คุณรัน `/fork` (หรือกด Fork with summary บน banner) — เหมือนกด `+`
   แต่ session ใหม่ seed ด้วย summary ของประวัติเดิม ไม่ใช่เริ่มจากศูนย์
 
-ถ้า `/model <new-model>` อยู่ใน **family เดียวกัน** กับอันเดิม
-(เช่น `sonnet` → `opus` ทั้งคู่เป็น Anthropic หรือ `gemini-2.0-flash`
-→ `gemini-2.5-flash` ทั้งคู่เป็น Gemini) thClaws จะ **ต่อบทสนทนาเดิม**
-ไม่ fork เซสชันใหม่ — ประวัติทั้งหมดยังอยู่ เพียงแค่โมเดลใหม่รับไปคุยต่อ
-ข้อความ toast จะบอกว่า `conversation preserved` แทน `new session …`
+`/model` **ไม่ fork เซสชันอีกแล้ว ไม่ว่าจะข้าม family หรือไม่** — JSONL
+คือประวัติหลัก และ provider ตัวไหนที่รับเทิร์นถัดไปจะเป็นคนแปลเอง
+session id กับไฟล์จึงคงเดิม ข้อความยืนยันจะบอกว่า
+`conversation preserved in session …` (เวอร์ชันก่อนหน้า fork ทุกครั้งที่
+สลับโมเดล พฤติกรรมนั้นถูกยกเลิกแล้ว)
+
+ส่วน `/provider` **ยังคง fork** เพราะการเปลี่ยน provider คือการสร้าง
+`Agent` ตัวใหม่ทั้งตัว ไม่ใช่แค่เปลี่ยนป้ายชื่อโมเดลของตัวเดิม
 ดูรายละเอียดเพิ่มเติมใน[บทที่ 6](ch06-providers-models-api-keys.md)
 
 เซสชันก่อนหน้าจะถูก auto-save ก่อน fork จึงไม่มีอะไรสูญหาย
@@ -224,7 +222,7 @@ checkpoint ตัวหลังสุด
 เซสชันเป็นแค่ JSONL ธรรมดา แอบเปิดดูได้ด้วยคำสั่ง
 
 ```sh
-cat .thclaws/sessions/s-4f3a2b1c.jsonl | head -5
+cat .thclaws/state/sessions/s-4f3a2b1c.jsonl | head -5
 ```
 
 บรรทัดแรกคือ header: `{"type":"header","id":"s-4f3a2b1c","model":"claude-sonnet-4-6","cwd":"...","created":"..."}` บรรทัดถัด ๆ ไปจะเป็นข้อความและเหตุการณ์ต่าง ๆ

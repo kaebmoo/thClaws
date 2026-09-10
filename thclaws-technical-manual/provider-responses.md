@@ -1,6 +1,6 @@
 # OpenAI Responses API provider
 
-`OpenAIResponsesProvider` (`providers/openai_responses.rs`, 516 LOC) speaks OpenAI's newer Responses API at `/v1/responses` — separate from the older Chat Completions endpoint covered in [`provider-openai.md`](provider-openai.md). It exists because some models (Codex, GPT-5.x reasoning variants) only run on `/v1/responses`, and the wire format is different enough from chat/completions that coercing one parser to handle both would be lossy.
+`OpenAIResponsesProvider` (`providers/openai_responses.rs`) speaks OpenAI's newer Responses API at `/v1/responses` — separate from the older Chat Completions endpoint covered in [`provider-openai.md`](provider-openai.md). It exists because some models (Codex, GPT-5.x reasoning variants) only run on `/v1/responses`, and the wire format is different enough from chat/completions that coercing one parser to handle both would be lossy.
 
 One `ProviderKind` variant uses this impl: `OpenAIResponses`. Routing prefix: `codex/` (or any model id containing `codex`).
 

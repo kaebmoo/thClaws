@@ -223,6 +223,65 @@ Hosted workspace รองรับทั้ง BYOK (วาง provider key เ
 ที่มี credit billing ดูด้านล่าง) ตอนสร้าง workspace มี radio
 toggle ให้เลือก
 
+### Sync folder ในเครื่องกับ hosted workspace
+
+hosted workspace ไม่ได้เป็นทางตันที่เข้าถึงได้แค่ผ่านเบราว์เซอร์ คุณจับคู่
+folder ในเครื่องกับมันแล้วย้ายไฟล์ได้สองทาง — แก้บนแล็ปท็อปแล้ว push ไปทำต่อ
+ในเบราว์เซอร์ หรือกลับทางก็ได้
+
+```
+❯ /cloud push                 # folder ในเครื่อง → hosted workspace
+❯ /cloud pull                 # hosted workspace → folder ในเครื่อง
+❯ /cloud revision             # แต่ละฝั่งอยู่ revision ไหน และมีอะไร dirty ไหม
+```
+
+`/cloud push` ครั้งแรกจาก folder ที่ยังไม่จับคู่จะทำการจับคู่ให้ หลังจากนั้น
+binding ถูกจำไว้ `push` / `pull` เปล่า ๆ จึงคุยกับ workspace เดิม ถ้าจะเจาะจง
+ตัวอื่นใช้ `--workspace <slug>`
+
+**`/cloud revision` คือคำสั่งที่ควรรันก่อน** มันอ่านอย่างเดียวล้วน ๆ และจะ
+ไม่ปลุก workspace ที่หลับอยู่ เพราะคำถามเชิงสถานะไม่ควรทำให้คุณเสียค่า resume
+pod และครึ่งที่เป็นข้อมูลในเครื่องจะพิมพ์ออกมาเสมอ แม้ออฟไลน์หรือยังไม่ล็อกอิน
+
+```
+❯ /cloud revision
+Local:     rev 12, pushed 2 hours ago, pulled 3 days ago
+Cloud:     rev 12
+Changes:   clean — no work changed since rev 12 (3 runtime state file(s) did)
+```
+
+มีสองอย่างในผลลัพธ์นี้ที่ควรเข้าใจ
+
+**revision ที่ตรงกันแปลว่าสองฝั่ง *ตกลงกันครั้งล่าสุด* ที่เลขนั้น ไม่ได้แปลว่า
+ไฟล์วันนี้เหมือนกัน** บรรทัด `Changes:` ต่างหากที่บอกว่า folder นี้ drift ไป
+จากตอนนั้นหรือยัง และมันคำนวณจากการ hash working tree ในเครื่อง จึงตอบได้
+แม้ workspace จะหลับอยู่
+
+**runtime state ถูกนับแยก** session, cache และอื่น ๆ ใน `.thclaws/state/`
+เขียนทับตัวเองอยู่แล้วแค่จากการที่ engine รัน ถ้านับเป็น "การเปลี่ยนแปลงของคุณ"
+ทุก folder จะ dirty ตลอดกาล ของพวกนี้ยังถูก push ไปด้วยในรอบถัดไป — แค่ถูก
+แยกนับ ไม่ได้ถูกซ่อน
+
+#### Flag
+
+| Flag | ผล |
+|---|---|
+| `--dry-run` | รายงานว่าอะไรจะถูกย้าย แต่ไม่ย้ายจริง |
+| `--delete` | ลบไฟล์ที่ปลายทางซึ่งหายไปจากต้นทางด้วย ถ้าไม่ใส่ sync จะเพิ่มและอัปเดตเท่านั้น |
+| `--force` | ดันผ่าน **divergence guard** — ตัวที่กันไม่ให้คุณเขียนทับสิ่งที่อีกฝั่งแก้ไปหลังจากที่สองฝั่งตกลงกันครั้งล่าสุด |
+| `--force-rebind` | ชี้ folder นี้ไปยัง workspace ตัวอื่น โดยข้ามการตรวจ binding/identity **มันกิน `--force` ไปในตัว** เพราะการจงใจชี้ folder ใหม่*คือ*การเขียนทับอยู่แล้ว |
+| `--workspace <slug>` | ทำงานกับ workspace ที่ระบุ แทนตัวที่ผูกไว้ |
+
+เริ่มด้วย `--dry-run` เสมอ ส่วน `--force` มีไว้สำหรับตอนที่คุณรู้ว่าของอีกฝั่ง
+ทิ้งได้ ถ้าไม่แน่ใจ ให้ `/cloud pull --dry-run` ดูก่อนว่าจะเสียอะไรไปบ้าง
+
+> **ใช้บน multiuser pod ไม่ได้** คำสั่งกลุ่มนี้ทำงานกับ directory tree เดียว
+> ที่อ้างอิงจาก working directory ของ process แต่ multiuser pod ใช้ process
+> เดียวร่วมกันทุก tenant — directory นั้นคือ pod root ที่เก็บ
+> `workspace-<id>/` ของทุกคน การ push จากตรงนั้นจะส่งไฟล์ของทุก tenant เข้า
+> workspace ของ tenant คนเดียว ส่วน pull จะเขียนทับของทุกคน ระบบจึงปฏิเสธ
+> ไปเลย แทนที่จะพยายามเดาใจ
+
 ## Gateway แบบ pay-per-use (ทางเลือกแทน BYOK)
 
 สำหรับผู้ใช้ที่ไม่อยาก manage account ของ Anthropic / OpenAI / Gemini
@@ -315,6 +374,8 @@ slash-command equivalent
 | `/cloud get <slug>` | In-session slash | ติดตั้งลง cwd ของ session (abort ถ้า folder ไม่ว่าง/UUID ไม่ตรง) |
 | `/cloud publish` | In-session slash | อัปโหลด cwd ของ session |
 | `/cloud unbind` | In-session slash | ล้าง `agent.uuid` ให้ publish ครั้งต่อไปสร้าง row ใหม่ใน catalog |
+| `/cloud revision` (หรือ `rev`) | In-session slash | revision ของฝั่งเครื่องเทียบกับ cloud + folder นี้ dirty ไหม อ่านอย่างเดียว ไม่ปลุก workspace ที่หลับ |
+| `/cloud push` / `/cloud pull` | In-session slash | sync ไฟล์กับ hosted workspace `--dry-run` · `--delete` · `--force` · `--force-rebind` · `--workspace <slug>` |
 | Settings → **Agent identity** | GUI | แก้ `agent.name` / `description` ของ folder นี้ |
 | `/credit` (web) | Catalog UI | เติม credit + ดู balance + ดูราคา model |
 | `/gateway/keys` (web) | Catalog UI | mint access key `gw_v1_…` |
@@ -329,7 +390,7 @@ slash-command equivalent
   cloud gateway ในฐานะ proxy เก็บเงิน thClaws.cloud ไม่ได้ train หรือ
   serve LLM เอง
 - **ไม่ใช่ที่เก็บ session** ประวัติแชทยังคงอยู่ใน
-  `./.thclaws/sessions/` บนเครื่องที่ run agent ตัวนั้น cloud เก็บ
+  `./.thclaws/state/sessions/` บนเครื่องที่ run agent ตัวนั้น cloud เก็บ
   ไฟล์ agent ไม่ใช่ประวัติบทสนทนา
 - **ไม่จำเป็นต้องใช้** ทุกบทก่อนหน้าบทนี้ทำงานได้โดยไม่ต้องใช้
   network เลย cloud เป็นของเสริม — ติดตั้ง thClaws เขียน `AGENTS.md`

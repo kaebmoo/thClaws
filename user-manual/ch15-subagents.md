@@ -68,7 +68,7 @@ Frontmatter fields:
 | `disallowedTools` | Tool denylist |
 | `skills` | Comma-separated skill allowlist this agent may load/list/search (subset of the parent's). Empty = inherit all |
 | `mcp` | Comma-separated MCP **server** names this agent may use (subset). Empty = inherit all; otherwise MCP tools from other servers are dropped |
-| `writePaths` | Glob allowlist confining this agent's file writes (Write/Edit/office tools), e.g. `.thclaws/kms/**`. Empty = inherit. Mechanical write-scoping — a writer can't scribble outside its lane. Does **not** cover `Bash` |
+| `writePaths` | Glob allowlist confining this agent's file writes (Write/Edit/office tools), e.g. `.thclaws/state/kms/**`. Empty = inherit. Mechanical write-scoping — a writer can't scribble outside its lane. Does **not** cover `Bash` |
 | `output_schema` | JSON Schema for the agent's output — single-line inline JSON, or a path (relative to the `.md`) to a `.json` file. A workflow `thclaws.subagent({agent})` call that omits a per-call `schema` validates against this (one source of truth instead of duplicating the schema in the workflow). See [ch25](ch25-workflows.md) |
 | `input_schema` | JSON Schema documenting the agent's expected input (same encoding as `output_schema`) — used by `thclaws agent validate` |
 | `permissionMode` | `auto` or `ask` (useful for "read-only" agents) |
@@ -207,6 +207,9 @@ overrides the built-in.
 | `folder-indexer` | session model | Catalogue a folder into `<folder>/index.md` — one row per file, described from its content (text, documents, and images alike). Incremental: the `FolderIndex` tool fingerprints every file, so only what changed since the last run is re-read. Invoked via `/index <folder>`, the Files tab's folder right-click → **Index folder…**, or `Task(agent: "folder-indexer")`. |
 | `kms-linker` | session model | Fix broken page links, refresh stale pages, and patch missing index entries in a KMS. Dispatched as a side-channel by `/kms wrap-up --fix`. |
 | `kms-reconcile` | session model | Find and resolve contradictions across KMS pages — rewrites outdated pages with History sections, flags ambiguous cases as Conflict pages. Dispatched by `/kms reconcile <name> [--apply]`. |
+| `kms-maintain` | session model | The one-shot maintenance umbrella — structural fixes, source reconciliation against your live sessions, stale refresh, and contradiction reconciliation in one staged pass. Dispatched by `/kms maintain <name> [--apply]`. See [Chapter 9](ch09-knowledge-bases-kms.md). |
+| `summarizer` | session model | Summarize text, a file, or a URL into a shorter faithful digest — key points, decisions, takeaways — optionally in another language. Invoked via `/agent summarizer <prompt>` or `Task(agent: "summarizer")`. |
+| `content-extractor` | session model | Turn a webpage, a local file, or pasted text into a clean self-contained markdown article with images downloaded locally. Useful as the step before `/kms ingest`. |
 
 Neither built-in pins a `model:` in its frontmatter — both inherit the
 session's active model so cross-provider users don't hit "model not

@@ -249,8 +249,9 @@ impl Sandbox {
 /// Used by `validate_against` to make the parent-walk meaningful when the
 /// target path doesn't exist yet — without this, `cwd/../outside.txt`
 /// would falsely pass containment checks because cwd itself is inside the
-/// sandbox.
-fn lexical_normalize(p: &Path) -> PathBuf {
+/// sandbox. Shared with `subagent`'s `writePaths` scoping, which needs the
+/// same resolution before its globs see a path.
+pub(crate) fn lexical_normalize(p: &Path) -> PathBuf {
     use std::path::Component;
     let mut out = PathBuf::new();
     for comp in p.components() {

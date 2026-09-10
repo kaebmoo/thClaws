@@ -18,14 +18,43 @@ agent runs. The "job" is the `session_id` every `/agent/run` returns.
 
 ## Why not workspace sync?
 
-The sync surface (`/workspace/sync/*`, Chapter 27) mirrors a *whole
-workspace* and was designed for trusted networks (a tunnel or
-ForwardAuth in front). An external orchestrator holding only an API
+The sync surface — the `/workspace/sync/*` routes that
+[Chapter 27](ch27-thclaws-cloud.md)'s `/cloud push` and `/cloud pull`
+ride on — mirrors a *whole workspace* and was designed for trusted
+networks (a tunnel or ForwardAuth in front). An external orchestrator holding only an API
 token had three gaps: no supported auth, no way to know which files a
 given job actually produced, and a race — the file list and the file
 download were separate requests, so a file could change in between.
 Job Artifacts closes all three: Bearer auth, per-job scoping, and a
 manifest whose hashes are fixed at collection time.
+
+## Why not A2A (or ACP)?
+
+The other obvious question: there are already open protocols for agents
+to talk to each other. Why a thClaws-specific endpoint?
+
+**A2A (Agent2Agent Protocol)** is Google's open protocol, now under the
+Linux Foundation, for driving an agent built by someone else:
+capabilities advertised in an Agent Card, work dispatched as tasks over
+JSON-RPC, progress streamed with SSE. **ACP** is two different things
+that share a name — *Agent Communication Protocol* (IBM/BeeAI), which
+has since merged into A2A, and *Agent Client Protocol* (Zed), an
+editor ↔ coding-agent protocol for embedding an agent in an editor
+pane. The second is a different problem entirely from shipping work
+between machines.
+
+The reason Job Artifacts still exists: **A2A is a conversation layer;
+artifacts are a storage layer.** An A2A artifact is message parts
+flowing back with a task while you talk — it carries no durability
+promise. A thClaws artifact is a real file from the workspace, frozen
+into a snapshot and hashed the moment the run ends, and **re-fetchable
+later by id** even after the source file has changed (the CI-artifact
+semantics from the comparison above).
+
+In practice an orchestrator holding nothing but an API token needs
+three `curl` calls, not an A2A client. And if thClaws grows an A2A
+facade later, it will serve its results out of this same artifact
+store — the two are complements, not alternatives.
 
 ## Quick start
 
@@ -103,6 +132,26 @@ Both GETs and `/v1/inputs` accept an optional `workspace_dir`
   (still excluding `.thclaws/` and `.git/`).
 - Limits: ≤ 100 files per request, ≤ 64 MB decoded total. The response
   echoes each written file's `sha256` so the sender can verify.
+
+## An empty manifest is not a failure
+
+Two outcomes look similar from the outside and mean very different
+things, so the manifest states which one you got:
+
+| `status` | Meaning |
+|---|---|
+| `completed` | The snapshot ran. `artifacts` may still be **empty** — a pattern that matched nothing is a completed snapshot of nothing |
+| `failed` | The snapshot was requested but not written. An `error` field says why |
+
+**Collection failing does not fail the run.** That is deliberate: the
+agent did its work, and losing the file copy afterwards shouldn't
+retroactively turn a good run into a bad one. So an orchestrator has to
+read `status` — treating "no artifacts" as "the job broke" will make
+you retry runs that succeeded.
+
+The `error` is carried in the manifest rather than only logged, so a
+caller learns the outcome from the API instead of having to read the
+worker's stderr.
 
 ## Collection limits
 

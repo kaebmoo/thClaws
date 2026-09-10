@@ -1,6 +1,6 @@
 # Chapter 19 — Scheduling
 
-Scheduling lets you run thClaws prompts on a recurring cron schedule — every weekday morning, every Sunday night, every five minutes — without having to remember to type the prompt yourself. Each scheduled job spawns its own `thclaws --print` subprocess in its own working directory, so two schedules in different projects are fully independent.
+Scheduling lets you run thClaws prompts on a recurring cron schedule — every weekday morning, every Sunday night, every five minutes — or once at a time you name, without having to remember to type the prompt yourself. Each scheduled job spawns its own `thclaws --print` subprocess in its own working directory, so two schedules in different projects are fully independent.
 
 The feature ships in three layers, each useful on its own:
 
@@ -33,19 +33,20 @@ That's the whole workflow: add, optionally run by hand, then either let the in-p
 
 ## Schedule fields
 
-Every schedule entry has these fields. Only `id`, `cron`, and `prompt` are required.
+Every schedule entry has these fields. `id` and `prompt` are always required, plus **exactly one trigger** — either `cron` (recurring) or `run_at` (one-shot).
 
 | Field | Required | Default | What it does |
 |---|---|---|---|
 | `id` | ✅ | — | Stable lookup key. Becomes the log directory name. |
-| `cron` | ✅ | — | Standard 5-field POSIX cron expression. Validated on add. |
+| `cron` | trigger | — | Standard 5-field POSIX cron expression, for a recurring job. Validated on add. Empty on a one-shot. |
+| `run_at` | trigger | — | RFC 3339 timestamp for a **one-shot** job — fires once, then auto-disables. Set via `--at` or `--in`; see [One-shot schedules](#one-shot). Mutually exclusive with `cron`. |
 | `prompt` | ✅ | — | The text passed to `thclaws --print`. Multi-line is fine. |
 | `cwd` | — | current dir | Working directory for the spawned job. Determines which `.thclaws/settings.json`, sandbox, memory, and project-level MCP config the job picks up. |
-| `model` | — | from `cwd`'s settings | Model alias override (`gpt-4o`, `claude-sonnet-4-6`, etc.). |
+| `model` | — | from `cwd`'s settings | Model alias override (`claude-opus-5`, `gpt-5`, etc.). |
 | `maxIterations` | — | from `cwd`'s settings | Per-job tool-call iteration cap. |
 | `resumeSession` | — | absent (stateless) | **Heartbeat mode** (v0.88.0+): pass `--resume-session last` and every fire continues ONE growing session instead of starting fresh — see [Heartbeats](#heartbeats). |
 | `timeoutSecs` | — | 600 (10 min) | Hard timeout. Job is killed if it exceeds this; recorded as `timed_out`. Pass `--timeout 0` to add for no timeout. |
-| `enabled` | — | `true` | If `false`, the scheduler skips it and `schedule run` refuses to fire it. |
+| `enabled` | — | `true` | If `false`, the scheduler skips it and `schedule run` refuses to fire it. `--disabled` on add starts it off; a fired one-shot sets itself to `false`. |
 | `watchWorkspace` | — | `false` | If `true`, the daemon also fires the job when any file inside `cwd` changes (debounced ~2s) — see [Workspace-change trigger](#workspace-change-trigger) below. Daemon-only; the in-process scheduler ignores it. |
 | `lastRun` / `lastExit` | — | absent | Set automatically after the first fire. |
 
@@ -63,6 +64,29 @@ Standard POSIX 5-field cron: `minute hour day-of-month month day-of-week`.
 | `0 9,13,17 * * *` | 09:00, 13:00, 17:00 daily |
 
 Range / list syntax (`MON-FRI`, `1,15`) is supported. Cron expressions are validated when you run `schedule add` — a typo prints a friendly error rather than failing silently at fire time.
+
+## One-shot schedules — fire once, then stop {#one-shot}
+
+Cron is the wrong shape for "do this once, later". `0 30 15 24 5 *` re-matches next May, and if the machine was asleep at 15:30 the slot is simply gone. So a schedule can carry an absolute fire time instead of a cron expression:
+
+```sh
+# absolute — RFC 3339, any offset
+thclaws schedule add ship-reminder \
+  --at "2026-05-24T15:30:00Z" \
+  --prompt "check whether the release notes for v0.99 are still a draft"
+
+# relative — 15m, 2h, 90s, 1d (a bare number means seconds)
+thclaws schedule add recheck-ci \
+  --in 45m \
+  --cwd ~/projects/web \
+  --prompt "check whether the CI run on main went green; if not, summarise the failure"
+```
+
+`--at` and `--in` are mutually exclusive with each other and with `--cron`; `--in` is just sugar that resolves to `run_at = now + duration` at add time. Offsets are accepted and normalised to UTC, so `2026-05-24T22:30:00+07:00` and `2026-05-24T15:30:00Z` mean the same instant.
+
+After it fires, the entry sets its own `enabled` to `false` and stays in the store — so you can read its log, see its exit code, and re-enable it by hand if you want a repeat. It is not deleted.
+
+**One-shots catch up on purpose.** This is the one place the skip-catch-up rule is deliberately reversed: if the daemon was down over the fire time, a `run_at` in the past is still due and fires on the next tick, rather than being silently lost. A missed one-shot is a missed *task*; a missed cron minute is just a missed minute.
 
 ## Heartbeats — schedules that remember {#heartbeats}
 
@@ -383,7 +407,9 @@ Most schedule management is also available without dropping back to the shell. F
 | `/schedule rm <id>` (or `remove` / `delete`) | Remove a schedule from the store |
 | `/schedule install` | Install the daemon (launchd plist on macOS, systemd-user unit on Linux) |
 | `/schedule uninstall` | Stop the daemon and remove the supervisor entry |
-| `/schedule add` | **GUI:** opens a form modal (see below). **CLI:** prints help pointing at the shell subcommand |
+| `/schedule add` (or `new` / `create`) | **GUI:** opens a form modal (see below). **CLI:** prints help pointing at the shell subcommand |
+| `/schedule preset list` (or `ls`) | List the four packaged KMS-maintenance templates |
+| `/schedule preset add <id> --kms <name>` | Instantiate one of them — see [presets](#pre-packaged-presets-for-kms-maintenance) |
 
 `/schedule add` is the one command that behaves differently across surfaces. Multi-line prompts and nine optional flags don't fit on one REPL line cleanly, so:
 
@@ -431,7 +457,7 @@ If you've installed the daemon AND have `thclaws --cli` open without `--no-sched
 
 - **Windows daemon is not yet shipped.** `schedule install` errors with "not yet supported on this platform" on Windows. Steps 1 and 2 (manual run + in-process scheduler) work cross-platform; only the daemon path (and therefore `watchWorkspace`) is macOS/Linux for now.
 - **No IPC.** The daemon and CLI talk only via the on-disk store + PID file. Live `schedule logs --tail`, `schedule reload`, and daemon-side metrics are deferred. Edits to `schedules.json` take effect within 30 seconds via the polling tick (the watcher reconciler picks up `watchWorkspace` toggles on the same cadence).
-- **No catch-up policy field.** Skip-catch-up is the only policy. Manual catch-up via `lastRun` editing is the workaround.
+- **No catch-up policy field for cron.** Skip-catch-up is the only policy for recurring schedules; manual catch-up via `lastRun` editing is the workaround. One-shots (`--at` / `--in`) are the deliberate exception — a `run_at` in the past always fires.
 - **No log rotation.** `~/.local/share/thclaws/daemon.log` and `~/.local/share/thclaws/logs/<id>/*.log` grow unbounded. For now, prune by hand or via your own cron entry.
 - **Workspace watch ignores are hardcoded.** `.thclaws/`, `.git/`, `node_modules/`, `target/`, `dist/`, `build/`, `.next/`, `.cache/`, `.DS_Store`. No `.gitignore` integration yet. If you need finer control, drop `watchWorkspace` and rely on cron only.
 - **OS watch limits.** Linux's `inotify` defaults to 8192 watches per user; recursive watches on huge trees can blow that. The daemon logs the failure and skips the watcher; other schedules keep working.

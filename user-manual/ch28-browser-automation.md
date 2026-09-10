@@ -43,14 +43,44 @@ To turn it off, or force headed/headless, set it in
 }
 ```
 
-- **Desktop default:** *headed* — a real Chromium window opens beside
-  the app the first time the agent uses a browser tool. You can watch
-  and interact with it directly.
-- **Cloud default:** *headless* — there's no window on a runner, so the
-  **Browser tab's live view is your window** (see below).
+Headed or headless is decided for you when `browserHeadless` is unset:
+
+| Where | Resolves to | Why |
+|---|---|---|
+| Desktop with a display | **headed** | a real Chromium window opens beside the app the first time the agent uses a browser tool — watch it, or interact directly |
+| Linux with no `DISPLAY` / `WAYLAND_DISPLAY` | **headless** | there is nothing to show a window on |
+| Cloud runner | **headless** | same, and the **Browser tab's live view is your window** (see below) |
 
 Nothing is downloaded until first use: Chromium launches **lazily** on
-the first browser tool call, so an idle workspace pays nothing.
+the first browser tool call, takeover, or screencast start — so a
+headed desktop doesn't pop a Chrome window at app start, and an idle
+workspace doesn't pay ~150 MB for a browser nobody used.
+
+### On thClaws.cloud, it's off unless you ask
+
+Cloud runners set `THCLAWS_BROWSER_ENABLED=0`, which flips the
+**default** off for the whole fleet — a runner that would never open a
+browser shouldn't carry one. So a hosted workspace has no browser tools
+until you opt in:
+
+```json
+{ "browserEnabled": true }
+```
+
+That is a real setting layered on top of the default, so it wins. The
+env var only moves the default; it can't override a workspace that has
+asked for a browser.
+
+### Other knobs
+
+These are environment variables, for people packaging thClaws rather
+than using it day to day:
+
+| Variable | Effect |
+|---|---|
+| `THCLAWS_BROWSER_ENABLED=0` | Turn the default off fleet-wide (as above) |
+| `THCLAWS_BROWSER_MCP_CMD` | Replace the whole launch command. The cloud runner image sets `mcp-server-playwright --no-sandbox` — the preinstalled server — so a pod cold start never hits the npm registry. Desktop default is `npx -y @playwright/mcp@latest` |
+| `THCLAWS_BROWSER_VIEWPORT="W,H"` | Viewport size. thClaws defaults to a wide desktop viewport because Playwright's own 1280×720 makes many sites render mobile-ish |
 
 > **No Node?** On a machine without `npx`, the Browser tab shows a
 > setup hint instead of erroring, and the agent simply runs without
@@ -129,6 +159,8 @@ agent you share on the catalog.
 |---|---|
 | Browser tab shows "command not found" | Install Node.js so `npx` is on PATH, then restart thClaws |
 | No Browser tab at all | `browserEnabled` is `false` in settings.json, or Node isn't installed |
+| No Browser tab on a hosted workspace | Expected — cloud runners default it off. Set `"browserEnabled": true` |
+| Pages render like a phone | Viewport too narrow — set `THCLAWS_BROWSER_VIEWPORT="1600,1000"` |
 | Agent "can't see" a chart / canvas | Ask it to take a screenshot — it reads pixels via vision, not just the accessibility tree |
 | Want zero windows on desktop | Set `"browserHeadless": true` |
 | Logged out after a cloud pod restart | Fixed in v0.52.0 — update if you're older |

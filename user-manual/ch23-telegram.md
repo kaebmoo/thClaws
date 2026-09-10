@@ -5,7 +5,7 @@ token into thClaws, and every message you DM the bot runs as a turn on
 your desktop — the full tool registry (Bash, Edit, KMS, MCP, skills)
 executes locally, and replies stream back as Telegram messages. Tool
 calls that need approval show up as inline-keyboard buttons you tap
-from your phone. (dev-plan/29, Tier 1.)
+from your phone. (dev-plan/29.)
 
 ## Why Telegram (and how it differs from LINE)
 
@@ -163,18 +163,97 @@ prompts in headless mode* above). Auto runs every tool with no prompt.
 Add the bot to a group and, by default (`groupPolicy: "allowlist"`),
 it ignores the group until you opt that chat in. Add the group's chat
 id (a negative integer) under `groups` in the config, or set
-`groupPolicy: "open"` to serve every group the bot is added to. In
-Tier 1 a group shares one session (no per-user split); broadcast
-**channels** and forum-topic routing are a later tier (see below).
+`groupPolicy: "open"` to serve every group the bot is added to. A
+plain group shares one session — there is no per-user split, so
+everyone in the room is talking to the same conversation. A **forum**
+group is the exception: it keeps one session per topic (see
+[Channels and forum topics](#channels-and-forum-topics)).
 
 > Telegram bots in groups only receive messages by default if they're
 > mentioned or sent as commands ("privacy mode"). Toggle this in
 > BotFather (`/setprivacy`) if you want the bot to see all group text.
 
+## Channels and forum topics
+
+A Telegram **channel** is the broadcast shape: the agent posts, and
+readers comment. Comments don't arrive on the channel — Telegram routes
+them into the channel's **linked discussion group**, where they land as
+ordinary messages the bot already handles. Bind the pair under
+`channels` and both halves work:
+
+```json
+"channels": {
+  "-1009876543210": {
+    "linkedDiscussionGroup": "-1001111111111",
+    "agentId": "researcher"
+  }
+}
+```
+
+The bot must be an **admin with post rights** on the channel. thClaws
+probes this when you bind one and reports a clear error rather than
+letting a later post fail with a silent 403.
+
+`agentId` names an agent def under `.thclaws/agents/` — the same key
+Agent Teams uses ([Chapter 17](ch17-agent-teams.md)). It sets which
+agent answers in that channel and its discussion group; unset falls
+back to your main agent.
+
+### Forum topics
+
+A supergroup with **Topics** turned on splits into threads, and a
+channel's discussion group can be a forum — so a comment on a post
+lands in one specific topic. Two things follow:
+
+- **Each topic keeps its own conversation.** Sessions are keyed per
+  topic, so two topics in the same group don't bleed context into each
+  other.
+- **Each topic can have its own agent**, via `topicRouting` keyed by
+  the numeric topic id. A topic not listed falls back to the channel's
+  `agentId`.
+
+```json
+"topicRouting": { "42": { "agentId": "support" } }
+```
+
+The **General** topic is id `1` and is a little odd: Telegram gives its
+messages no thread id on the way in, and *rejects* a thread id of `1`
+on the way out. thClaws handles both quirks — you address General as
+`1` in config and it does the right thing on the wire.
+
+## Streaming replies
+
+By default a turn produces one message when it finishes. Turn on
+`streamPreview` and the bot instead posts a placeholder and **edits it
+in place** as the agent generates, so you watch the answer arrive:
+
+```json
+{ "streamPreview": true }
+```
+
+Two limits worth knowing before you enable it. Telegram throttles
+repeated edits to the same message hard, so edits are coalesced to at
+most one every **1.2 seconds** and no-op edits are skipped. And only
+the headless `--telegram` path honours the flag today — the GUI-worker
+path still sends one reply at the end. When the turn finishes, the
+preview is replaced with the final, fully formatted, chunked reply.
+
 ## Configuration
 
-Runtime state lives in `~/.config/thclaws/telegram.json` (written by
-the GUI modal). A project can also ship a block under `telegram` in
+Runtime state lives in **`./.thclaws/telegram.json`** — project-scoped,
+resolved against the directory you start thClaws in, and written by the
+GUI modal. Each project (and each GUI Shell) therefore owns its own bot
+independently.
+
+> **It used to be `~/.config/thclaws/telegram.json`.** That user-level
+> path is now legacy: it is read only as a fallback, and only when you
+> set `THCLAWS_TELEGRAM_USER_CONFIG=1`. Nothing is migrated or deleted
+> for you — if your bot stopped being found after an upgrade, move your
+> old `telegram.json` into the project's `.thclaws/` folder (or set that
+> env var while you get around to it). Editing the user-level file
+> without the opt-in changes nothing.
+
+A project can also ship a block under `telegram` in
 `.thclaws/settings.json`. Fields:
 
 ```json
@@ -185,7 +264,15 @@ the GUI modal). A project can also ship a block under `telegram` in
   "allowFrom": ["111111111"],
   "groupPolicy": "allowlist",
   "groups": { "-1001234567890": { "label": "Team room" } },
-  "outputCeiling": 4000
+  "channels": {
+    "-1009876543210": {
+      "linkedDiscussionGroup": "-1001111111111",
+      "agentId": "researcher",
+      "topicRouting": { "42": { "agentId": "support" } }
+    }
+  },
+  "outputCeiling": 4000,
+  "streamPreview": false
 }
 ```
 
@@ -197,7 +284,9 @@ the GUI modal). A project can also ship a block under `telegram` in
 | `allowFrom` | Telegram user ids (strings) allowed to DM |
 | `groupPolicy` | `allowlist` (default) or `open` |
 | `groups` | Allowlisted group chat ids → `{ label? }` |
+| `channels` | Broadcast-channel bindings → `{ linkedDiscussionGroup?, agentId?, topicRouting? }` — see [Channels and forum topics](#channels-and-forum-topics) |
 | `outputCeiling` | Per-message char cap before chunking (default 4000) |
+| `streamPreview` | Edit one message in place as the agent streams, instead of one reply at the end. Off by default; headless `--telegram` only |
 
 **Token precedence:** `TELEGRAM_BOT_TOKEN` env → `botToken` in the file
 → nothing. Env-wins means you never have to commit a token to disk for
@@ -251,19 +340,31 @@ Telegram adapter status
   pending codes (re-DM for a fresh one). Approved users persist in
   `allowFrom`.
 
-## Not in Tier 1 (coming later)
+## What is and isn't supported
 
-This chapter documents Tier 1 — DM + basic group + plain text +
-pairing + inline-keyboard approvals. Planned for later tiers:
+Shipped beyond the original Tier 1 (DM + group + text + pairing +
+inline-keyboard approvals):
 
 - **Broadcast channels + linked discussion groups + forum-topic
-  routing** (Tier 2) — "a background research agent posts status to a
-  channel I glance at".
-- **Streaming preview edits, media (photo/document) up/download, voice
-  transcription, sticker vision, webhook mode, multi-account, proxy
-  support** (Tier 3).
+  routing**, including a per-topic agent and per-topic session
+  isolation — see above.
+- **Streaming preview edits** (`streamPreview`, headless only) — see
+  above.
+- **Inbound photos.** Send the bot a photo and it is downloaded and
+  passed to the model as an image, with the caption as the message
+  text. Attachments are capped at **8 MB** — the bytes ride into the
+  prompt as base64, so an oversized image costs tokens and can trip the
+  provider's request limit long before it helps. If a download fails
+  the turn still runs, as text-only, and says why rather than
+  swallowing your message.
 
-Until then, inbound photos/voice/stickers are ignored (text only).
+Still not supported — these are ignored:
+
+- **Voice messages, documents, and stickers.** Only photos are read.
+- **Outbound media.** The bot sends text; it does not send you files or
+  images back.
+- **Webhook mode, multi-account, proxy support.** Long-polling only,
+  one bot per thClaws.
 
 ## Troubleshooting
 

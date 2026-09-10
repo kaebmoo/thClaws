@@ -1,7 +1,7 @@
 {
   "schema": 4,
   "source": "baseline 2026-06-10 — pricing synced from LiteLLM (github.com/BerriAI/litellm)",
-  "fetched_at": "2026-09-09T00:00:00Z",
+  "fetched_at": "2026-09-10T00:00:00Z",
   "providers": {
     "anthropic": {
       "list_url": "https://api.anthropic.com/v1/models",
@@ -1245,28 +1245,23 @@
       "list_url": "https://api.deepseek.com/v1/models",
       "default_context": 262144,
       "models": {
-        "deepseek-v4-flash": {
+        "deepseek-flash": {
           "context": 1048576,
-          "max_output": 384000,
-          "source": "https://openrouter.ai/api/v1/models via bare id + manual:deepseek-v4-flash",
-          "verified_at": "2026-06-10",
-          "input_per_mtok": 0.14,
-          "output_per_mtok": 0.28
-        },
-        "deepseek-v4-flash-vision-exp": {
-          "context": 262144,
-          "source": "https://api.deepseek.com/v1/models (context unverified) + manual:deepseek-v4-flash-vision-exp",
-          "verified_at": "2026-08-22",
-          "input_per_mtok": 0.14,
-          "output_per_mtok": 0.28
+          "source": "https://api.deepseek.com/v1/models + manual:deepseek-flash",
+          "verified_at": "2026-09-10",
+          "input_per_mtok": 0.345,
+          "output_per_mtok": 1.38,
+          "cached_input_per_mtok": 0.0069,
+          "max_output": 384000
         },
         "deepseek-v4-pro": {
           "context": 1048576,
           "max_output": 384000,
           "source": "https://openrouter.ai/api/v1/models via bare id + manual:deepseek-v4-pro",
-          "verified_at": "2026-06-10",
-          "input_per_mtok": 0.435,
-          "output_per_mtok": 0.87
+          "verified_at": "2026-09-10",
+          "input_per_mtok": 1.518,
+          "output_per_mtok": 4.554,
+          "cached_input_per_mtok": 0.0506
         }
       }
     },
@@ -1763,11 +1758,6 @@
           "context": 131072,
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
           "verified_at": "2026-05-04"
-        },
-        "nvidia/minimaxai/minimax-m3": {
-          "context": 1000000,
-          "source": "https://integrate.api.nvidia.com/v1/models (context: models.dev:minimaxai/minimax-m3)",
-          "verified_at": "2026-06-12"
         },
         "nvidia/mistralai/codestral-22b-instruct-v0.1": {
           "context": 131072,
@@ -2764,6 +2754,11 @@
       "list_url": "https://opencode.ai/zen/go/v1/models",
       "default_context": 262144,
       "models": {
+        "opencode-go/deepseek-flash": {
+          "context": 262144,
+          "source": "https://opencode.ai/zen/go/v1/models (context unverified)",
+          "verified_at": "2026-09-10"
+        },
         "opencode-go/deepseek-v4-flash": {
           "context": 1048576,
           "source": "https://opencode.ai/zen/go/v1/models (context: DeepSeek V4 published 1M window; opencode zen /v1/models omits context) + litellm:deepseek-v4-flash",
@@ -3377,11 +3372,11 @@
           "context": 163840,
           "max_output": 163840,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-04",
+          "verified_at": "2026-09-10",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.32,
-          "output_per_mtok": 0.89
+          "input_per_mtok": 0.2574,
+          "output_per_mtok": 1.0287
         },
         "deepseek/deepseek-chat-v3-0324": {
           "context": 163840,
@@ -3503,11 +3498,21 @@
         "deepseek/deepseek-v4-pro-0813": {
           "context": 1048576,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-09",
+          "verified_at": "2026-09-10",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.57948,
-          "output_per_mtok": 1.73844
+          "input_per_mtok": 1.0494,
+          "output_per_mtok": 3.1482
+        },
+        "deepseek/deepseek-v4.1-flash": {
+          "context": 1048576,
+          "max_output": 384000,
+          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
+          "verified_at": "2026-09-10",
+          "free": false,
+          "chat": true,
+          "input_per_mtok": 0.3,
+          "output_per_mtok": 1.2
         },
         "dots-studio/dots-3-note-preview:free": {
           "context": 512000,
@@ -4180,11 +4185,11 @@
         "minimax/minimax-m2.5": {
           "context": 196608,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-08-22",
+          "verified_at": "2026-09-10",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.27,
-          "output_per_mtok": 1.08,
+          "input_per_mtok": 0.3,
+          "output_per_mtok": 1.2,
           "cached_input_per_mtok": 0.15
         },
         "minimax/minimax-m2.7": {
@@ -4516,15 +4521,6 @@
           "chat": true,
           "input_per_mtok": 1.0,
           "output_per_mtok": 3.0
-        },
-        "nousresearch/hermes-4-70b": {
-          "context": 131072,
-          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-06-10",
-          "free": false,
-          "chat": true,
-          "input_per_mtok": 0.13,
-          "output_per_mtok": 0.4
         },
         "nvidia/nemotron-3-nano-30b-a3b": {
           "context": 262144,
@@ -5247,33 +5243,6 @@
           "input_per_mtok": 1.1,
           "output_per_mtok": 4.4
         },
-        "openrouter/auto": {
-          "context": 2000000,
-          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-06-10",
-          "free": false,
-          "chat": false,
-          "input_per_mtok": -1000000.0,
-          "output_per_mtok": -1000000.0
-        },
-        "openrouter/auto-beta": {
-          "context": 2000000,
-          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-08-11",
-          "free": false,
-          "chat": true,
-          "input_per_mtok": -1000000.0,
-          "output_per_mtok": -1000000.0
-        },
-        "openrouter/bodybuilder": {
-          "context": 128000,
-          "source": "https://openrouter.ai/api/v1/models (context: openrouter /v1/models) + api:openrouter",
-          "verified_at": "2026-06-10",
-          "free": false,
-          "chat": true,
-          "input_per_mtok": -1000000.0,
-          "output_per_mtok": -1000000.0
-        },
         "openrouter/free": {
           "context": 200000,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
@@ -5282,26 +5251,6 @@
           "chat": true,
           "input_per_mtok": 0.0,
           "output_per_mtok": 0.0
-        },
-        "openrouter/fusion": {
-          "context": 1000000,
-          "source": "https://openrouter.ai/api/v1/models (context: openrouter /v1/models) + api:openrouter",
-          "verified_at": "2026-08-11",
-          "free": false,
-          "chat": true,
-          "tier_billed": true,
-          "comment": "Variable-priced router — actual cost depends on the model Fusion routes to; tier_billed so cost reports as unknown rather than a sentinel.",
-          "input_per_mtok": -1000000.0,
-          "output_per_mtok": -1000000.0
-        },
-        "openrouter/pareto-code": {
-          "context": 200000,
-          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-06-10",
-          "free": false,
-          "chat": true,
-          "input_per_mtok": -1000000.0,
-          "output_per_mtok": -1000000.0
         },
         "perceptron/perceptron-mk1": {
           "context": 32768,
@@ -5510,11 +5459,11 @@
           "context": 262144,
           "max_output": 262144,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-06-10",
+          "verified_at": "2026-09-10",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.04815,
-          "output_per_mtok": 0.19305
+          "input_per_mtok": 0.09,
+          "output_per_mtok": 0.3
         },
         "qwen/qwen3-30b-a3b-thinking-2507": {
           "context": 131072,
@@ -5707,11 +5656,11 @@
           "context": 262144,
           "max_output": 65536,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-08-29",
+          "verified_at": "2026-09-10",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.29,
-          "output_per_mtok": 2.4
+          "input_per_mtok": 0.26,
+          "output_per_mtok": 2.08
         },
         "qwen/qwen3.5-27b": {
           "context": 262144,
@@ -7629,6 +7578,11 @@
           "context": 262144,
           "source": "https://api.tokenrouter.com/v1/models (context unverified)",
           "verified_at": "2026-08-22"
+        },
+        "tokenrouter/deepseek/deepseek-v4.1-flash": {
+          "context": 262144,
+          "source": "https://api.tokenrouter.com/v1/models (context unverified)",
+          "verified_at": "2026-09-10"
         },
         "tokenrouter/dreamina-seedance-2-5-hc": {
           "context": 262144,

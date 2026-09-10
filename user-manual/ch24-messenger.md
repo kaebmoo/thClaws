@@ -115,14 +115,25 @@ honours the same project `.thclaws/settings.json` as the REPL.
 
 > Headless pairing redemption itself (entering the 6-digit code without
 > the GUI modal) is a follow-up. For now, do the one-time pair through
-> the GUI on any machine; the resulting `~/.config/thclaws/messenger.json`
-> can be copied to a headless host.
+> the GUI on any machine, then copy the resulting
+> `.thclaws/messenger.json` to the headless host — into the project
+> folder you will start `--messenger` from, since the binding is
+> project-scoped.
 
 ## Configuration
 
-Runtime state lives in `~/.config/thclaws/messenger.json` (written by
-the GUI modal). It's small by design — the sensitive bits stay on the
-relay:
+Runtime state lives in **`./.thclaws/messenger.json`** — project-scoped,
+resolved against the directory you start thClaws in, and written by the
+GUI modal. Each project therefore owns its own Page binding.
+
+> **It used to be `~/.config/thclaws/messenger.json`.** That user-level
+> path is now legacy: it is read only as a fallback, and only when you
+> set `THCLAWS_MESSENGER_USER_CONFIG=1`. Nothing is migrated for you —
+> if the bridge stopped finding its binding after an upgrade, move the
+> old `messenger.json` into the project's `.thclaws/` folder, or set
+> that env var while you get around to it.
+
+The file is small by design — the sensitive bits stay on the relay:
 
 ```json
 {
@@ -251,7 +262,8 @@ and approval prompts target the Page's **most-recent inbound PSID**.
 | "binding token rejected" on connect | Stale / revoked JWT | Re-pair through the GUI; old binding rows can be revoked relay-side |
 | Pairing code never arrives | `MESSENGER_PAGE_ACCESS_TOKEN` invalid on the relay | Relay logs show the Send API error; regenerate the token in Meta and update the relay |
 | Replies arrive but are cut off | Per-message hard cap (2,000) | Expected — long replies arrive as multiple messages; Messenger preserves order |
-| Approval chips don't appear | `dmPolicy` blocks the sender OR permission mode isn't `messengergated` | Check `thclaws messenger status` + `/permissions` in the REPL |
+| Approval chips don't appear | Permission mode isn't `messengergated` — something reset it to `auto` | Check `/permissions` in the REPL; `auto` runs tools without asking anywhere |
+| `messenger status` says no binding, but the file exists | The binding is at the user-level legacy path, or you started thClaws from a different project folder | Move it to `./.thclaws/messenger.json`, or set `THCLAWS_MESSENGER_USER_CONFIG=1` |
 | Multiple replies to one message | Webhook re-delivery (Meta retries failed deliveries) | Idempotency is handled relay-side via the `mid` dedup key; if you see this, check relay logs |
 
 ## What's NOT in this chapter
