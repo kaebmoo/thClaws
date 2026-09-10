@@ -1291,7 +1291,6 @@ pub async fn dispatch(
             max_iter,
             score_threshold_pct,
             max_pages,
-            budget_tokens: _,
             budget_time_secs,
             max_notes,
             novelty_pct,
