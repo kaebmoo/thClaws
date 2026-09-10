@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.124.0] — 2026-09-10
+
+`/publish` is announced properly — the command shipped last release but
+the hosting behind it only went live afterwards. Alongside it: a new
+provider, and a fix for hosted schedules, which could not run at all.
+
+### Added
+- **`/publish <file.html>` puts a self-contained page on the web.** The engine hands the file to thClaws.cloud and hands you back a link like `https://naknxbpwktpz.thclaws.app`. It is for the thing an agent has just built for you — a chart, a form, a one-page report — when "open the file on your machine" isn't enough and you want to send someone a link.
+
+  The command shipped in v0.123.0; the hosting side went live the same day, so it already works if you are on that version. This is the release that says so.
+
+  - **A token and a credit balance above zero are required.** Publishing itself is not billed — the balance is what tells us the account is a real one. Anonymous publishing is written and tested but switched off until abuse reports have somewhere to land.
+  - **Three days, 2 MB, 50 live pages per account.** An expired link stops serving on the request that notices, not when a cleanup job gets round to it.
+  - **Every page gets its own subdomain, not a path.** The dashboard keeps its session in `localStorage`, so pages you publish must not share that origin — and this isolates them from each other too. The id is 12 characters from a 32-symbol alphabet with no `l`, `o`, `0` or `1` to misread: roughly 60 bits, and the URL is the only thing gating access, so treat the link as the secret.
+  - **Your HTML is served as written.** No sanitising, deliberately — the point is that the page the agent built actually works. Containment is the isolated origin and the short life, not a guess about which markup is dangerous.
+  - Published pages are listed on the dashboard with the time left on each, and can be taken down early from there.
+
+- **Publish from the Files tab.** Right-click an `.html` file → "Publish to the web…". It runs the same `/publish`, so the link lands in the conversation where you can copy it and scroll back to it.
+
+- **SIS joins as a provider.** Alibaba Model Studio workspace endpoints, with 110 models in the catalogue under a `sis/` prefix. BYOK, like the other regional Alibaba endpoints. It has no default address — a SIS host carries your workspace id — so `SIS_BASE_URL` is required and the engine says exactly what it wants if you leave it out.
+
+### Fixed
+- **Hosted schedules could not run, and were being deleted.** On thClaws.cloud, `~/.config/thclaws/schedules.json` sat on the container filesystem rather than your workspace volume, so everything you had scheduled was destroyed when the workspace paused — silently, 30 minutes after you closed the tab. And a paused workspace has nothing running to fire a job anyway. Schedules now live on your volume, and the control plane wakes a paused workspace when one comes due. A schedule you disable does not wake it.
+- **`/publish` with no argument described the wrong rules.** The usage line still offered a one-hour anonymous link, which stopped being true when publishing was gated on a token and a balance.
+
 ## [0.123.0] — 2026-09-10
 
 thClaws' user manual is finished: thirty-four chapters, audited against the code chapter by chapter and rebuilt into the online manual. The technical manual gains the internals it was missing, and the pricing layer learns DeepSeek's real cache economics.

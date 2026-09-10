@@ -37,7 +37,7 @@ DB เก็บเป็น microcent ต่อ 1k token (`µ¢/kt`) สูต�
 
 context ที่มี **`?`** คือค่าที่ provider ไม่เคยประกาศ — เป็นค่า default ของ provider นั้นที่ใส่ไว้เพราะถ้าเว้นว่างจะทำให้ตัวเลือกโมเดลพัง ให้ถือเป็นขอบล่าง ไม่ใช่สเปกจริง
 
-625 โมเดล จาก 14 provider
+626 โมเดล จาก 14 provider
 
 ### Anthropic
 
@@ -235,9 +235,9 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `deepseek/deepseek-v4-flash` | 1.04858M | $0.11 | — | $0.22 |
 | `deepseek/deepseek-v4-flash-0731` | 1.04858M | $0.08 | — | $0.22 |
 | `deepseek/deepseek-v4-flash-vision-exp` | 1.04858M | $0.28 | — | $0.83 |
-| `deepseek/deepseek-v4-pro` | 1.04858M | $1.19 | — | $2.39 |
-| `deepseek/deepseek-v4-pro-0813` | 1.04858M | $1.31 | — | $3.94 |
-| `deepseek/deepseek-v4.1-flash` | 1.04858M | $0.38 | — | $1.50 |
+| `deepseek/deepseek-v4-pro` | 1.04858M | $1.09 | — | $2.17 |
+| `deepseek/deepseek-v4-pro-0813` | 1.04858M | $0.72 | — | $2.17 |
+| `deepseek/deepseek-v4.1-flash` | 1.04858M | $0.19 | — | $0.75 |
 | `dots-studio/dots-3-note-preview:free` | 512k | free | — | free |
 | `google/gemini-2.5-flash` | 1.04858M | $0.38 | — | $3.12 |
 | `google/gemini-2.5-flash-lite` | 1.04858M | $0.12 | $0.01 | $0.50 |
@@ -261,7 +261,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `google/gemma-3-12b-it` | 131k | $0.06 | — | $0.19 |
 | `google/gemma-3-27b-it` | 131k | $0.10 | — | $0.56 |
 | `google/gemma-3-4b-it` | 131k | $0.06 | — | $0.12 |
-| `google/gemma-4-26b-a4b-it` | 262k | $0.09 | — | $0.43 |
+| `google/gemma-4-26b-a4b-it` | 262k | $0.05 | — | $0.28 |
 | `google/gemma-4-26b-a4b-it:free` | 262k | free | — | free |
 | `google/gemma-4-31b-it` | 262k | $0.11 | — | $0.43 |
 | `google/gemma-4-31b-it:free` | 262k | free | — | free |
@@ -274,6 +274,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `inclusionai/ling-3.0-flash-fin` | 262k | $0.07 | — | $0.22 |
 | `inclusionai/ling-3.0-flash-fin:free` | 262k | free | — | free |
 | `inclusionai/ling-3.0-flash-sante:free` | 262k | free | — | free |
+| `inclusionai/ling-3.0-flash-vl:free` | 262k | free | — | free |
 | `kwaipilot/kat-coder-pro-v2` | 256k | $0.38 | — | $1.50 |
 | `kwaipilot/kat-coder-pro-v2.5` | 256k | $0.93 | — | $3.70 |
 | `liquid/lfm-2.5-2.6b:free` | 66k | free | — | free |
@@ -423,7 +424,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `qwen/qwen3-235b-a22b-2507` | 262k | $0.28 | — | $1.10 |
 | `qwen/qwen3-235b-a22b-thinking-2507` | 131k | $0.29 | — | $2.88 |
 | `qwen/qwen3-30b-a3b` | 41k | $0.15 | — | $0.62 |
-| `qwen/qwen3-30b-a3b-instruct-2507` | 262k | $0.11 | — | $0.38 |
+| `qwen/qwen3-30b-a3b-instruct-2507` | 262k | $0.06 | — | $0.24 |
 | `qwen/qwen3-30b-a3b-thinking-2507` | 131k | $0.25 | — | $3.00 |
 | `qwen/qwen3-32b` | 41k | $0.10 | — | $0.35 |
 | `qwen/qwen3-8b` | 41k | $0.15 | — | $0.57 |
@@ -452,7 +453,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `qwen/qwen3.5-plus-02-15` | 1M | $0.33 | — | $1.95 |
 | `qwen/qwen3.5-plus-20260420` | 1M | $0.38 | — | $2.25 |
 | `qwen/qwen3.6-27b` | 262k | $0.38 | — | $2.50 |
-| `qwen/qwen3.6-35b-a3b` | 262k | $0.12 | — | $1.12 |
+| `qwen/qwen3.6-35b-a3b` | 262k | $0.06 | — | $0.88 |
 | `qwen/qwen3.6-flash` | 1M | $0.23 | — | $1.41 |
 | `qwen/qwen3.6-max-preview` | 262k | $1.28 | — | $7.70 |
 | `qwen/qwen3.6-plus` | 1M | $0.41 | — | $2.44 |
@@ -478,7 +479,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `tencent/hy-mt2-1.8b` | 8k | $0.05 | — | $0.22 |
 | `tencent/hy-mt2-30b-a3b` | 8k | $0.09 | — | $0.37 |
 | `tencent/hy-mt2-7b` | 8k | $0.09 | — | $0.37 |
-| `tencent/hy3` | 262k | $0.17 | — | $0.66 |
+| `tencent/hy3` | 262k | $0.10 | — | $0.41 |
 | `tencent/hy3-preview` | 262k | $0.22 | — | $0.75 |
 | `tencent/hy4-preview` | 1.04858M | $1.04 | — | $3.13 |
 | `thedrummer/cydonia-24b-v4.1` | 131k | $0.38 | — | $0.62 |
@@ -510,9 +511,9 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `z-ai/glm-5` | 203k | $0.75 | — | $2.40 |
 | `z-ai/glm-5-turbo` | 203k | $1.50 | — | $5.00 |
 | `z-ai/glm-5.1` | 203k | $1.21 | — | $3.79 |
-| `z-ai/glm-5.2` | 1.04858M | $1.21 | — | $3.79 |
+| `z-ai/glm-5.2` | 1.04858M | $0.35 | — | $1.10 |
 | `z-ai/glm-5.3` | 1.04858M | $1.75 | — | $5.50 |
-| `z-ai/glm-5.3-flash` | 1.31072M | $0.09 | — | $0.31 |
+| `z-ai/glm-5.3-flash` | 1.31072M | $0.19 | — | $0.62 |
 | `z-ai/glm-5v-turbo` | 203k | $1.50 | — | $5.00 |
 | `~anthropic/claude-fable-latest` | 1M | $12.50 | — | $62.50 |
 | `~anthropic/claude-haiku-latest` | 200k | $1.25 | — | $6.25 |
@@ -662,7 +663,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 
 | Model | Context | Input ($/M) | Cached in ($/M) | Output ($/M) |
 |---|---:|---:|---:|---:|
-| `deepseek-flash` | 262k? | $0.43 | $0.0086 | $1.72 |
+| `deepseek-flash` | 1.04858M | $0.43 | $0.0086 | $1.72 |
 | `deepseek-v4-pro` | 1.04858M | $1.90 | $0.06 | $5.69 |
 
 ### MiniMax

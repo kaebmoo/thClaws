@@ -89,6 +89,20 @@ pub enum ProviderKind {
     /// `DashScope` but a different account / region / key, so it
     /// gets its own variant and `qwen-cloud/` model namespace.
     QwenCloud,
+    /// Alibaba Cloud Model Studio "SIS" workspace endpoints
+    /// (`ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1`).
+    /// Same OpenAI-compatible wire as [`DashScope`], so it follows
+    /// [`QwenCloud`]'s shape: own variant, own key, own `sis/` model
+    /// namespace, Additional tier, BYOK only (the metered gateway sells
+    /// the ten Featured providers and dropped the regional Alibaba
+    /// siblings on 2026-08-10).
+    ///
+    /// Unlike every other hosted provider it has NO default endpoint:
+    /// the host carries a workspace id, so it differs per account.
+    /// `SIS_BASE_URL` is required and `build_provider` refuses without
+    /// it — a shared default would silently route one account's traffic
+    /// into another's workspace.
+    Sis,
     ZAi,
     LMStudio,
     /// vLLM (`vllm serve`) — the standard self-hosted inference server for
@@ -270,6 +284,7 @@ impl ProviderKind {
         Self::OllamaCloud,
         Self::DashScope,
         Self::QwenCloud,
+        Self::Sis,
         Self::ZAi,
         Self::LMStudio,
         Self::VLlm,
@@ -305,6 +320,7 @@ impl ProviderKind {
             Self::OllamaCloud => "ollama-cloud",
             Self::DashScope => "dashscope",
             Self::QwenCloud => "qwen-cloud",
+            Self::Sis => "sis",
             Self::ZAi => "zai",
             Self::LMStudio => "lmstudio",
             Self::VLlm => "vllm",
@@ -364,6 +380,12 @@ impl ProviderKind {
             // reaches the upstream (which expects bare `qwen-max`,
             // `qwen-plus`, etc.).
             Self::QwenCloud => "qc/qwen-max",
+            // Bootstrap only — enough to establish a connection so the
+            // user can `/model sis/<id>` from the live roster. A SIS
+            // workspace serves whatever its owner enabled, so no id is
+            // guaranteed present; this one was verified against a real
+            // workspace on 2026-09-10.
+            Self::Sis => "sis/qwen3.8-flash",
             Self::ZAi => "zai/glm-5.2",
             // Most LMStudio installs change models constantly; this is a
             // placeholder that lets the connection establish so the user
@@ -450,6 +472,7 @@ impl ProviderKind {
             Self::NineRouter => Some("NINEROUTER_BASE_URL"),
             Self::DashScope => Some("DASHSCOPE_BASE_URL"),
             Self::QwenCloud => Some("QWENCLOUD_BASE_URL"),
+            Self::Sis => Some("SIS_BASE_URL"),
             Self::Ollama => Some("OLLAMA_BASE_URL"),
             Self::OllamaAnthropic => Some("OLLAMA_BASE_URL"),
             Self::ZAi => Some("ZAI_BASE_URL"),
@@ -643,6 +666,7 @@ impl ProviderKind {
             Self::OllamaCloud => Some("OLLAMA_CLOUD_API_KEY"),
             Self::DashScope => Some("DASHSCOPE_API_KEY"),
             Self::QwenCloud => Some("QWENCLOUD_API_KEY"),
+            Self::Sis => Some("SIS_API_KEY"),
             Self::ZAi => Some("ZAI_API_KEY"),
             Self::LMStudio => None, // Local runtime, no auth.
             // Self-hosted; auth only if started with --api-key, which
@@ -752,6 +776,7 @@ impl ProviderKind {
             | Self::OllamaCloud
             | Self::DashScope
             | Self::QwenCloud
+            | Self::Sis
             | Self::ZAi
             | Self::LMStudio
             | Self::VLlm
@@ -841,6 +866,11 @@ impl ProviderKind {
             // `qc/` prefix is stripped before the request reaches the
             // upstream so it sees the bare `qwen-*` id.
             Some(Self::QwenCloud)
+        } else if model.starts_with("sis/") {
+            // Alibaba Model Studio workspace endpoint. Models look like
+            // `sis/qwen3.8-flash`; the prefix is stripped before the
+            // request reaches the upstream, which expects the bare id.
+            Some(Self::Sis)
         } else if model.starts_with("dashscope/") {
             // Alibaba Cloud mainland DashScope routing prefix. Models look
             // like `dashscope/qwen-max`, `dashscope/deepseek-v3.2`,
@@ -2201,6 +2231,45 @@ mod tests {
         );
         assert!(
             ProviderKind::resolve_alias_for_provider("sonnet", ProviderKind::ThaiLLM).is_none()
+        );
+    }
+
+    #[test]
+    fn sis_is_byok_only_and_has_no_shared_default_endpoint() {
+        // `sis/` routes to the workspace endpoint; bare qwen ids keep
+        // going to mainland DashScope, so the two stay distinguishable
+        // the same way `qc/` does.
+        assert_eq!(
+            ProviderKind::detect("sis/qwen3.8-flash"),
+            Some(ProviderKind::Sis)
+        );
+        assert_eq!(
+            ProviderKind::detect("qwen-max"),
+            Some(ProviderKind::DashScope),
+            "bare qwen-* must not be captured by the sis prefix"
+        );
+        assert_eq!(ProviderKind::Sis.name(), "sis");
+        assert_eq!(ProviderKind::Sis.api_key_env(), Some("SIS_API_KEY"));
+        assert_eq!(ProviderKind::Sis.endpoint_env(), Some("SIS_BASE_URL"));
+
+        // The load-bearing one. A SIS host embeds a workspace id, so a
+        // shared default would route one account's traffic into
+        // another's workspace. `build_provider` refuses without
+        // SIS_BASE_URL; this pins the absence so nobody "fixes" it by
+        // adding a plausible-looking URL.
+        assert_eq!(
+            ProviderKind::Sis.default_endpoint(),
+            None,
+            "SIS endpoints are per-workspace — there is no default to share"
+        );
+
+        // Additional, not Featured: the metered gateway sells the ten
+        // Featured providers and dropped the regional Alibaba siblings
+        // on 2026-08-10. SIS is BYOK, like QwenCloud.
+        assert_eq!(ProviderKind::Sis.tier(), ProviderTier::Additional);
+        assert!(
+            !ProviderKind::FEATURED_ORDER.contains(&ProviderKind::Sis),
+            "SIS must not appear in the Featured order"
         );
     }
 

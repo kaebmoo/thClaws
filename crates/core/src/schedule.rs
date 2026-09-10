@@ -175,6 +175,22 @@ impl ScheduleStore {
         }
     }
 
+    /// Earliest upcoming fire across every ENABLED schedule, or `None`
+    /// when nothing is pending.
+    ///
+    /// Cloud runners report this to the control plane on their
+    /// keepalive ping. A paused workspace has no process to fire a
+    /// job — `pause()` scales the Deployment to 0 — so the reaper uses
+    /// this to resume it in time. Disabled entries are skipped: a
+    /// schedule the user turned off must not wake a pod.
+    pub fn next_fire_across_all(&self, cursor: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        self.schedules
+            .iter()
+            .filter(|s| s.enabled)
+            .filter_map(|s| next_fire(s, cursor))
+            .min()
+    }
+
     /// Load from a specific path. Used by tests to redirect to a
     /// tempdir, and by callers that want to swap the store location
     /// (e.g. a future per-project overlay).
@@ -1534,6 +1550,7 @@ impl WatchManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     /// Write a `#!/bin/sh` script to `path` and chmod it executable.
     /// Crucially, the write fd is dropped before chmod+spawn — Linux
@@ -1556,6 +1573,52 @@ mod tests {
         let mut perms = std::fs::metadata(path).unwrap().permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(path, perms).unwrap();
+    }
+
+    #[test]
+    fn next_fire_across_all_skips_disabled_and_takes_the_earliest() {
+        let mut store = ScheduleStore::default();
+        let mk = |id: &str, cron: &str, enabled: bool| {
+            let mut s = Schedule::default();
+            s.id = id.into();
+            s.cron = cron.into();
+            s.enabled = enabled;
+            s
+        };
+        assert!(
+            store.next_fire_across_all(Utc::now()).is_none(),
+            "an empty store must report nothing pending, not a wake-up"
+        );
+
+        // 03:00 daily, 02:00 daily, and a disabled 00:30 daily. The
+        // disabled one is the earliest by clock; it must not win —
+        // waking a pod for a schedule the user switched off is exactly
+        // the cost this feature exists to avoid.
+        store.schedules.push(mk("late", "0 3 * * *", true));
+        store.schedules.push(mk("early", "0 2 * * *", true));
+        store.schedules.push(mk("off", "30 0 * * *", false));
+
+        // Asserted as an ORDERING, not a wall-clock hour: cron
+        // expressions are evaluated in LOCAL time, so "0 2 * * *" is
+        // 19:00 UTC in Bangkok and something else on a CI box. The
+        // contract is "earliest enabled", and that holds in any zone.
+        let cursor = Utc.with_ymd_and_hms(2026, 9, 10, 1, 0, 0).unwrap();
+        let next = store
+            .next_fire_across_all(cursor)
+            .expect("something is due");
+        let early = next_fire(&mk("early", "0 2 * * *", true), cursor).unwrap();
+        let late = next_fire(&mk("late", "0 3 * * *", true), cursor).unwrap();
+        let disabled_time = next_fire(&mk("off", "30 0 * * *", true), cursor).unwrap();
+        assert_eq!(next, early, "earliest ENABLED schedule wins");
+        assert!(early < late, "fixture is only meaningful if early < late");
+        assert!(
+            disabled_time < early,
+            "fixture is only meaningful if the DISABLED one is earliest of all"
+        );
+        assert_ne!(
+            next, disabled_time,
+            "a disabled schedule must not wake a pod"
+        );
     }
 
     #[test]

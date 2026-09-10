@@ -18,6 +18,13 @@ pub const STRIP_PREFIXES: &[&str] = &[
     // chromium profile (cookies/tokens must NEVER ride along). Authored
     // workflow scripts live in `.thclaws/agent_workflow/` and are kept.
     ".thclaws/state/",
+    // Hosted runners put the engine's $HOME on the workspace PVC under
+    // `.home/` so `/schedule` and friends survive a pause. It is mounted
+    // into the pod at /home/thclaws, but the PVC is also mounted whole
+    // at /workspace, so the same bytes are visible here — and they are
+    // user credentials (gui-shell tokens, provider config), never agent
+    // content. Harmless on desktop, where nothing writes it.
+    ".home/",
     ".git/",
     "node_modules/",
     "target/",
@@ -376,6 +383,13 @@ mod strip_tests {
             ".thclaws/state/workflows/wf-1/state.jsonl",
             "secrets_secret.txt",
             "a/.env",
+            // Hosted runners put the engine's $HOME on the workspace
+            // PVC under `.home/`. It is mounted at /home/thclaws, but
+            // the PVC is also mounted whole at /workspace, so these are
+            // reachable from the workspace tree — and they are the
+            // publisher's credentials, not agent content.
+            ".home/.config/thclaws/gui-shell-tokens.json",
+            ".home/.config/thclaws/schedules.json",
         ] {
             assert!(is_strippable(Path::new(p)), "should strip {p}");
         }

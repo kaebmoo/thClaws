@@ -2031,8 +2031,8 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
             if path.is_empty() {
                 SlashCommand::Unknown(
                     "usage: /publish <file.html> — puts a self-contained page on \
-                     the web at a private URL. Without a thClaws.cloud token the \
-                     link lives 1 hour; with one, 3 days."
+                     the web at a private URL that expires in 3 days. Needs a \
+                     thClaws.cloud token and a credit balance above zero."
                         .into(),
                 )
             } else {
@@ -4910,6 +4910,43 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
                 OpenAIProvider::new(key)
                     .with_base_url(url)
                     .with_strip_model_prefix("qc/"),
+            ))
+        }
+        ProviderKind::Sis => {
+            // Alibaba Model Studio workspace endpoint. Identical
+            // OpenAI-compatible wire to DashScope; models carry a `sis/`
+            // prefix in our catalogue, stripped before the request so
+            // the upstream sees the bare id.
+            //
+            // No default base URL, deliberately: the host embeds a
+            // workspace id (`ws-<id>.<region>.maas.aliyuncs.com`), so
+            // it is per-account. Falling back to a shared default would
+            // point one customer's traffic at another's workspace —
+            // refuse instead, the way AzureAIFoundry does for the same
+            // reason.
+            let base = std::env::var("SIS_BASE_URL")
+                .ok()
+                .map(|u| u.trim().to_string())
+                .filter(|u| !u.is_empty())
+                .ok_or_else(|| {
+                    Error::Config(
+                        "SIS_BASE_URL not set — a SIS endpoint is workspace-specific \
+                         (https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1). \
+                         Add it in Settings or export the env var."
+                            .into(),
+                    )
+                })?;
+            // Same shape `compat_endpoint` produces, minus its default:
+            // accept a base or an already-complete endpoint.
+            let url = if base.ends_with("/chat/completions") {
+                base
+            } else {
+                format!("{}/chat/completions", base.trim_end_matches('/'))
+            };
+            Ok(Arc::new(
+                OpenAIProvider::new(api_key)
+                    .with_base_url(url)
+                    .with_strip_model_prefix("sis/"),
             ))
         }
         ProviderKind::ZAi => {
