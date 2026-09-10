@@ -1577,7 +1577,13 @@ mod tests {
 
     #[test]
     fn next_fire_across_all_skips_disabled_and_takes_the_earliest() {
-        let mut store = ScheduleStore::default();
+        // Every assertion compares against `next_fire()` outputs rather
+        // than wall-clock numbers, and no assertion assumes which cron
+        // lands first. Cron is evaluated in LOCAL time, so "which of
+        // these two times comes first" genuinely differs by machine —
+        // an earlier version of this test pinned an hour, and a later
+        // one pinned an ordering, and BOTH passed in Bangkok and failed
+        // on CI in UTC.
         let mk = |id: &str, cron: &str, enabled: bool| {
             let mut s = Schedule::default();
             s.id = id.into();
@@ -1585,39 +1591,45 @@ mod tests {
             s.enabled = enabled;
             s
         };
+        let cursor = Utc.with_ymd_and_hms(2026, 9, 10, 1, 0, 0).unwrap();
+
+        let mut store = ScheduleStore::default();
         assert!(
-            store.next_fire_across_all(Utc::now()).is_none(),
+            store.next_fire_across_all(cursor).is_none(),
             "an empty store must report nothing pending, not a wake-up"
         );
 
-        // 03:00 daily, 02:00 daily, and a disabled 00:30 daily. The
-        // disabled one is the earliest by clock; it must not win —
-        // waking a pod for a schedule the user switched off is exactly
-        // the cost this feature exists to avoid.
-        store.schedules.push(mk("late", "0 3 * * *", true));
-        store.schedules.push(mk("early", "0 2 * * *", true));
+        // Disabled only: nothing pending. A schedule the user switched
+        // off must never wake a paused workspace.
         store.schedules.push(mk("off", "30 0 * * *", false));
-
-        // Asserted as an ORDERING, not a wall-clock hour: cron
-        // expressions are evaluated in LOCAL time, so "0 2 * * *" is
-        // 19:00 UTC in Bangkok and something else on a CI box. The
-        // contract is "earliest enabled", and that holds in any zone.
-        let cursor = Utc.with_ymd_and_hms(2026, 9, 10, 1, 0, 0).unwrap();
-        let next = store
-            .next_fire_across_all(cursor)
-            .expect("something is due");
-        let early = next_fire(&mk("early", "0 2 * * *", true), cursor).unwrap();
-        let late = next_fire(&mk("late", "0 3 * * *", true), cursor).unwrap();
-        let disabled_time = next_fire(&mk("off", "30 0 * * *", true), cursor).unwrap();
-        assert_eq!(next, early, "earliest ENABLED schedule wins");
-        assert!(early < late, "fixture is only meaningful if early < late");
         assert!(
-            disabled_time < early,
-            "fixture is only meaningful if the DISABLED one is earliest of all"
+            store.next_fire_across_all(cursor).is_none(),
+            "a disabled schedule must not count as pending"
         );
-        assert_ne!(
-            next, disabled_time,
-            "a disabled schedule must not wake a pod"
+
+        // Add two enabled ones. The answer is the earlier of their own
+        // computed fires — whichever that turns out to be here.
+        let a = mk("a", "0 2 * * *", true);
+        let b = mk("b", "0 3 * * *", true);
+        let a_at = next_fire(&a, cursor).unwrap();
+        let b_at = next_fire(&b, cursor).unwrap();
+        store.schedules.push(a);
+        store.schedules.push(b);
+        assert_eq!(
+            store.next_fire_across_all(cursor),
+            Some(a_at.min(b_at)),
+            "earliest ENABLED schedule wins"
+        );
+
+        // Enabling the third must move the answer only if it is
+        // genuinely earlier — stated as a min() over all three so it
+        // holds in any zone.
+        let off_at = next_fire(&mk("off", "30 0 * * *", true), cursor).unwrap();
+        store.schedules[0].enabled = true;
+        assert_eq!(
+            store.next_fire_across_all(cursor),
+            Some(a_at.min(b_at).min(off_at)),
+            "enabling a schedule brings it into consideration"
         );
     }
 
