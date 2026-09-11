@@ -112,7 +112,7 @@ WebSocket drops trigger exponential backoff (250ms → 5s cap). On every reconne
 
 **Snapshot frame is incomplete today.** Future SERVE9 work:
 - Add `ShellInput::SnapshotRequest { reply: oneshot::Sender<SnapshotPayload> }`
-- Worker handles by reading `state.session.id` + `agent.history_snapshot()` + `plan_state::get()` + `current_mode()` + reading `.thclaws/todos.md`, replies on the oneshot
+- Worker handles by reading `state.session.id` + `agent.history_snapshot()` + `plan_state::get()` + `current_mode()` + reading `.thclaws/state/todos.md`, replies on the oneshot
 - Server's WS-flavored `on_send_initial_state` spawns a tokio task: send `SnapshotRequest`, await reply, build snapshot JSON, dispatch as first frame
 - Frontend replaces its in-memory state with the snapshot before resuming live deltas
 

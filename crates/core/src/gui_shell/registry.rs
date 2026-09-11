@@ -363,7 +363,11 @@ fn scan_dir(dir: &Path) -> HashMap<String, OnDiskEntry> {
         if !path.is_dir() {
             continue;
         }
-        let manifest_path = path.join("manifest.json");
+        // Either filename: `shell new` writes shell.json, so a folder
+        // scaffolded by the CLI has to be discoverable too.
+        let Some(manifest_path) = super::manifest::find_manifest(&path) else {
+            continue;
+        };
         let Ok(text) = std::fs::read_to_string(&manifest_path) else {
             continue;
         };
@@ -548,6 +552,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A folder scaffolded by `thclaws shell new` carries `shell.json`,
+    /// not `manifest.json`. Before both names were accepted it linted
+    /// clean and then never showed up in the picker — no error anywhere,
+    /// just absent.
+    #[test]
+    fn scan_dir_accepts_shell_json_as_well_as_manifest_json() {
+        let tmp = tempdir().unwrap();
+        for (dir, file, id) in [
+            ("with-manifest", "manifest.json", "with-manifest"),
+            ("with-shell", "shell.json", "with-shell"),
+        ] {
+            let d = tmp.path().join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(
+                d.join(file),
+                format!(r#"{{"id":"{id}","name":"{id}","version":"0.1.0","description":"t","entry":"index.html"}}"#),
+            )
+            .unwrap();
+        }
+        let found = scan_dir(tmp.path());
+        let mut ids: Vec<&str> = found.values().map(|s| s.manifest.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, ["with-manifest", "with-shell"]);
     }
 
     #[test]

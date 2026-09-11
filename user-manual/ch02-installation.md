@@ -49,8 +49,8 @@ below for those numbers.
 
 > **Prefer to build from source?** thClaws is open source — clone
 > [github.com/thClaws/thClaws](https://github.com/thClaws/thClaws)
-> and run `cargo build --release --features gui` (Rust 1.85+,
-> Node.js 20+, pnpm 9+). The downloads below are the recommended
+> and run `cargo build --release --features gui` (current stable
+> Rust, Node.js 20+, pnpm 10+). The downloads below are the recommended
 > install route for most users.
 
 ## Install
@@ -328,8 +328,39 @@ $ rm -rf ~/.config/thclaws
 | `thclaws: command not found` after install | `~/.local/bin` not on `PATH` — add `export PATH="$HOME/.local/bin:$PATH"` to your shell rc |
 | macOS "cannot be opened because the developer cannot be verified" | One-time: `xattr -d com.apple.quarantine ~/.local/bin/thclaws ~/.local/bin/thclaws-cli` |
 | Linux: `error while loading shared libraries: libssl.so.3` | Install OpenSSL 3 (`sudo apt install libssl3` / `sudo dnf install openssl`) |
+| Linux: `error while loading shared libraries: libwayland-client.so.0` (or `libwebkit2gtk-4.1`) | The GUI binary needs Wayland + WebKit2GTK at runtime. Desktop distros ship them; **headless servers and slim containers do not**. Either use `thclaws --cli`, which needs none of it, or install them — see below |
 | Windows: `thclaws` not recognised in PowerShell | Folder not on PATH — re-check the PATH env var and open a fresh terminal window |
 | GUI window doesn't open | Try `thclaws --cli` first — if that works, the GUI webview is missing system deps (WebKit on Linux / WebView2 on Windows) |
+
+
+### Linux GUI runtime dependencies
+
+The Linux **GUI** binary links against Wayland and WebKit2GTK at run
+time. Ubuntu Desktop, Fedora Workstation and friends already have them.
+A cloud VM, an EC2 box or a slim Docker image usually does not, and
+`thclaws` fails at startup with
+`error while loading shared libraries: libwayland-client.so.0`.
+
+Two ways out:
+
+**(a) Use CLI mode** — no GUI dependencies at all:
+
+```bash
+$ thclaws --cli
+$ thclaws -p "what does src/main.rs do?"
+```
+
+**(b) Install the dependencies:**
+
+```bash
+# Debian / Ubuntu
+$ sudo apt install libwayland-client0 libwebkit2gtk-4.1-0 libsoup-3.0-0
+
+# Fedora / RHEL
+$ sudo dnf install wayland libsoup3 webkit2gtk4.1
+```
+
+The `thclaws-cli` binary in the same tarball never needs these.
 
 ## Next
 

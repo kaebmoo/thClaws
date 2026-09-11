@@ -1,6 +1,6 @@
 # Sessions
 
-Append-only JSONL persistence for conversations. Each session = one `<id>.jsonl` file under `<cwd>/.thclaws/sessions/`. Worker writes events as the agent loop produces them (header at session-mint, one event per turn / rename / plan mutation / compaction); `load_from` replays the file to reconstruct the in-memory `Session`. The sidebar lists sessions by `updated_at`; `/load <id-or-name>` swaps the active conversation.
+Append-only JSONL persistence for conversations. Each session = one `<id>.jsonl` file under `<cwd>/.thclaws/state/sessions/`. Worker writes events as the agent loop produces them (header at session-mint, one event per turn / rename / plan mutation / compaction); `load_from` replays the file to reconstruct the in-memory `Session`. The sidebar lists sessions by `updated_at`; `/load <id-or-name>` swaps the active conversation.
 
 This doc covers: the JSONL format, every event type, the session lifecycle (new / save / load / rename / delete / gc), `SessionStore` discovery + resolution, plan-mode integration via the broadcaster, compaction checkpoint replay, the M6.14 absolute-path fix and M6.19 per-line salvage, the auto-model-switch on `/load`, the cross-process concurrency model, and the testing surface.
 
@@ -57,7 +57,7 @@ USER CLICK on sidebar entry → session_load IPC → ShellInput::LoadSession(id)
                                                                checkpoints → more messages)
 ```
 
-Each thClaws project has its own session directory (`<project>/.thclaws/sessions/`). Switching workspace via the GUI sidebar's folder icon (or `/cwd` via the CLI) re-resolves the directory; the M6.14 fix wires this through `state.session_store` rebuilds.
+Each thClaws project has its own session directory (`<project>/.thclaws/state/sessions/`). Switching workspace via the GUI sidebar's folder icon (or `/cwd` via the CLI) re-resolves the directory; the M6.14 fix wires this through `state.session_store` rebuilds.
 
 ### Where sessions DON'T go
 
@@ -190,7 +190,7 @@ What `SessionStore::list()` returns. Trimmed for sidebar rendering — no messag
 pub struct SessionStore { pub root: PathBuf }
 ```
 
-Just a wrapper around the sessions directory. `default_path()` returns `<cwd>/.thclaws/sessions/` — always project-scoped (M6.14 priority). The directory is created on first save; `default_path` doesn't materialize it just to list.
+Just a wrapper around the sessions directory. `default_path()` returns `<cwd>/.thclaws/state/sessions/` — always project-scoped (M6.14 priority). The directory is created on first save; `default_path` doesn't materialize it just to list.
 
 ### `validate_id`
 
@@ -414,7 +414,7 @@ crates/core/src/
 │   ├── Session::load_from                            (replay JSONL with M6.19 H1 per-line skip)
 │   ├── append_plan_snapshot                          (free fn for the broadcaster closure)
 │   ├── SessionStore                                  (root: PathBuf)
-│   ├── SessionStore::default_path                    (<cwd>/.thclaws/sessions)
+│   ├── SessionStore::default_path                    (<cwd>/.thclaws/state/sessions)
 │   ├── SessionStore::validate_id                     (no `..`, slashes, control chars, abs paths)
 │   ├── SessionStore::save / load / list /
 │   │                  resolve_id / load_by_name_or_id /

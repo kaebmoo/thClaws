@@ -183,6 +183,9 @@ thClaws มี subagent ชุดหนึ่งที่ ship มาในไ�
 | `folder-indexer` | โมเดลของ session | ทำสารบัญของโฟลเดอร์เป็น `<folder>/index.md` — หนึ่งแถวต่อหนึ่งไฟล์ พร้อมคำอธิบายที่อ่านจากเนื้อหาจริง (ทั้งข้อความ เอกสาร และรูป) ทำงานแบบ incremental: tool `FolderIndex` ทำ fingerprint ทุกไฟล์ จึงอ่านซ้ำเฉพาะไฟล์ที่เปลี่ยนไปจากรอบก่อน เรียกผ่าน `/index <folder>`, คลิกขวาโฟลเดอร์ในแท็บ Files → **Index folder…** หรือ `Task(agent: "folder-indexer")` |
 | `kms-linker` | โมเดลของ session | ซ่อม link หน้าที่พัง, refresh หน้าที่ stale, เติม index entry ที่ขาดใน KMS ถูก dispatch เป็น side-channel โดย `/kms wrap-up --fix` |
 | `kms-reconcile` | โมเดลของ session | หาและแก้ความขัดแย้งข้ามหน้าใน KMS — rewrite หน้าที่ล้าสมัยพร้อม History section, ทำเครื่องหมายเคสกำกวมเป็น Conflict page ถูก dispatch โดย `/kms reconcile <name> [--apply]` |
+| `kms-maintain` | โมเดลของ session | คำสั่งร่มสำหรับงานดูแลในครั้งเดียว — แก้โครงสร้าง กระทบยอดแหล่งที่มากับ session ที่มีอยู่จริง รีเฟรชของเก่า และแก้ข้อขัดแย้ง รวมเป็น pipeline เดียว เรียกด้วย `/kms maintain <name> [--apply]` ดู[บทที่ 9](ch09-knowledge-bases-kms.md) |
+| `summarizer` | โมเดลของ session | ย่อข้อความ ไฟล์ หรือ URL ให้สั้นลงโดยคงความถูกต้อง — ประเด็นหลัก การตัดสินใจ สิ่งที่ได้เรียนรู้ และเลือกให้ย่อเป็นอีกภาษาได้ เรียกด้วย `/agent summarizer <prompt>` หรือ `Task(agent: "summarizer")` |
+| `content-extractor` | โมเดลของ session | แปลงหน้าเว็บ ไฟล์ในเครื่อง หรือข้อความที่วางมา ให้เป็นบทความ markdown ที่สมบูรณ์ในตัว พร้อมดาวน์โหลดรูปมาเก็บไว้ในเครื่อง เหมาะใช้เป็นขั้นก่อน `/kms ingest` |
 
 ทั้งสอง built-in ไม่ได้ระบุ `model:` ใน frontmatter — ทั้งคู่จะ inherit
 โมเดลที่ session ใช้งานอยู่ เพื่อไม่ให้ผู้ใช้ข้าม provider เจอ error

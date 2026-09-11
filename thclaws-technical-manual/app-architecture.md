@@ -72,8 +72,8 @@ This is a deliberate constraint: bug fixes to the agent loop, tool dispatch, ses
 
 | Binary | Source | Purpose |
 |---|---|---|
-| `thclaws` | [`bin/app.rs`](thclaws/crates/core/src/bin/app.rs) | Unified entry point. GUI by default; `--cli` or `--print` flips to terminal mode. Built with `--features gui` for desktop use. |
-| `thclaws-cli` | [`bin/cli.rs`](thclaws/crates/core/src/bin/cli.rs) | CLI-only build. No `gui` feature. Smaller binary; ships on systems where the wry/tao runtime can't be installed (headless CI, minimal containers). |
+| `thclaws` | [`bin/app.rs`](../crates/core/src/bin/app.rs) | Unified entry point. GUI by default; `--cli` or `--print` flips to terminal mode. Built with `--features gui` for desktop use. |
+| `thclaws-cli` | [`bin/cli.rs`](../crates/core/src/bin/cli.rs) | CLI-only build. No `gui` feature. Smaller binary; ships on systems where the wry/tao runtime can't be installed (headless CI, minimal containers). |
 
 The `gui` feature gate ([`Cargo.toml::[features]`](../thclaws/crates/core/Cargo.toml)) makes `gui.rs` and its dependencies (`wry`, `tao`, `webview`) optional. `thclaws --cli` works in either build; `thclaws` with no flag in a non-`gui` build prints "GUI not available — rebuild with `cargo build --features gui --bin thclaws`" and exits 1.
 
@@ -567,8 +567,8 @@ Three tools deliberately skip `Sandbox::check_write` to land inside `.thclaws/`:
 
 | Tool | Target | Rationale |
 |---|---|---|
-| `TodoWrite` | `.thclaws/todos.md` | Model-managed task list scratchpad |
-| `KmsWrite` / `KmsAppend` | `.thclaws/kms/<name>/pages/...` | M6.25 — LLM-maintained wiki pages |
+| `TodoWrite` | `.thclaws/state/todos.md` | Model-managed task list scratchpad |
+| `KmsWrite` / `KmsAppend` | `.thclaws/state/kms/<name>/pages/...` | M6.25 — LLM-maintained wiki pages |
 | `MemoryWrite` / `MemoryAppend` | `<root>/.thclaws/memory/...` and `~/.local/share/thclaws/memory/...` | M6.26 — LLM-maintainable long-lived memory |
 
 Each has its own finer-grained validation (`writable_page_path`, `writable_entry_path`) that enforces the same security properties (no `..`, no path separators, no symlink escape) but allows the specific carve-out path. See [`kms.md`](kms.md) §7 and [`memory.md`](memory.md) §6 for the security model.

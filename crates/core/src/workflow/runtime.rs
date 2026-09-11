@@ -1173,7 +1173,8 @@ enum WorkerOut {
 /// want. The call only throws on a programmer error (arg not an array, no
 /// Task tool on this surface), never on a worker error.
 ///
-/// Concurrency is capped at `min(16, cores-2)`. Each future is `.scope`d
+/// Concurrency is capped at 8 by default, overridable with
+/// `THCLAWS_WORKFLOW_PARALLELISM` (clamped 1-32). Each future is `.scope`d
 /// with its own caps via a tokio task-local (`WORKER_CAPS_TASK`) so a
 /// per-worker KMS-write grant can't bleed across interleaved futures.
 /// The parallel path deliberately skips the per-worker token-budget

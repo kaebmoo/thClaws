@@ -11,7 +11,7 @@ Sessions are stored as **append-only JSONL files** — one event per line. That 
 
 ## Where sessions live
 
-Sessions are **project-scoped** — they live at `./.thclaws/sessions/`
+Sessions are **project-scoped** — they live at `./.thclaws/state/sessions/`
 inside your working directory. Start thClaws in a fresh folder and you
 get an empty session list.
 
@@ -22,7 +22,7 @@ committed like any text file.
 
 Legacy user-scope sessions at `~/.local/share/thclaws/sessions/` or
 `~/.claude/sessions/` (from older thClaws / Claude Code installs) are
-left alone — move them into a project's `.thclaws/sessions/` if you
+left alone — move them into a project's `.thclaws/state/sessions/` if you
 want them to show up in `/sessions`.
 
 ## Auto-save
@@ -33,7 +33,7 @@ Every assistant response is flushed to the session file as it lands. You don't n
 
 ```
 ❯ /save
-saved → ./.thclaws/sessions/s-4f3a2b1c.jsonl
+saved → ./.thclaws/state/sessions/s-4f3a2b1c.jsonl
 ```
 
 `/save` forces a flush. Useful before running risky commands so you know the on-disk file matches memory.
@@ -104,10 +104,24 @@ If the session isn't found you get a friendly warning and thClaws starts fresh.
 A new session spawns automatically when:
 
 - You launch thClaws from scratch (no `--resume`)
-- You run `/provider <name>` or `/model <name>` to switch to a different LLM — history built against provider A's schema doesn't always survive being replayed to provider B, so we fork a fresh session on every provider / model switch
 - You click the `+` button in the sidebar's Sessions section
+- You run `/fork` (or press **Fork with summary** on the banner) — like
+  `+`, except the new session is seeded with a summary of the old
+  history instead of starting empty
 
-The previous session auto-saves before the fork, so nothing is lost.
+- You run `/provider <name>` — this still forks. A fresh `Agent` is
+  built for the new provider and the old history is not carried over.
+
+**`/model` is the exception, and it changed.** Switching model keeps the
+same session: the JSONL log is the canonical history and whichever
+provider serves the next turn translates it, so the session id and file
+stay put and the confirmation reads `conversation preserved in session
+…`. Earlier versions forked on every model switch; that is retired.
+`/provider` still forks, because changing provider replaces the whole
+agent rather than relabelling the active one.
+
+The previous session auto-saves before any of the above, so nothing is
+lost.
 
 ## Compaction: how big sessions stay manageable
 
@@ -130,7 +144,7 @@ The Chat tab and the Terminal tab share the active session. Loading a session in
 Sessions are plain JSONL. Peek with:
 
 ```sh
-cat .thclaws/sessions/s-4f3a2b1c.jsonl | head -5
+cat .thclaws/state/sessions/s-4f3a2b1c.jsonl | head -5
 ```
 
 First line is a header: `{"type":"header","id":"s-4f3a2b1c","model":"claude-sonnet-4-6","cwd":"...","created":"..."}`. Subsequent lines are messages and events.

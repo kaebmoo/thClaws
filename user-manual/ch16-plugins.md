@@ -132,6 +132,28 @@ Scope selection:
 
 - default (no flag) → project install (`.thclaws/plugins/`)
 - `--user` → user global (`~/.config/thclaws/plugins/`)
+- `--project` → the default, spelled out; useful in a script that
+  shouldn't inherit a habit
+
+### Reinstalling over an existing plugin
+
+Installing a plugin that is already registered is refused, so an
+upgrade can't half-overwrite a working install:
+
+```
+❯ /plugin install https://github.com/agentic-press/deploy-plugin.git
+plugin 'agentic-press-deploy' already installed at .thclaws/plugins/agentic-press-deploy
+— run /plugin remove first, or reinstall with --force
+```
+
+`--force` (or `-f`) replaces the directory in place. Use it to pull a
+newer version of the same plugin; use `/plugin remove` first if you'd
+rather start from nothing.
+
+An install whose *directory* is present but has no registry entry —
+a lost `plugins.json` write, a workspace sync that deleted it — is a
+different case: it's adopted automatically without `--force`, because
+`/plugin remove` is registry-keyed and could never have cleaned it up.
 
 ## List / show / enable / disable / remove
 
@@ -163,6 +185,31 @@ plugin 'big-noisy-plugin' removed (restart to drop active tools)
 ```
 
 Disable ≠ remove: files stay on disk, only the `enabled` flag flips.
+
+`/plugin remove` also answers to `/plugin rm` and `/plugin uninstall`,
+and `/plugins` to `/plugin list` or `/plugin ls`.
+
+### `/plugin gc` — clear out broken registry entries
+
+The registry can end up pointing at plugins that are no longer usable —
+you deleted the directory by hand, a `git clean` took it, or the
+`plugin.json` inside it stopped parsing. Those entries linger and show
+up in `/plugins` as if they were installed.
+
+```
+❯ /plugin gc
+removed zombie entries:
+  - big-noisy-plugin (project)
+  - old-deploy (user)
+```
+
+If there is nothing to clean it says `no zombie entries — registry is
+clean` and leaves everything alone.
+
+It drops any entry whose directory is missing **or** whose manifest no
+longer parses, across both the project and user registries. It never
+deletes a working plugin, so it is safe to run whenever `/plugins`
+lists something that is not really there.
 
 ## What a plugin contributes
 

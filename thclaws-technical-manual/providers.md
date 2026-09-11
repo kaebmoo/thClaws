@@ -1,6 +1,6 @@
 # Providers — the router
 
-Every LLM call funnels through `crate::providers`. The layer's contract is one trait — `Provider` — that exposes a single `stream(StreamRequest) -> EventStream` method and a closed enum — `ProviderKind` — that catalogues the 25 supported backends. A model string like `claude-sonnet-4-6` or `openrouter/anthropic/claude-opus-4-6` enters at the top, gets prefix-detected to a `ProviderKind`, then `build_provider(&config)` returns an `Arc<dyn Provider>` configured with the right URL, auth, and model-prefix-strip rules. The Agent loop sees only the trait — wire-format differences (Anthropic SSE event types vs OpenAI `data:` chunks vs Ollama NDJSON vs Gemini's nested `parts`) are normalized into a small `ProviderEvent` vocabulary, which `assemble.rs` then folds into `ContentBlock`s the agent persists.
+Every LLM call funnels through `crate::providers`. The layer's contract is one trait — `Provider` — that exposes a single `stream(StreamRequest) -> EventStream` method and a closed enum — `ProviderKind` — that catalogues the 31 supported backends. A model string like `claude-sonnet-4-6` or `openrouter/anthropic/claude-opus-4-6` enters at the top, gets prefix-detected to a `ProviderKind`, then `build_provider(&config)` returns an `Arc<dyn Provider>` configured with the right URL, auth, and model-prefix-strip rules. The Agent loop sees only the trait — wire-format differences (Anthropic SSE event types vs OpenAI `data:` chunks vs Ollama NDJSON vs Gemini's nested `parts`) are normalized into a small `ProviderEvent` vocabulary, which `assemble.rs` then folds into `ContentBlock`s the agent persists.
 
 This doc is the routing/dispatch layer. Each wire-format family has its own deep-dive manual:
 - [`provider-anthropic.md`](provider-anthropic.md) — Messages API SSE (3 variants: Anthropic, OllamaAnthropic, AzureAIFoundry)
@@ -97,6 +97,9 @@ Cache fields are `Option` because only Anthropic reports them today. `Usage::acc
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProviderKind {
     Anthropic,
+    AtlasCloud,
+    MetaAi,
+    NineRouter,
     AgentSdk,
     OpenAI,
     OpenAIResponses,
@@ -111,6 +114,9 @@ pub enum ProviderKind {
     QwenCloud,
     ZAi,
     LMStudio,
+    VLlm,
+    LlamaCpp,
+    LiteLlm,
     AzureAIFoundry,
     OpenAICompat,
     DeepSeek,
@@ -124,7 +130,7 @@ pub enum ProviderKind {
 }
 ```
 
-25 variants. (`AgenticPress` was removed.) `ALL: &'static [Self]` lists them in display order for the Settings UI. Every helper method below (`name`, `default_model`, `endpoint_env`, `default_endpoint`, `endpoint_user_configurable`, `api_key_env`, `resolve_alias_for_provider`) is a `match` over the full enum — adding a variant means updating every method, and the compiler enforces it.
+31 variants. (`AgenticPress` was removed.) `ALL: &'static [Self]` lists them in display order for the Settings UI. Every helper method below (`name`, `default_model`, `endpoint_env`, `default_endpoint`, `endpoint_user_configurable`, `api_key_env`, `resolve_alias_for_provider`) is a `match` over the full enum — adding a variant means updating every method, and the compiler enforces it.
 
 ### Catalogue table
 
@@ -155,6 +161,12 @@ pub enum ProviderKind {
 | `Gemini` | Google Gemini | `gemini-3.5-flash` | `gemini-`/`gemma-` | `GEMINI_API_KEY` | — | generativelanguage.googleapis.com (fixed) | no |
 | `Ollama` | Ollama NDJSON | `ollama/llama3.2` | `ollama/` | none | `OLLAMA_BASE_URL` | http://localhost:11434 | yes |
 | `OllamaCloud` | Ollama NDJSON | `ollama-cloud/deepseek-v4-flash` | `ollama-cloud/` | `OLLAMA_CLOUD_API_KEY` | — | ollama.com (fixed) | no |
+| `AtlasCloud` | OpenAI Chat Completions | `atlascloud/qwen/qwen3.5-flash` | `atlascloud/` | `ATLASCLOUD_API_KEY` | `ATLASCLOUD_BASE_URL` | https://api.atlascloud.ai/v1 | no |
+| `MetaAi` | OpenAI Chat Completions | `meta/muse-spark-1.2` | `meta/` | `META_API_KEY` | `META_BASE_URL` | https://api.meta.ai/v1 | no |
+| `NineRouter` | OpenAI Chat Completions | `9router/anthropic/claude-sonnet-4.5` | `9router/` | `NINEROUTER_API_KEY` | `NINEROUTER_BASE_URL` | http://localhost:20128/v1 | yes |
+| `LiteLlm` | OpenAI Chat Completions | `litellm/gpt-4o-mini` | `litellm/` | `LITELLM_API_KEY` | `LITELLM_BASE_URL` | http://localhost:4000/v1 | yes |
+| `VLlm` | OpenAI Chat Completions | `vllm/served-model` | `vllm/` | — | `VLLM_BASE_URL` | http://localhost:8000/v1 | yes |
+| `LlamaCpp` | OpenAI Chat Completions | `llamacpp/local-model` | `llamacpp/` | — | `LLAMACPP_BASE_URL` | http://localhost:8080/v1 | yes |
 
 `endpoint_user_configurable` returns `true` for `Ollama`, `OllamaAnthropic`, `LMStudio`, `AzureAIFoundry`, `OpenAICompat` — those are the 5 backends the Settings UI exposes a "base URL" field for. Hosted services stay locked.
 

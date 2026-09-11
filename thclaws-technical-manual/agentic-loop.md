@@ -210,7 +210,7 @@ The `try_stream!` macro from `async_stream` produces a `Stream` whose items are 
         Layer-2 (M4.1, when a plan is submitted): focuses on the
         current step + escalates wording on repeated attempts.
 
-<todos reminder>           (when .thclaws/todos.md exists)
+<todos reminder>           (when .thclaws/state/todos.md exists)
         Renders the current todo list inline so the model treats it
         as living state, not a stale artifact from a prior session.
 ```

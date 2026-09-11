@@ -62,7 +62,7 @@ elsewhere — phone, teammate, headless server.
    tree to expand it, click "Summarise" to have the agent describe
    the call in one line.
 4. Close the tab → the shell's session is persisted at
-   `./.thclaws/sessions/<id>.jsonl` (same place as Chat/Terminal
+   `./.thclaws/state/sessions/<id>.jsonl` (same place as Chat/Terminal
    sessions, with an extra `shell: { id, version }` metadata field
    — still `cat`-able).
 5. Reopen later → choose the same session from the Sessions browser;
@@ -356,14 +356,34 @@ A shell is HTML + CSS + JS. No build step required.
 ### Starter template
 
 ```sh
-git clone https://github.com/thclaws/gui-shell-template my-shell
-cd my-shell
-make dev          # under the hood: thclaws shell dev .
+thclaws shell new dashboard ./my-shell     # scaffold from a template
+thclaws shell preview ./my-shell           # serve it with hot reload
 ```
 
-`make dev` mounts your folder as a temporary shell with file-watch
-+ auto-reload. Edit `index.html` / `main.js` / `manifest.json`,
-save, the iframe refreshes automatically. No thClaws rebuild needed.
+`shell new` takes a template id — `chat-enhanced`, `grid`, `form`,
+`dashboard`, `kanban`, `document`, or `report` — and writes a working
+shell into the destination folder (refused if the folder is non-empty,
+unless you pass `--force`).
+
+`shell preview` runs the shell against a **mock agent** on
+`http://localhost:<port>/`, reloading on save, so you can build the UI
+without spending tokens. `--port 0` picks a free port.
+
+The rest of the authoring commands:
+
+| Command | What it does |
+|---|---|
+| `thclaws shell check <path>` | Lint the folder. Warnings and errors; exits 1 on any error |
+| `thclaws shell pack <path>` | Bundle into a single-file HTML, inlining siblings |
+| `thclaws shell login` / `logout` | Authenticate for publishing |
+| `thclaws shell publish <path>` | Publish the shell |
+
+> **Two manifest filenames, and they are not interchangeable.** The
+> authoring commands (`new` / `preview` / `check` / `pack` / `publish`)
+> read **`shell.json`**. The runtime registry — what makes a shell show
+> up in the picker — discovers folders by **`manifest.json`**. A shell
+> that lints clean but never appears in the picker is usually this: it
+> has a `shell.json` and no `manifest.json`.
 
 ### The bridge — `window.thclaws.*`
 
@@ -432,15 +452,45 @@ thclaws.ui.onFullscreen((active) => {            // fires immediately + on chang
 myExitButton.onclick = () => thclaws.ui.exitFullscreen();
 ```
 
-> **The full surface is wired.** As of the Tier-3 update every bridge
-> method is backed end-to-end: `run` / `cancel` / `on` / `streamTurn`
-> (yields `text` / `tool_call` / `tool_result`) / `callTool` +
-> `tools.invoke` / `storage.get` + `set` + `delete` (10 MB per-shell cap) /
-> `approvals.subscribe` + `respond` (render your own approve/deny widget
-> instead of the system modal) / `awaitApproval` / `uploadFile` (push a
-> blob → returns a servable URL) / `permissions.list` + `has` /
-> `model.*` + `kms.*` + `research.*` / `fileUrl` / `ui.*`. Any call that
-> the host can't answer self-rejects after 15 minutes, so nothing hangs.
+Any bridge call the host can't answer self-rejects after 15 minutes,
+so a shell never hangs on a dropped reply.
+
+### The rest of the bridge
+
+The block above is what most shells need. Beyond it, the bridge exposes
+the app's own settings surfaces, each behind its own permission — a
+shell can be a control panel, not only a chat front-end. Everything is
+async, and anything not declared in the manifest throws at call time.
+
+| Namespace | Methods | Permission |
+|---|---|---|
+| `thclaws.sessions` | `list()` · `load(id)` · `new()` · `rename(id, title)` · `delete(id)` | `session.list` to list, `session.read` to load, `session.write` for the rest |
+| `thclaws.model` | `get()` · `list()` · `set(id)` · `onChange(cb)` · `current` | `model.read` / `model.write` |
+| `thclaws.mode` | `get()` · `set(mode)` — the permission mode (Chapter 5) | `mode.write` (both) |
+| `thclaws.memory` | `getCore()` · `setCore(text)` | `memory.read` / `memory.write` |
+| `thclaws.kms` | `list()` · `browse(name)` · `create(name)` · `ingest(kms, path)` | `kms.read` / `kms.write` |
+| `thclaws.research` | `list()` · `get(id)` | `research.read` |
+| `thclaws.schedule` | `list()` · `create(prompt, cron)` · `delete(id)` · `setEnabled(id, on)` | `schedule.read` / `schedule.write` |
+| `thclaws.heartbeat` | `get()` · `set(interval)` | `schedule.read` / `schedule.write` |
+| `thclaws.skills` | `list()` · `get(name)` · `install(url, opts)` · `save(name, body)` · `delete(name)` | `skills.read` / `skills.write` |
+| `thclaws.plugins` | `list()` · `install(url, opts)` · `setEnabled(name, on)` · `remove(name)` | `plugins.read` / `plugins.write` |
+| `thclaws.connectors` | `list()` · `add({name, url, headers})` · `remove(name)` — MCP servers, HTTP only | `connectors.read` / `connectors.write` |
+| `thclaws.llm` | `complete({prompt, system, maxTokens})` — one model call, no agent loop, no tools | `llm.complete` |
+| `thclaws.keys` | `set(provider, key)` — **write-only**, there is no getter | `keys.write` |
+| `thclaws.profile` | `get()` | — |
+| `thclaws.permissions` | `list()` · `has(action)` — ask what you were granted | — |
+
+Two of these deserve a second look before you declare them.
+`keys.write` lets a shell write a provider API key into the user's
+config; it is write-only by design, so a shell can help someone set a
+key up but can never read one back. And `connectors.write` lets a shell
+register an MCP server, which is a way to add tools to the user's
+agent — declare it only if that is genuinely what your shell is for.
+
+`thclaws.llm.complete` is the escape hatch for the case where you want
+the model but not the agent: no tools, no approvals, no session
+history — just a completion. Use `thclaws.run()` when you want the real
+agent loop.
 
 The bridge is **the only API**. Shells cannot reach the workspace
 filesystem, the network (unless `network.outbound:<host>` is
@@ -460,7 +510,17 @@ Declare what your shell does in `manifest.json::permissions`:
 | `network.outbound:<host>` | `fetch()` to that host (CSP injected at serve time) |
 | `approval.inline` | the shell renders its own approve/deny widget (`thclaws.approvals.*`) instead of the system modal |
 | `model.read` / `model.write` | `thclaws.model.*` — see / switch the model |
-| `kms.read` / `research.read` | `thclaws.kms.*` / `thclaws.research.*` — read the knowledge base / research jobs directly |
+| `mode.write` | `thclaws.mode.*` — read or change the permission mode |
+| `memory.read` / `memory.write` | `thclaws.memory.*` — the core memory text |
+| `kms.read` / `kms.write` | `thclaws.kms.*` — browse, create, ingest |
+| `research.read` | `thclaws.research.*` — research jobs |
+| `schedule.read` / `schedule.write` | `thclaws.schedule.*` and `thclaws.heartbeat.*` |
+| `skills.read` / `skills.write` | `thclaws.skills.*` — list, install, edit, delete skills |
+| `plugins.read` / `plugins.write` | `thclaws.plugins.*` |
+| `connectors.read` / `connectors.write` | `thclaws.connectors.*` — register MCP servers |
+| `llm.complete` | `thclaws.llm.complete()` — a bare model call |
+| `keys.write` | `thclaws.keys.set()` — write a provider API key (no read) |
+| `session.read` / `session.list` / `session.write` | `thclaws.sessions.*` |
 
 Declaring any `tools.invoke:<name>` **restricts** the shell to just those
 tools (`tools.invoke:*` = all); declaring none leaves it unrestricted.
@@ -468,28 +528,32 @@ tools (`tools.invoke:*` = all); declaring none leaves it unrestricted.
 Users see this list before installing. Anything not declared throws
 at call time.
 
-### Doctor
+### Linting
 
 ```sh
-thclaws shell doctor my-shell
+thclaws shell check ./my-shell
 # checks: manifest valid, entry exists, permissions sensible,
 # no Tauri-only APIs that would break in Mode B, no external links
 # that would leak the serve token via Referer.
 ```
+
+Exits 1 if anything is an error, so it drops straight into CI or a
+pre-commit hook. (Older notes call this `shell doctor`; the command is
+`check`.)
 
 ---
 
 ## Sessions and persistence
 
 A shell session is a normal thClaws session. Same JSONL format,
-same location (`./.thclaws/sessions/<id>.jsonl`), same `--resume`
+same location (`./.thclaws/state/sessions/<id>.jsonl`), same `--resume`
 machinery. The only addition is an optional `shell: { id, version }`
 field on the session header — non-shell sessions write byte-
 identical JSONL to before, so `cat` still works on everything.
 
 ```sh
 # Look at a shell session like any other
-cat ./.thclaws/sessions/sess-abc123.jsonl | head -3
+cat ./.thclaws/state/sessions/sess-abc123.jsonl | head -3
 # {"type":"header","id":"sess-abc123","shell":{"id":"image-generator","version":"0.1.0"},…}
 # {"type":"user","content":"generate a picture of a sunset"}
 # {"type":"assistant","content":[…]}
@@ -517,28 +581,22 @@ rejected promise from `thclaws.run()`.
 
 ---
 
-## What's missing in Tier 1
+## Known gaps
 
-Tier 1 ships Mode A with one built-in shell (Session Explorer) and
-the `run` / `cancel` / `on("text"|"done"|"error")` bridge surface.
-Documented gaps land in Tier 2 / 3 per
-[dev-plan/33](../dev-plan/33-gui-shell.md):
+Everything the earlier tier plan listed as missing has shipped — the
+picker, custom shells, the wide bridge surface, serve mode, enforced
+permissions, and the authoring CLI are all documented above. What is
+still worth knowing:
 
-- **No picker UI.** New-tab menu has one entry ("Open Session
-  Explorer"); Tier 2 adds the grid.
-- **No custom shells.** Only the embedded built-in is discoverable;
-  Tier 2 adds `~/.config/thclaws/gui-shell/` + `./.thclaws/
-  gui-shell/` discovery.
-- **No `tools.invoke` / `storage` bridge methods.** Tier 1 ships
-  `run` / `cancel` / `on` only. Tier 2 widens the surface.
-- **No serve mode.** Mode B (`--serve --gui-shell`) lands in
-  Tier 2.
-- **No permission enforcement.** Manifests can declare permissions
-  in Tier 1, but they aren't checked at call time. Tier 3 enforces.
-- **No SDK / dev mode.** `thclaws shell dev` + starter template
-  land in Tier 3.
-
----
+- **`shell.json` vs `manifest.json`.** The authoring CLI and the
+  runtime registry read different filenames (see above). Until they
+  converge, a shell you intend to both develop and install locally
+  needs both.
+- **Mode B is the whole shell, not one tab.** `--serve --gui-shell`
+  exposes that shell and nothing else; there is no way to serve the
+  picker itself.
+- **No live worker/agent grid.** Shell UIs render agent output as it
+  streams, but there is no built-in dashboard of concurrent runs.
 
 ## Security model — what each mode actually protects
 
@@ -587,7 +645,7 @@ What is **not** protected:
 | List installed shells (Tier 3) | `thclaws shell list` |
 | Develop a new shell (Tier 3) | clone template, `make dev` |
 | Remove a shell (Tier 3) | `thclaws shell remove <id>` |
-| Look at a shell session | `cat ./.thclaws/sessions/<id>.jsonl` |
+| Look at a shell session | `cat ./.thclaws/state/sessions/<id>.jsonl` |
 
 ---
 

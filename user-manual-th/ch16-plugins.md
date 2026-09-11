@@ -127,6 +127,27 @@ command และ agent definition อยู่ในไดเรกทอรี
 
 - default (ไม่ระบุ flag) → ติดตั้งระดับ project (`.thclaws/plugins/`)
 - `--user` → ติดตั้งระดับ user global (`~/.config/thclaws/plugins/`)
+- `--project` → ค่า default แบบเขียนออกมาให้ชัด มีประโยชน์ในสคริปต์
+  ที่ไม่อยากให้ผลลัพธ์ขึ้นกับความเคยชินของคนรัน
+
+### ติดตั้งทับตัวที่มีอยู่แล้ว
+
+ถ้า plugin ตัวนั้นลงทะเบียนไว้แล้ว การติดตั้งซ้ำจะถูกปฏิเสธ เพื่อไม่ให้การ
+upgrade เขียนทับของที่ใช้งานได้อยู่ไปแบบครึ่ง ๆ กลาง ๆ
+
+```
+❯ /plugin install https://github.com/agentic-press/deploy-plugin.git
+plugin 'agentic-press-deploy' already installed at .thclaws/plugins/agentic-press-deploy
+— run /plugin remove first, or reinstall with --force
+```
+
+`--force` (หรือ `-f`) จะแทนที่ไดเรกทอรีเดิมทันที ใช้ตอนอยากดึงเวอร์ชันใหม่
+ของ plugin ตัวเดิม ถ้าอยากเริ่มจากศูนย์จริง ๆ ให้ `/plugin remove` ก่อน
+
+อีกกรณีหนึ่งที่ต่างออกไป คือไดเรกทอรียังอยู่แต่ไม่มีรายการในทะเบียน —
+เกิดจาก `plugins.json` เขียนไม่สำเร็จ หรือ workspace sync ลบทิ้งไป
+กรณีนี้ระบบจะรับช่วงต่อให้อัตโนมัติโดยไม่ต้อง `--force` เพราะ
+`/plugin remove` ทำงานจากทะเบียน จึงไม่มีทางลบของแบบนั้นได้อยู่แล้ว
 
 ## List / show / enable / disable / remove
 
@@ -158,6 +179,29 @@ plugin 'big-noisy-plugin' removed (restart to drop active tools)
 ```
 
 Disable ไม่เหมือน remove เพราะไฟล์ยังคงอยู่บนดิสก์ แค่ `enabled` flag ถูกสลับเท่านั้น
+
+`/plugin remove` ใช้ชื่อ `/plugin rm` หรือ `/plugin uninstall` ก็ได้
+ส่วน `/plugins` ใช้ `/plugin list` หรือ `/plugin ls` ก็ได้เช่นกัน
+
+### `/plugin gc` — ล้างรายการที่พังออกจากทะเบียน
+
+ทะเบียนอาจเหลือรายการที่ชี้ไปยัง plugin ที่ใช้ไม่ได้แล้ว — คุณลบโฟลเดอร์เอง
+`git clean` กวาดไป หรือไฟล์ `plugin.json` ข้างในอ่านไม่ออกแล้ว รายการพวกนี้
+จะค้างอยู่และโผล่ใน `/plugins` เหมือนยังติดตั้งอยู่
+
+```
+❯ /plugin gc
+removed zombie entries:
+  - big-noisy-plugin (project)
+  - old-deploy (user)
+```
+
+ถ้าไม่มีอะไรต้องล้าง มันจะบอกว่า `no zombie entries — registry is clean`
+แล้วไม่แตะอะไรเลย
+
+มันจะตัดทุกรายการที่โฟลเดอร์หายไป **หรือ** manifest อ่านไม่ผ่าน ทั้งใน
+ทะเบียนระดับโปรเจกต์และระดับ user และไม่เคยลบ plugin ที่ยังใช้งานได้
+จึงรันได้อย่างปลอดภัยทุกครั้งที่ `/plugins` แสดงของที่ไม่มีอยู่จริง
 
 ## Plugin มีส่วนร่วมอะไรบ้าง
 

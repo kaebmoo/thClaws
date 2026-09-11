@@ -329,7 +329,6 @@ pub enum SlashCommand {
         score_threshold_pct: Option<u32>,
         /// M6.39.6: cap on KMS pages emitted per research run (legacy).
         max_pages: Option<u32>,
-        budget_tokens: Option<u64>,
         /// v2 (dev-plan/58): ceiling on notes incl. the MOC.
         max_notes: Option<u32>,
         /// v2: novelty stop threshold as integer percent.
@@ -893,6 +892,12 @@ pub enum SlashCommand {
     /// `/cloud list` → browse the catalog; `/cloud status` → show
     /// resolved URL + whether a token is stored.
     Cloud(CloudSlash),
+    /// Publish a self-contained HTML file to `<id>.thclaws.app`.
+    /// Works with or without a cloud token — the token only buys a
+    /// longer life for the link.
+    PublishApp {
+        path: String,
+    },
     Unknown(String),
 }
 
@@ -1355,7 +1360,24 @@ fn parse_research_refresh(args: &str) -> SlashCommand {
 /// Parse `/research [flags...] <query>` into a ResearchStart command.
 /// Flags eaten greedily from the head of the arg list; the remainder is
 /// the query. Unknown `--flag` tokens fall through into the query (so
-/// `/research --opinion of the user` still researches that string).
+/// `/research --opinion of the user` still researches that string) —
+/// but a KNOWN flag carrying a bad value is an error, not more query
+/// text. Pre-fix both took the fall-through path, so
+/// `/research --max-notes 30 <q>` silently researched the literal
+/// string "--max-notes 30 <q>" instead of erroring.
+/// A known flag whose value didn't parse or was out of range. Distinct
+/// from an *unknown* flag, which deliberately falls through into the
+/// query text — see `parse_research_start`.
+fn bad_flag_value(flag: &str, got: &str) -> SlashCommand {
+    SlashCommand::Unknown(format!(
+        "/research {flag}: invalid value '{got}'. \
+         Ranges: --max-notes / --max-pages 1-{max}, --novelty 0.0-1.0 \
+         (or 0-100), --min-iter / --max-iter a whole number, \
+         --budget-time a duration like 20m.",
+        max = crate::research::plan::HARD_MAX_NOTES,
+    ))
+}
+
 fn parse_research_start(args: &str) -> SlashCommand {
     let mut tokens = args.split_whitespace().collect::<Vec<&str>>();
     let mut kms_target: Option<String> = None;
@@ -1363,7 +1385,6 @@ fn parse_research_start(args: &str) -> SlashCommand {
     let mut max_iter: Option<u32> = None;
     let mut score_threshold_pct: Option<u32> = None;
     let mut max_pages: Option<u32> = None;
-    let mut budget_tokens: Option<u64> = None;
     let mut budget_time_secs: Option<u64> = None;
     let mut max_notes: Option<u32> = None;
     let mut novelty_pct: Option<u32> = None;
@@ -1398,15 +1419,16 @@ fn parse_research_start(args: &str) -> SlashCommand {
                 tokens.remove(0);
             }
             "--max-notes" if tokens.len() >= 2 => {
-                if let Ok(v) = tokens[1].parse::<u32>() {
-                    if (1..=20).contains(&v) {
+                // Range is the pipeline's own ceiling, not a smaller
+                // number: `ResearchConfig` already clamps to
+                // HARD_MAX_NOTES, and a stricter gate here made the
+                // documented default (30) unreachable from the slash.
+                match tokens[1].parse::<u32>() {
+                    Ok(v) if (1..=crate::research::plan::HARD_MAX_NOTES).contains(&v) => {
                         max_notes = Some(v);
                         tokens.drain(0..2);
-                    } else {
-                        break;
                     }
-                } else {
-                    break;
+                    _ => return bad_flag_value("--max-notes", tokens[1]),
                 }
             }
             "--novelty" if tokens.len() >= 2 => {
@@ -1420,33 +1442,32 @@ fn parse_research_start(args: &str) -> SlashCommand {
                         None
                     }
                 });
-                if let Some(p) = pct {
-                    novelty_pct = Some(p);
-                    tokens.drain(0..2);
-                } else {
-                    break;
+                match pct {
+                    Some(p) => {
+                        novelty_pct = Some(p);
+                        tokens.drain(0..2);
+                    }
+                    None => return bad_flag_value("--novelty", raw),
                 }
             }
             "--kms" if tokens.len() >= 2 => {
                 kms_target = Some(tokens[1].to_string());
                 tokens.drain(0..2);
             }
-            "--min-iter" if tokens.len() >= 2 => {
-                if let Ok(v) = tokens[1].parse::<u32>() {
+            "--min-iter" if tokens.len() >= 2 => match tokens[1].parse::<u32>() {
+                Ok(v) => {
                     min_iter = Some(v);
                     tokens.drain(0..2);
-                } else {
-                    break;
                 }
-            }
-            "--max-iter" if tokens.len() >= 2 => {
-                if let Ok(v) = tokens[1].parse::<u32>() {
+                Err(_) => return bad_flag_value("--min-iter", tokens[1]),
+            },
+            "--max-iter" if tokens.len() >= 2 => match tokens[1].parse::<u32>() {
+                Ok(v) => {
                     max_iter = Some(v);
                     tokens.drain(0..2);
-                } else {
-                    break;
                 }
-            }
+                Err(_) => return bad_flag_value("--max-iter", tokens[1]),
+            },
             "--score-threshold" if tokens.len() >= 2 => {
                 // Accept `0.75` (decimal) or `75` (percent integer).
                 // Stored as Option<u32> percent because the variant
@@ -1463,43 +1484,32 @@ fn parse_research_start(args: &str) -> SlashCommand {
                 } else {
                     None
                 };
-                if let Some(p) = pct {
-                    score_threshold_pct = Some(p);
-                    tokens.drain(0..2);
-                } else {
-                    break;
+                match pct {
+                    Some(p) => {
+                        score_threshold_pct = Some(p);
+                        tokens.drain(0..2);
+                    }
+                    None => return bad_flag_value("--score-threshold", raw),
                 }
             }
             "--max-pages" if tokens.len() >= 2 => {
-                if let Ok(v) = tokens[1].parse::<u32>() {
-                    if v >= 1 && v <= 20 {
+                match tokens[1].parse::<u32>() {
+                    Ok(v) if (1..=crate::research::plan::HARD_MAX_NOTES).contains(&v) => {
                         max_pages = Some(v);
                         // v2 alias: pages → notes
                         max_notes.get_or_insert(v);
                         tokens.drain(0..2);
-                    } else {
-                        break;
                     }
-                } else {
-                    break;
+                    _ => return bad_flag_value("--max-pages", tokens[1]),
                 }
             }
-            "--budget-tokens" if tokens.len() >= 2 => {
-                if let Ok(v) = tokens[1].parse::<u64>() {
-                    budget_tokens = Some(v);
-                    tokens.drain(0..2);
-                } else {
-                    break;
-                }
-            }
-            "--budget-time" if tokens.len() >= 2 => {
-                if let Some(secs) = parse_duration_secs(tokens[1]) {
+            "--budget-time" if tokens.len() >= 2 => match parse_duration_secs(tokens[1]) {
+                Some(secs) => {
                     budget_time_secs = Some(secs);
                     tokens.drain(0..2);
-                } else {
-                    break;
                 }
-            }
+                None => return bad_flag_value("--budget-time", tokens[1]),
+            },
             _ => break,
         }
     }
@@ -1517,7 +1527,6 @@ fn parse_research_start(args: &str) -> SlashCommand {
         max_iter,
         max_pages,
         score_threshold_pct,
-        budget_tokens,
         budget_time_secs,
         max_notes,
         novelty_pct,
@@ -2017,6 +2026,21 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
         "agents" => SlashCommand::AgentsList,
         "deploy" => parse_deploy_subcommand(args),
         "cloud" => parse_cloud_subcommand(args),
+        "publish" => {
+            let path = args.trim();
+            if path.is_empty() {
+                SlashCommand::Unknown(
+                    "usage: /publish <file.html> — puts a self-contained page on \
+                     the web at a private URL that expires in 3 days. Needs a \
+                     thClaws.cloud token and a credit balance above zero."
+                        .into(),
+                )
+            } else {
+                SlashCommand::PublishApp {
+                    path: path.to_string(),
+                }
+            }
+        }
         "dream" => {
             // Parse `--all` flag (order-insensitive). Anything else is
             // the focus topic. `/dream auth --all` and `/dream --all
@@ -4139,6 +4163,7 @@ pub fn built_in_commands() -> &'static [BuiltInCommand] {
 
         // Cloud (dev-plan/34)
         BuiltInCommand { name: "cloud",    description: "thClaws.cloud catalog — list / get / status (dev-plan/34)", category: "Cloud", usage: "list [--mine] | get <slug> | status" },
+        BuiltInCommand { name: "publish",  description: "Put a single HTML file on the web at a private URL", category: "Cloud", usage: "<file.html>" },
 
         // Learn
         BuiltInCommand { name: "quiz",     description: "Generate & play a study quiz from a URL, file, or topic", category: "Learn", usage: "<topic|url|file>" },
@@ -4885,6 +4910,43 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
                 OpenAIProvider::new(key)
                     .with_base_url(url)
                     .with_strip_model_prefix("qc/"),
+            ))
+        }
+        ProviderKind::Sis => {
+            // Alibaba Model Studio workspace endpoint. Identical
+            // OpenAI-compatible wire to DashScope; models carry a `sis/`
+            // prefix in our catalogue, stripped before the request so
+            // the upstream sees the bare id.
+            //
+            // No default base URL, deliberately: the host embeds a
+            // workspace id (`ws-<id>.<region>.maas.aliyuncs.com`), so
+            // it is per-account. Falling back to a shared default would
+            // point one customer's traffic at another's workspace —
+            // refuse instead, the way AzureAIFoundry does for the same
+            // reason.
+            let base = std::env::var("SIS_BASE_URL")
+                .ok()
+                .map(|u| u.trim().to_string())
+                .filter(|u| !u.is_empty())
+                .ok_or_else(|| {
+                    Error::Config(
+                        "SIS_BASE_URL not set — a SIS endpoint is workspace-specific \
+                         (https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1). \
+                         Add it in Settings or export the env var."
+                            .into(),
+                    )
+                })?;
+            // Same shape `compat_endpoint` produces, minus its default:
+            // accept a base or an already-complete endpoint.
+            let url = if base.ends_with("/chat/completions") {
+                base
+            } else {
+                format!("{}/chat/completions", base.trim_end_matches('/'))
+            };
+            Ok(Arc::new(
+                OpenAIProvider::new(api_key)
+                    .with_base_url(url)
+                    .with_strip_model_prefix("sis/"),
             ))
         }
         ProviderKind::ZAi => {
@@ -11123,7 +11185,6 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     max_iter,
                     score_threshold_pct,
                     max_pages,
-                    budget_tokens: _,
                     budget_time_secs,
                     max_notes,
                     novelty_pct,
@@ -11827,6 +11888,19 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         restart,
                     };
                     let _ = crate::deploy_client::run(args).await;
+                }
+                SlashCommand::PublishApp { path } => {
+                    let cloud_cfg = crate::config::ProjectConfig::load()
+                        .and_then(|c| c.cloud.clone());
+                    for line in crate::cloud::cmd::publish_app_lines(
+                        &path,
+                        None,
+                        cloud_cfg.as_ref(),
+                    )
+                    .await
+                    {
+                        println!("{COLOR_DIM}{line}{COLOR_RESET}");
+                    }
                 }
                 SlashCommand::Cloud(sub) => {
                     let cloud_cfg = crate::config::ProjectConfig::load()
@@ -13634,7 +13708,6 @@ mod tests {
                 max_iter: None,
                 score_threshold_pct: None,
                 max_pages: None,
-                budget_tokens: None,
                 budget_time_secs: None,
                 max_notes: None,
                 novelty_pct: None,
@@ -13656,7 +13729,6 @@ mod tests {
                 max_iter: None,
                 score_threshold_pct: None,
                 max_pages: None,
-                budget_tokens: None,
                 budget_time_secs: None,
                 max_notes: None,
                 novelty_pct: None,
@@ -13680,7 +13752,6 @@ mod tests {
                 max_iter: Some(10),
                 score_threshold_pct: Some(85),
                 max_pages: None,
-                budget_tokens: None,
                 budget_time_secs: None,
                 max_notes: None,
                 novelty_pct: None,
@@ -13702,7 +13773,6 @@ mod tests {
                 max_iter: None,
                 score_threshold_pct: Some(75),
                 max_pages: None,
-                budget_tokens: None,
                 budget_time_secs: None,
                 max_notes: None,
                 novelty_pct: None,
@@ -13724,7 +13794,6 @@ mod tests {
                 max_iter: None,
                 score_threshold_pct: None,
                 max_pages: None,
-                budget_tokens: None,
                 budget_time_secs: Some(300),
                 max_notes: None,
                 novelty_pct: None,
@@ -13735,6 +13804,61 @@ mod tests {
                 language: None,
             })
         );
+
+        // An UNKNOWN flag still falls through into the query — that is
+        // deliberate, so `/research --opinion of the user` researches
+        // the phrase rather than erroring.
+        match parse_slash("/research --opinion of the user") {
+            Some(SlashCommand::ResearchStart { query, .. }) => {
+                assert_eq!(query, "--opinion of the user");
+            }
+            other => panic!("unknown flag should fall through, got {other:?}"),
+        }
+
+        // A KNOWN flag with a bad value must NOT take that path. Pre-fix
+        // it did: parsing stopped and the flag text was prepended to the
+        // query, so `--max-notes 30` silently researched the string
+        // "--max-notes 30 thai labour law" instead of setting 30 notes.
+        for bad in [
+            "/research --max-notes 0 thai labour law",
+            "/research --max-notes abc thai labour law",
+            "/research --novelty 500 thai labour law",
+            "/research --novelty abc thai labour law",
+            "/research --max-iter abc thai labour law",
+            "/research --budget-time nope thai labour law",
+        ] {
+            match parse_slash(bad) {
+                Some(SlashCommand::Unknown(msg)) => {
+                    assert!(
+                        msg.contains("invalid value"),
+                        "{bad}: expected a usage error, got {msg}"
+                    );
+                }
+                other => panic!("{bad}: expected Unknown, got {other:?}"),
+            }
+        }
+
+        // --novelty takes EITHER a 0.0-1.0 fraction or a 0-100 percent,
+        // so `5` is a valid 5% and must not be mistaken for out-of-range.
+        for (arg, want) in [("0.35", 35u32), ("5", 5), ("100", 100), ("1", 100)] {
+            match parse_slash(&format!("/research --novelty {arg} q")) {
+                Some(SlashCommand::ResearchStart { novelty_pct, .. }) => {
+                    assert_eq!(novelty_pct, Some(want), "--novelty {arg}");
+                }
+                other => panic!("--novelty {arg} rejected: {other:?}"),
+            }
+        }
+
+        // The documented default (30) and the pipeline ceiling (50) must
+        // both be reachable — the old 1..=20 gate made neither settable.
+        for n in [1u32, 30, crate::research::plan::HARD_MAX_NOTES] {
+            match parse_slash(&format!("/research --max-notes {n} q")) {
+                Some(SlashCommand::ResearchStart { max_notes, .. }) => {
+                    assert_eq!(max_notes, Some(n), "--max-notes {n} should be accepted");
+                }
+                other => panic!("--max-notes {n} rejected: {other:?}"),
+            }
+        }
 
         // status / show / cancel / wait
         assert_eq!(

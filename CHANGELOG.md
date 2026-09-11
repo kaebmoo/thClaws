@@ -7,6 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.125.0] — 2026-09-11
+
+Two fixes you can feel: a gateway workspace that had started failing with "No keys" now works again and repoints itself, and a failed MCP server finally tells you *why* it failed.
+
+### Fixed
+- **"No keys" on a gateway workspace that worked yesterday.** The default model was `deepseek-v4-flash`, which DeepSeek has since retired. Gateway routing only serves models with a price in the catalogue, so a retired id silently fell back to your own API keys — and if you had none, the session died with "No keys". The default is now `deepseek-flash`.
+- **Existing workspaces repoint themselves.** Changing the default only helps new workspaces: a model saved in `.thclaws/settings.json` counts as an explicit choice, so the default never runs again and the retired id would have stayed forever. Opening a workspace pinned to a retired model now moves it to the successor and says so. Your settings file is not rewritten.
+- **A dead MCP server now reports the cause.** A stdio server that failed before the handshake only ever said "mcp transport closed" — the real reason was thrown away with the child's stderr. The start-up error now carries a stderr tail, and names the fix for the failures we can recognise: a corrupt npx cache (with the path to delete), missing Playwright browsers, an unknown package version, an unwritable cache, an unreachable registry.
+
+### Changed
+- **Model catalogue refreshed.** Current provider listings and prices, including a round of OpenRouter repricing.
+
+## [0.124.0] — 2026-09-10
+
+`/publish` is announced properly — the command shipped last release but
+the hosting behind it only went live afterwards. Alongside it: a new
+provider, and a fix for hosted schedules, which could not run at all.
+
+### Added
+- **`/publish <file.html>` puts a self-contained page on the web.** The engine hands the file to thClaws.cloud and hands you back a link like `https://naknxbpwktpz.thclaws.app`. It is for the thing an agent has just built for you — a chart, a form, a one-page report — when "open the file on your machine" isn't enough and you want to send someone a link.
+
+  The command shipped in v0.123.0; the hosting side went live the same day, so it already works if you are on that version. This is the release that says so.
+
+  - **A token and a credit balance above zero are required.** Publishing itself is not billed — the balance is what tells us the account is a real one. Anonymous publishing is written and tested but switched off until abuse reports have somewhere to land.
+  - **Three days, 2 MB, 50 live pages per account.** An expired link stops serving on the request that notices, not when a cleanup job gets round to it.
+  - **Every page gets its own subdomain, not a path.** The dashboard keeps its session in `localStorage`, so pages you publish must not share that origin — and this isolates them from each other too. The id is 12 characters from a 32-symbol alphabet with no `l`, `o`, `0` or `1` to misread: roughly 60 bits, and the URL is the only thing gating access, so treat the link as the secret.
+  - **Your HTML is served as written.** No sanitising, deliberately — the point is that the page the agent built actually works. Containment is the isolated origin and the short life, not a guess about which markup is dangerous.
+  - Published pages are listed on the dashboard with the time left on each, and can be taken down early from there.
+
+- **Publish from the Files tab.** Right-click an `.html` file → "Publish to the web…". It runs the same `/publish`, so the link lands in the conversation where you can copy it and scroll back to it.
+
+- **SIS joins as a provider.** Alibaba Model Studio workspace endpoints, with 110 models in the catalogue under a `sis/` prefix. BYOK, like the other regional Alibaba endpoints. It has no default address — a SIS host carries your workspace id — so `SIS_BASE_URL` is required and the engine says exactly what it wants if you leave it out.
+
+### Fixed
+- **Hosted schedules could not run, and were being deleted.** On thClaws.cloud, `~/.config/thclaws/schedules.json` sat on the container filesystem rather than your workspace volume, so everything you had scheduled was destroyed when the workspace paused — silently, 30 minutes after you closed the tab. And a paused workspace has nothing running to fire a job anyway. Schedules now live on your volume, and the control plane wakes a paused workspace when one comes due. A schedule you disable does not wake it.
+- **`/publish` with no argument described the wrong rules.** The usage line still offered a one-hour anonymous link, which stopped being true when publishing was gated on a token and a balance.
+
+## [0.123.0] — 2026-09-10
+
+thClaws' user manual is finished: thirty-four chapters, audited against the code chapter by chapter and rebuilt into the online manual. The technical manual gains the internals it was missing, and the pricing layer learns DeepSeek's real cache economics.
+
+### Added
+- **The user manual is complete.** Chapters 1–34 now cover every slash command, every tool, all three providers, the permission modes, the plan driver, one-shot schedules, the shell bridge, and `/cloud` push and pull. The four new chapters — loops and goals, Thai PII masking, thClaws Remote, and managed builds and org policy — land this release, and EN/TH parity holds throughout.
+- **The technical manual documents the internals.** PII masking, media generation, OS-level Bash confinement, and Dynamic Workflows each get their own chapter, closing the coverage gap and fixing the cross-repo links.
+- **DeepSeek cache discounts are modelled from the invoice.** Billing now reflects the cache discount rather than charging every token at the full rate.
+
+### Changed
+- **The manuals are reconciled with the code.** A chapter-by-chapter audit corrected stale paths, wrong command signatures, and out-of-date behaviour claims across both manuals — `/model` no longer forks, parallelism is a fixed 8 rather than `min(16, cores-2)`, and `messenger.json` is project-scoped. The retired Paperclip and Movie Maker chapters are dropped, every pre-workspace-v2 path in the technical manual is corrected, and the technical-manual index is rebuilt as 53 grouped topics.
+
+### Fixed
+- **DeepSeek rates were three weeks stale**, and a negative rate is now treated as a sentinel rather than a price. Cached reads are priced too, so a cached token is no longer billed at the full input rate — on real traffic that is about 2.5x less for the same work.
+- **`deepseek-flash` had a quarter of its real context window.** It is DeepSeek-V4.1-Flash and takes 1M tokens, but LiteLLM has no entry for the new id yet, so it inherited the provider's 262k default and truncated long sessions. Vendor-documented windows now override the aggregator and are re-checked on every catalogue refresh, not only when a model is first added.
+- **A subagent could write outside its `writePaths`** using `..` — `output/../escape.txt` matched the glob `output/**` as a string while the file landed at the workspace root. The destination is now resolved, through `..` and symlinks, before the globs see it. The workspace sandbox was never bypassed. Reported by [@kaebmoo](https://github.com/kaebmoo) (#204).
+- **The SDK/MCP goal tools now bridge to the Claude Code subprocess.**
+- **Video job logs land in the state tier.**
+- **Code findings from the manual audit are closed.** The manual walk-through surfaced real bugs in the engine, fixed here.
+
+## [0.122.0] — 2026-09-09
+
+thClaws' HTTP surface learns to speak Anthropic, and the enterprise documentation is rewritten for readers who are new to enterprise software, to AI agents, or to both.
+
+### Added
+- **`--serve` speaks the Anthropic Messages API.** `POST /v1/messages` runs the same agent as `/v1/chat/completions`, in Anthropic's wire shape — so the `anthropic` Python/TS SDKs, anything driven by `ANTHROPIC_BASE_URL`, and LiteLLM's `anthropic/` provider can drive thClaws with no translation layer. Sync and streaming, the latter in Anthropic's documented six-event sequence (`message_start` → `content_block_start` → `content_block_delta`* → `content_block_stop` → `message_delta` → `message_stop`, no `[DONE]` sentinel). The token may arrive as `x-api-key` — what the SDKs send — or as `Authorization: Bearer`; both are compared in constant time. Top-level `system` is appended to thClaws' own system prompt rather than replacing it, and `stop_reason` is normalised onto Anthropic's four values so a non-Anthropic model underneath can't hand an SDK an enum value it will refuse to deserialise. Tool activity is opt-in via `x_thclaws_tool_events` (the SDKs dispatch on the SSE event name, so an unknown event type is not something a strict client can ignore the way it ignores an unknown JSON key). Both endpoints build the agent through one shared constructor, so their tool surface cannot drift. Reference: `thclaws-technical-manual/anthropic-api.md`.
+- **A from-zero primer for the enterprise documentation.** `docs/enterprise{,-th}/concepts.md` explains what "enterprise software" means as a category and why organisations need it, what an AI agent is mechanically and why that is harder to govern than ordinary software, and signing / gateways / SSO / audit from first principles — then traces one request end to end and lists the things that bite. Every existing chapter gained the prose it had been assuming: the admin guide now opens with what the job actually is, and carries a staged rollout plan, a verification checklist and a common-mistakes table.
+- **`ENTERPRISE-th.md`** — the administrator guide in Thai, section for section with the English original, carried to the mirror by the release sync.
+
+### Changed
+- **`ENTERPRISE.md` states its known limitations up front** — stdio MCP not gated, `WebFetch`/`WebSearch` not gateway-routed, `fail_closed` enforced by construction, audit fail-open, no key revocation without a rebuild, Google-only live IdP coverage, and forced auto-approve on shared-server deployments. Plus guidance on which policy blocks to turn on and in what order.
+- **The public README is now workspace-sourced** (`thclaws/README.md`) and rides `make sync-public`. It had gone sixty minor versions stale living only on the mirror. Community PRs against it now need the same cherry-pick as any other code PR; `make sync-public-check` prints the mirror's recent README authors when the two copies differ.
+
+### Fixed
+- **CI survives the artifact service's 403.** GitHub answered `ListArtifacts` with a non-retryable 403 during the v0.121.0 cut, failing `cargo clippy` on both repos in the same minute. Each job that consumes `frontend-dist` now falls back to rebuilding the bundle in place instead of failing on someone else's outage, and `workflow_dispatch` lets a release candidate be verified before it lands on main.
+
 ## [0.120.0] — 2026-09-06
 
 Enterprise policies gain a client-side audit trail, and teammates are reaped cleanly on Windows.

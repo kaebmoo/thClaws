@@ -1,6 +1,6 @@
 # Anthropic Agent SDK (Subprocess) provider
 
-`AgentSdkProvider` (`providers/agent_sdk.rs`, 392 LOC) is the only non-HTTP provider in the catalogue. It wraps the `claude` CLI binary as a subprocess and speaks the [Claude Agent SDK control protocol](https://github.com/anthropics/claude-agent-sdk-python) over stdin/stdout JSON-RPC.
+`AgentSdkProvider` (`providers/agent_sdk.rs`) is the only non-HTTP provider in the catalogue. It wraps the `claude` CLI binary as a subprocess and speaks the [Claude Agent SDK control protocol](https://github.com/anthropics/claude-agent-sdk-python) over stdin/stdout JSON-RPC.
 
 One `ProviderKind` variant uses this impl: `AgentSdk`. Routing prefix: `agent/` (e.g. `agent/claude-sonnet-4-6`). **No `ANTHROPIC_API_KEY` required** — billing goes through the user's Claude subscription via the `claude` CLI's own auth.
 
@@ -282,7 +282,7 @@ The host's response shape:
 `sdk_mcp::bridged_tool_names` excludes tools that depend on parent-process state Claude Code can't model:
 
 - **Task** — recursive subagent spawner; would dispatch on the host but the model thinks it's local.
-- **Team\*** — multi-process teammate orchestration via `.thclaws/team/`; doesn't fit a single-shot turn.
+- **Team\*** — multi-process teammate orchestration via `.thclaws/state/team/`; doesn't fit a single-shot turn.
 - **Skill** — rewrites the next turn at the host level; Claude Code's loop doesn't honor the rewrite.
 - **EnterPlanMode / ExitPlanMode / SubmitPlan / UpdatePlanStep** — plan-mode state machine the host owns.
 - **AskUserQuestion** — needs the GUI question modal; no surface inside the SDK subprocess.

@@ -5,11 +5,14 @@
 //!
 //! - `GET  /v1/models`            list available model ids
 //! - `POST /v1/chat/completions`  single-turn or streaming chat (S3+S4)
+//! - `POST /v1/messages`          the same, in Anthropic Messages shape
 //!
 //! Anything any tool that speaks the OpenAI Chat Completions API can
 //! drive thClaws this way — LiteLLM, openai-python SDK, Cursor's custom
 //! provider, aider, n8n, etc. See `dev-plan/19-thclaws-openai-compat.md`
-//! for the rationale + full scope.
+//! for the rationale + full scope. `/v1/messages` is the same agent
+//! behind the Anthropic Messages wire shape, for the `anthropic` SDKs
+//! and anything pointed at a custom `ANTHROPIC_BASE_URL`.
 
 use axum::extract::{DefaultBodyLimit, FromRequestParts};
 use axum::http::{request::Parts, StatusCode};
@@ -24,6 +27,7 @@ pub mod chat;
 pub mod deploy;
 pub mod errors;
 pub mod info;
+pub mod messages;
 pub mod models;
 pub mod oauth_callback;
 
@@ -33,6 +37,7 @@ pub mod oauth_callback;
 /// Routes:
 /// - `GET  /v1/models`            — OpenAI-compatible model listing.
 /// - `POST /v1/chat/completions`  — OpenAI-compatible chat (sync + SSE + x_callback).
+/// - `POST /v1/messages`          — Anthropic Messages-compatible chat (sync + SSE).
 /// - `POST /agent/run`            — thClaws-native agent endpoint with
 ///   per-request `workspace_dir` for skill / MCP / plugin scoping
 ///   (see `dev-plan/25-thclaws-as-agent.md`).
@@ -54,6 +59,7 @@ pub fn router() -> Router {
     Router::new()
         .route("/v1/models", get(models::list_models))
         .route("/v1/chat/completions", post(chat::chat_completions))
+        .route("/v1/messages", post(messages::messages))
         .route("/agent/run", post(agent::agent_run))
         // Session artifacts (job-artifacts): frozen, hash-fixed outputs of a
         // run + input placement for external orchestrators. Bearer-gated
@@ -264,6 +270,19 @@ pub async fn spawn_loopback() -> std::io::Result<String> {
         "\x1b[36m[api_v1 loopback] /v1/* available at {url} for out-of-process MCP servers\x1b[0m"
     );
     Ok(url)
+}
+
+/// The token policy, flattened for surfaces that do their own header
+/// parsing: `None` = API disabled, `Some(None)` = bypass,
+/// `Some(Some(t))` = require `t`. Keeps [`AuthMode`] private while
+/// letting `/v1/messages` accept `x-api-key` without duplicating the
+/// env-var rules.
+fn auth_token_for_messages() -> Option<Option<String>> {
+    match auth_token() {
+        AuthMode::Disabled => None,
+        AuthMode::Bypass => Some(None),
+        AuthMode::Token(t) => Some(Some(t)),
+    }
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {

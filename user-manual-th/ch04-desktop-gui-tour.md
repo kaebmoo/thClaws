@@ -42,7 +42,7 @@ Sidebar แสดงอยู่ตลอดเวลา และประก�
 | Sidebar | Trigger | จุดประสงค์ |
 |---|---|---|
 | **Goal** | `/goal start` ทำงาน | แสดง goal + iteration budget + token usage — ดู[บทที่ 19](ch19-scheduling.md) |
-| **Todo** | มีการเรียก `TodoWrite` | Checklist live จาก `.thclaws/todos.md` — ดู[บทที่ 18](ch18-plan-mode.md) |
+| **Todo** | มีการเรียก `TodoWrite` | Checklist live จาก `.thclaws/state/todos.md` — ดู[บทที่ 18](ch18-plan-mode.md) |
 | **Plan** | Plan mode ทำงาน | Plan แบบ step-by-step + ปุ่ม approve / cancel / skip |
 | **Research** | `/research` กำลังรันหรือเพิ่งจบ | Progress ของ iteration, score history, phase log — ดู[บทที่ 20](ch20-research.md) |
 | **Background agents** | `/dream` / `/agent` / `/translator` ทำงาน | Elapsed time + last tool call ของ side-channel agent ทุกตัว, auto-prune entry ที่จบหลัง 5 นาที — รายละเอียดด้านล่าง |
@@ -58,7 +58,11 @@ Sidebar แสดงอยู่ตลอดเวลา และประก�
 
 ### แถบแท็บ
 
-มีแท็บหลักทั้งหมดสี่แท็บ พร้อมไอคอนเฟืองสำหรับ settings อยู่ทางขวา
+มีแท็บได้สูงสุดเจ็ดแท็บ พร้อมไอคอนเฟืองสำหรับ settings อยู่ทางขวา สี่แท็บแรก
+มีเสมอ ส่วนอีกสามแท็บจะโผล่ก็ต่อเมื่อเปิดฟีเจอร์ที่อยู่เบื้องหลังมันแล้ว
+การติดตั้งใหม่จึงเห็นแค่ **Chat · Terminal · Files**
+
+Chat อยู่ซ้ายสุดและเป็นแท็บที่เปิดขึ้นมาเมื่อเปิดหน้าต่างใหม่
 
 #### 1. แท็บ Chat
 
@@ -131,6 +135,31 @@ Sidebar แสดงอยู่ตลอดเวลา และประก�
 ![หน้าต่างหลักของ thClaws — แท็บ Team กำลังใช้งาน](../user-manual-img/ch-04/thClaws-gui-teams.png)
 
 แท็บ Team **ถูกซ่อนไว้โดยค่าเริ่มต้น** จะโผล่ขึ้นมาต่อเมื่อเปิด Agent Teams ผ่านเมนู Settings → Workspace → Agent Teams หรือแก้ `"teamEnabled": true` ใน `.thclaws/settings.json` ด้วยตัวเอง (ปิดเป็นค่า default เพราะทีมสปอว์น process ของ agent หลายตัวขนานกัน กินโทเคนเร็ว) เมื่อเปิดใช้งานแล้ว แท็บนี้จะเป็นที่แสดง pane ของเพื่อนร่วมทีมแต่ละตัว คลิก pane เพื่อ focus และส่ง input ส่วนตัวไปยังสมาชิกคนนั้นได้ รายละเอียดการสร้างทีม การสื่อสารระหว่างสมาชิก รวมถึง tool `TeamCreate` / `SpawnTeammate` / `SendMessage` / `TeamMerge` ดูได้ใน[บทที่ 17](ch17-agent-teams.md)
+
+
+#### 5. แท็บ UI
+
+**โผล่เมื่อมี GUI Shell ติดตั้งอยู่เท่านั้น** GUI Shell คือหน้าเว็บ HTML ที่
+agent พกมากับตัวเอง (Media Studio ก็เป็นตัวหนึ่ง) แท็บนี้ทำหน้าที่เป็นตัวเลือก
+— เลือก shell แล้วมันจะโหลดใน iframe คุยกับ engine ผ่าน bridge
+`window.thclaws.*` ไม่ใช่ผ่านบทสนทนาของคุณ ดู[บทที่ 26](ch26-gui-shells.md)
+
+(เดิมชื่อแท็บ "Shell" จนกระทั่งแท็บ Shell แบบ PTY ด้านล่างมาเอาชื่อไป)
+
+#### 6. แท็บ Shell
+
+**โผล่เมื่อตั้ง `shellTabEnabled: true` เท่านั้น** ค่าเริ่มต้นคือปิด เป็น
+เทอร์มินัลจริงๆ — มันเปิด `$SHELL` ของคุณแล้วต่อ stdio ผ่าน xterm.js
+
+อันนี้**ไม่ใช่**แท็บ Terminal แท็บ Terminal คือ REPL ของ agent สิ่งที่คุณพิมพ์
+คือ prompt หรือ slash command ส่วนแท็บ Shell คือ shell เปล่าๆ ที่ไม่มี agent อยู่
+เหมือนเปิดโปรแกรมเทอร์มินัลของคุณเองแต่มาอยู่ในแท็บ
+
+#### 7. แท็บ Browser
+
+**โผล่เมื่อตั้ง `browserEnabled` เท่านั้น** แสดงสถานะและกิจกรรมสดของ Chromium
+ที่ engine ดูแลไว้สำหรับงาน browser automation — อยู่หน้าไหน agent เพิ่งทำอะไร
+ดูภาพสด และ takeover เพื่อเข้าไปคุมเองกลางทางได้ ดู[บทที่ 28](ch28-browser-automation.md)
 
 ### เมนู Settings (ไอคอนเฟือง)
 
@@ -213,9 +242,9 @@ Sidebar จะ poll Rust backend ทุก 5 วินาทีเพื่อ�
 | ตัวเลือก backend สำหรับ secret | `~/.config/thclaws/secrets.json` |
 | API key (โหมด keychain) | OS keychain, service `thclaws`, account `api-keys` (JSON blob) |
 | API key (โหมด .env) | `~/.config/thclaws/.env` |
-| Session | `.thclaws/sessions/` (ผูกกับโปรเจกต์) — ดู[บทที่ 7](ch07-sessions.md) |
+| Session | `.thclaws/state/sessions/` (ผูกกับโปรเจกต์) — ดู[บทที่ 7](ch07-sessions.md) |
 | KMS (user) | `~/.config/thclaws/kms/` — ดู[บทที่ 9](ch09-knowledge-bases-kms.md) |
-| KMS (project) | `.thclaws/kms/` ใน working directory |
+| KMS (project) | `.thclaws/state/kms/` ใน working directory |
 | MCP server (user) | `~/.config/thclaws/mcp.json` |
 | MCP server (project) | `.mcp.json` หรือ `.thclaws/mcp.json` |
 | Skill (user) | `~/.config/thclaws/skills/` (กับ fallback `~/.claude/skills/`) — ดู[บทที่ 12](ch12-skills.md) |

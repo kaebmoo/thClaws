@@ -9,9 +9,9 @@ Knowledge Base หรือสร้างทีม AI Agent ทำงานร�
 binary เดียว แค่บอกเป็นภาษาธรรมชาติว่าต้องการอะไร แล้ว agent จะอ่านไฟล์
 รันคำสั่ง ใช้ tool และพูดคุยโต้ตอบกับคุณระหว่างทำงาน
 
-แปด surface รวมอยู่ใน binary เดียว ใช้ `Agent` loop, `Session` และ tool
-registry ชุดเดียวกัน — เจ็ด surface แรกสำหรับ "คน" คนหนึ่ง (รวมถึงคุย
-ผ่าน LINE, Telegram หรือ Facebook Messenger บนมือถือ), surface ที่แปด
+เก้า surface รวมอยู่ใน binary เดียว ใช้ `Agent` loop, `Session` และ tool
+registry ชุดเดียวกัน — แปด surface แรกสำหรับ "คน" คนหนึ่ง (รวมถึงคุย
+ผ่าน LINE, Telegram หรือ Facebook Messenger บนมือถือ), surface ที่เก้า
 ให้ "ซอฟต์แวร์อื่น" เรียกใช้ thClaws ไปทำงาน นอกเหนือจาก binary แล้ว
 **[thClaws.cloud](#thclawscloud)** ยังเพิ่ม catalog ให้เลือกใช้และ
 hosted runtime ให้เช่า — ดู bullet ด้านล่างและ [บทที่ 27](ch27-thclaws-cloud.md):
@@ -28,7 +28,8 @@ hosted runtime ให้เช่า — ดู bullet ด้านล่าง�
 - **Webapp** (`thclaws --serve --port 7878` + เปิด browser) — engine
   ตัวเดียวกันผ่าน WebSocket/HTTP เปิดจาก laptop คุณเอง เข้าถึงระยะไกล
   ผ่าน SSH tunnel ได้ — "thClaws ทุกที่" โดยไม่ต้องเปิด port
-- **LINE Chat** (`thclaws --line` หรือ GUI Line Connect modal) —
+- **LINE Chat** (GUI → Line Connect modal เท่านั้น ไม่มี flag `--line`
+  ต่างจาก Telegram และ Messenger) —
   คุยกับ agent ผ่าน LINE OA ของคุณเอง ทำงานผ่าน relay tunnel ที่
   `line.thclaws.ai` ซึ่งเชื่อมระหว่าง LINE platform กับ thClaws ที่รัน
   บนเครื่องคุณ — agent อยู่ในเครื่องคุณ แต่เรียกใช้ได้จากที่ไหนก็ได้
@@ -41,6 +42,11 @@ hosted runtime ให้เช่า — ดู bullet ด้านล่าง�
   Connect modal) — เชื่อม Facebook Page ครั้งเดียว แล้วทุก DM Messenger
   ถึง Page จะรันเป็น turn บนเครื่องคุณ การอนุมัติแสดงเป็น quick-reply
   chip ที่กดจากมือถือได้ (ดู [บทที่ 24](ch24-messenger.md))
+- **thClaws Remote** (จับคู่กับบัญชี thClaws.cloud ผ่าน GUI) — เครื่องของ
+  คุณเป็นฝ่าย *โทรออก* แล้วค้าง tunnel ไว้ คุณจึงคุยกับ agent บนเครื่อง
+  ตัวเองผ่าน dashboard บน cloud ได้ โดยไม่ต้องมี public IP และไม่ต้องเปิด
+  port เข้า ต่างจาก chat bridge ตรงที่ผูกกับ *บัญชี cloud* ของคุณ ไม่ใช่
+  แพลตฟอร์มแชท
 - **AI Agent (API Server)** (`thclaws --serve` + HTTP API) — ให้
   *ซอฟต์แวร์อื่น* (orchestrator, external client, scheduler) เรียกใช้
   thClaws เป็น agent ผ่าน HTTP API เดียวกัน — รายละเอียดอยู่ในบทถัด ๆ ไป
@@ -93,8 +99,9 @@ hosted runtime ให้เช่า — ดู bullet ด้านล่าง�
 - **จำสิ่งที่สำคัญในระยะยาว 3 ระดับ** —
   **`AGENTS.md` (หรือ `CLAUDE.md`)** ในโปรเจกต์ โดนฉีดเข้า prompt อัตโนมัติ
   ([บทที่ 8](ch08-memory-and-agents-md.md));
-  **memory store** ที่ `~/.local/share/thclaws/memory/` เก็บข้อเท็จจริงที่ agent
-  เรียนรู้เกี่ยวกับตัวคุณและโปรเจกต์;
+  **memory store** เก็บข้อเท็จจริงที่ agent เรียนรู้เกี่ยวกับตัวคุณและ
+  โปรเจกต์ — อยู่ที่ `.thclaws/memory/` เมื่อทำงานในโปรเจกต์ (จึงติดไปกับ
+  repo) ถ้าไม่มีโปรเจกต์จะถอยไปใช้ `~/.local/share/thclaws/memory/`;
   **KMS (knowledge bases)** wiki หลายหน้าที่ agent ค้น/อ่าน/เขียนเอง
   ค้นได้ทั้งแบบ grep และ **BM25 จัดอันดับความเกี่ยวข้อง** (`query:`)
   โดยไม่ใช้ embedding — ตามแนว LLM-wiki ของ Karpathy ดูแลอัตโนมัติด้วย
@@ -117,16 +124,19 @@ hosted runtime ให้เช่า — ดู bullet ด้านล่าง�
   Agent SDK), OpenAI (Chat + Responses/Codex), Google Gemini & Gemma,
   Alibaba DashScope (Qwen), DeepSeek, Z.ai (GLM Coding Plan), NVIDIA
   NIM, NSTDA Thai LLM (OpenThaiGPT, Typhoon, Pathumma, THaLLE),
-  OpenRouter, Moonshot, xAI, Groq, Azure AI Foundry, Ollama (local +
-  Anthropic-compat + Cloud), LMStudio, vLLM / llama.cpp / LiteLLM ที่
+  OpenRouter, TokenRouter, Moonshot, xAI, Groq, MiniMax, Qwen Cloud,
+  AtlasCloud, Meta, 9router, OpenCode Go, Azure AI Foundry,
+  Ollama (local + Anthropic-compat + Cloud), LMStudio,
+  vLLM / llama.cpp / LiteLLM ที่
   self-host เอง และ slot OpenAI-compatible
   ทั่วไป (`oai/*`) — สลับกลางคันด้วย `/model` หรือ `/provider` ได้
   ([บทที่ 6](ch06-providers-models-api-keys.md))
 - **API พร้อมใช้กับเครื่องมือมาตรฐาน** — `--serve` เปิดทั้ง
   `/v1/chat/completions` (OpenAI-compatible สำหรับ Cursor, Aider, n8n,
-  openai-python) และ `/agent/run` + `/v1/agent/info` (thClaws-native
-  สำหรับ orchestrator) — agent ตัวเดียวให้บริการได้
-  ทั้งคนและซอฟต์แวร์พร้อมกัน
+  openai-python), `/v1/messages` (Anthropic-compatible สำหรับ SDK
+  `anthropic` หรืออะไรก็ตามที่ตั้ง `ANTHROPIC_BASE_URL`) และ
+  `/agent/run` + `/v1/agent/info` (thClaws-native สำหรับ orchestrator)
+  — agent ตัวเดียวให้บริการได้ทั้งคนและซอฟต์แวร์พร้อมกัน
 - **Async webhook delivery** — งานที่รันยาว (deploy, build, multi-step
   research) ส่ง prompt + `x_callback` แล้วปิด connection ได้ thClaws
   จะ POST ผลกลับเมื่อทำเสร็จ ทนต่อ network blip และ orchestrator pod
@@ -185,7 +195,7 @@ hosted runtime ให้เช่า — ดู bullet ด้านล่าง�
   client
 - **Session resume** — `thclaws --resume last` ทำงานต่อจาก session
   ล่าสุด, `thclaws --resume <id>` กระโดดไป session ที่ระบุ session
-  เก็บเป็น JSONL ที่ `.thclaws/sessions/` — git-friendly, grep-friendly
+  เก็บเป็น JSONL ที่ `.thclaws/state/sessions/` — git-friendly, grep-friendly
   ([บทที่ 7](ch07-sessions.md))
 - **Settings อยู่ในไฟล์ JSON ไฟล์เดียว** — permission mode, thinking
   budget, allowed/disallowed tool, endpoint ของ provider, KMS ที่แนบไว้,

@@ -111,7 +111,7 @@ Reserved stem: `MEMORY` (case-insensitive) — `writable_entry_path` refuses it 
 
 ### Parser
 
-`memory::parse_frontmatter(s) -> (HashMap<String, String>, String)` ([memory.rs:496-535](thclaws/crates/core/src/memory.rs)) is intentionally permissive:
+`memory::parse_frontmatter(s) -> (HashMap<String, String>, String)` ([memory.rs:496-535](../crates/core/src/memory.rs)) is intentionally permissive:
 
 - `---` opens on first line, `---` closes on its own line
 - `key: value` lines inside the block; trim whitespace; strip surrounding `"` / `'` quotes (M6.26 — round-trip safe with `write_frontmatter_map`)
@@ -216,7 +216,7 @@ Path safety enforced at finer grain via `memory::writable_entry_path`:
 - Canonicalize parent inside the memory root (symlink-escape defeated)
 - Refuse if the memory root itself is a symlink
 
-Same intentional carve-out pattern as `TodoWrite` (`.thclaws/todos.md`) and `KmsWrite` (`.thclaws/kms/...`) — clear precedent in the codebase.
+Same intentional carve-out pattern as `TodoWrite` (`.thclaws/state/todos.md`) and `KmsWrite` (`.thclaws/state/kms/...`) — clear precedent in the codebase.
 
 ### Tool registration
 

@@ -192,6 +192,19 @@ connects over HTTP/SSE on next session start.
     …
 ```
 
+### The full subcommand list
+
+| Command | What it does |
+|---|---|
+| `/mcp` | List connected servers and their tools (above) |
+| `/mcp add <name> <url-or-command>` | Add a server — see above |
+| `/mcp remove <name>` | Remove one. Alias: `/mcp rm` |
+| `/mcp info <name>` | Show one server's config, transport and resolved tools |
+| `/mcp search <query>` | Search the marketplace for MCP servers |
+| `/mcp install <name>` | Install one from the marketplace |
+| `/mcp marketplace` | Browse the MCP section of the marketplace |
+| `/mcp reauth <name>` | **Re-run the OAuth flow** for a remote server whose token expired or was revoked. Alias: `/mcp login`. This is the fix when a previously working HTTP server starts returning 401 |
+
 ## Tool naming
 
 All MCP tool names are prefixed with the server name + `__`:

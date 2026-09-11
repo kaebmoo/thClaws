@@ -10,8 +10,8 @@ of work every time and a long-running job leaves a checkpoint on disk.
 
 Fan-out, JSON-schema validation, per-worker token/time budgets,
 retries, KMS-write grants, and resume all work today. For **genuine
-concurrency** use `thclaws.parallel([...])` (workers run at once, capped
-at `min(16, cores-2)`); plain `Promise.all` over `thclaws.subagent`
+concurrency** use `thclaws.parallel([...])` (workers run at once, **8
+at a time** by default); plain `Promise.all` over `thclaws.subagent`
 still runs serially (that host call blocks per spawn).
 
 ## When to use workflows
@@ -66,7 +66,7 @@ through `thclaws.subagent(...)` (serial) or `thclaws.parallel([...])`
 agent and run it verbatim (no authoring) with typed input:
 
 ```
-WorkflowRun({ script_path: ".thclaws/workflows/research.js",
+WorkflowRun({ script_path: ".thclaws/state/workflows/research.js",
               args: { query: "AI agent frameworks", kms: "ai-agents", min_iter: 2 } })
 ```
 
@@ -183,9 +183,28 @@ workflow that calls it. An explicit per-call `schema` still wins.
 
 **`thclaws.parallel([spec, …])` — genuine fan-out.** Pass an **array** of the
 same `{prompt, agent?, schema?, caps?, budget?, fallback?}` spec objects and the
-workers run **concurrently** (capped at `min(16, cores-2)`), returning an array
-of results in input order. This is the only true-parallel primitive —
-`Promise.all` over `thclaws.subagent` runs serially.
+workers run **concurrently**, returning an array of results in input
+order. This is the only true-parallel primitive — `Promise.all` over
+`thclaws.subagent` runs serially.
+
+**The concurrency cap is 8**, and you change it with the
+`THCLAWS_WORKFLOW_PARALLELISM` environment variable (clamped to 1–32):
+
+```sh
+THCLAWS_WORKFLOW_PARALLELISM=16 thclaws --workflow ./render-all.js
+```
+
+Eight is an *I/O* number, not a CPU one. Every parallel future is just
+awaiting a model call, so what limits you is what your gateway or
+provider will take concurrently, not how many cores you have. Raise it
+if your provider is happy; lower it if you are getting rate-limited.
+
+> An earlier build derived the cap from `min(16, cores-2)`. That was a
+> CPU-bound metric applied to I/O-bound work, and on a one-core cloud
+> runner it collapsed to 1 — silently serialising every
+> `thclaws.parallel` stage while looking like it was running in
+> parallel. If you have notes or scripts that assume the core-count
+> formula, they are describing the old behaviour.
 
 **It settles, it doesn't reject.** A worker that fails after its retries does
 **not** abort the batch — that slot becomes the spec's **`fallback`** value
@@ -296,7 +315,7 @@ assignment, OR `undefined` if neither.
 Every run writes a JSONL log to:
 
 ```text
-.thclaws/workflows/wf-<id>/state.jsonl
+.thclaws/state/workflows/wf-<id>/state.jsonl
 ```
 
 One event per line, flushed after each write so a Ctrl-C leaves the
@@ -327,6 +346,11 @@ y/N confirm the chat tab can't show — run it from `thclaws --cli`):
 /workflow rm <id>          y/N confirm + remove the workflow dir
 ```
 
+Aliases, if you don't remember the exact word: `list` also takes `ls`;
+`inspect` also takes `show` and `cat`; `rm` also takes `delete` and
+`del`; `exec` also takes `file` and `script`. `/wf` is short for
+`/workflow`.
+
 `resume` is keyed by **prompt match** at each `thclaws.subagent`
 call. A cached entry is consumed only when its prompt equals the
 current call's prompt; mismatches fall through to fresh spawn (the
@@ -352,7 +376,7 @@ it directly, skipping the author + review phase entirely:
   line — useful for CI, cron jobs (chapter 19), and deploy hooks.
 
 Every `/workflow run` persists its approved script to
-`.thclaws/workflows/wf-<id>/script.js`, so a workflow the model
+`.thclaws/state/workflows/wf-<id>/script.js`, so a workflow the model
 authored once can be re-run deterministically with `/workflow exec`
 against that path (or replayed from its checkpoint with
 `/workflow resume <id>`).
@@ -388,8 +412,8 @@ These are documented gaps, not bugs — tracked in
   That host function blocks the JS thread per-call, so subagent calls
   inside `Promise.all` run sequentially (wall-clock = sum, not max). Use
   **`thclaws.parallel([...])`** for genuine concurrency — it runs the
-  workers on the tokio runtime (capped at `min(16, cores-2)`). The
-  remaining gap is making `Promise.all` itself overlap; until then,
+  workers on the tokio runtime, 8 at a time by default. The remaining
+  gap is making `Promise.all` itself overlap; until then,
   `thclaws.parallel` is the explicit opt-in.
 - **No verification phase.** A dedicated `thclaws.verify({...})`
   primitive doesn't exist yet — scripts that want a check step author
@@ -428,7 +452,7 @@ Two practical guardrails:
 ## Troubleshooting
 
 **"workflow: state.jsonl unavailable — proceeding without checkpoint"**
-— `.thclaws/workflows/` can't be created or written. Check
+— `.thclaws/state/workflows/` can't be created or written. Check
 permissions on `.thclaws/` in the project root.
 
 **Script error: `ReferenceError: thclaws is not defined`** — you're

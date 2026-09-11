@@ -244,7 +244,7 @@ create. See `dev-plan/38` Tier 3 in the workspace-private
   catalog server's responsibility.
 - **Stripe / billing.** Top-up flow runs in the catalog web UI.
 - **Session sync.** Sessions stay on the machine that ran the agent;
-  `STRIP_PREFIXES` actively drops `.thclaws/sessions/` from
+  `STRIP_PREFIXES` actively drops `.thclaws/state/sessions/` from
   publishes.
 
 If you're hacking on any of those, the source tree is at

@@ -29,7 +29,7 @@
 //!
 //! Some tools depend on parent-process state that doesn't make sense
 //! from inside Claude Code (the recursive Task spawner, Team* tools
-//! that mutate `.thclaws/team/` for parallel teammates, the Skill
+//! that mutate `.thclaws/state/team/` for parallel teammates, the Skill
 //! invoker that rewrites the next turn, plan-mode transition tools,
 //! `AskUserQuestion` that needs a GUI). These are excluded from the
 //! bridge — the model only sees tools that operate cleanly via the
@@ -63,7 +63,13 @@ const EXCLUDED_TOOLS: &[&str] = &[
     "ExitPlanMode",
     "SubmitPlan",
     "UpdatePlanStep",
-    "UpdateGoal",
+    // Goal-state mutation. `UpdateGoal` was split into these three in
+    // Phase C1; the old name sat here matching nothing, which silently
+    // bridged all three to the subprocess. Guarded by
+    // `every_excluded_tool_name_exists` below.
+    "RecordGoalProgress",
+    "MarkGoalComplete",
+    "MarkGoalBlocked",
 ];
 
 /// Names the bridge exposes to the subprocess, sorted for stable
@@ -202,6 +208,46 @@ mod tests {
         r.register(Arc::new(crate::tools::KmsDeleteTool));
         r.register(Arc::new(crate::tools::KmsCreateTool));
         Arc::new(r)
+    }
+
+    /// A name in `EXCLUDED_TOOLS` that matches no registered tool
+    /// excludes nothing. That is how `UpdateGoal` came to be bridged:
+    /// Phase C1 split it into three tools and left the old name here,
+    /// where it read as a still-active exclusion. Renaming a tool must
+    /// fail this test rather than silently widen the bridge.
+    #[test]
+    fn every_excluded_tool_name_exists() {
+        let mut r = ToolRegistry::with_builtins();
+        let _mailbox = crate::team::register_team_tools(&mut r, "lead");
+        r.register(Arc::new(crate::tools::RecordGoalProgressTool));
+        r.register(Arc::new(crate::tools::MarkGoalCompleteTool));
+        r.register(Arc::new(crate::tools::MarkGoalBlockedTool));
+        let mut known: Vec<&str> = r.names();
+        // Registered outside any registry we can build here: `Task` comes
+        // from the REPL's agent factory and `Skill` from the skill system
+        // (`skills.rs`). They are real tools, so name them explicitly
+        // rather than letting the test read them as dead entries.
+        known.extend(["Task", "Skill"]);
+        let dead: Vec<&&str> = EXCLUDED_TOOLS
+            .iter()
+            .filter(|e| !known.contains(e))
+            .collect();
+        assert!(
+            dead.is_empty(),
+            "EXCLUDED_TOOLS names no longer in the registry (they exclude nothing): {dead:?}"
+        );
+    }
+
+    #[test]
+    fn goal_tools_are_not_bridged_to_the_subprocess() {
+        let mut r = ToolRegistry::with_builtins();
+        r.register(Arc::new(crate::tools::RecordGoalProgressTool));
+        r.register(Arc::new(crate::tools::MarkGoalCompleteTool));
+        r.register(Arc::new(crate::tools::MarkGoalBlockedTool));
+        let names = bridged_tool_names(&Arc::new(r));
+        for t in ["RecordGoalProgress", "MarkGoalComplete", "MarkGoalBlocked"] {
+            assert!(!names.iter().any(|n| n == t), "{t} must not be bridged");
+        }
     }
 
     #[test]

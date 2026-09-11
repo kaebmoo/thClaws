@@ -89,14 +89,16 @@ fn extract_dir(
 pub fn shell_check(path: &Path) -> Result<Vec<(Severity, String)>, String> {
     let mut findings: Vec<(Severity, String)> = Vec::new();
 
-    let manifest_path = path.join("shell.json");
-    if !manifest_path.exists() {
-        return Err(format!("missing shell.json at {}", manifest_path.display()));
-    }
+    let manifest_path = super::manifest::find_manifest(path).ok_or_else(|| {
+        format!(
+            "missing shell.json (or manifest.json) in {}",
+            path.display()
+        )
+    })?;
     let raw = fs::read_to_string(&manifest_path)
         .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
-    let manifest: super::manifest::ShellManifest =
-        serde_json::from_str(&raw).map_err(|e| format!("parse shell.json: {e}"))?;
+    let manifest: super::manifest::ShellManifest = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse {}: {e}", manifest_path.display()))?;
 
     if manifest.id.is_empty() {
         findings.push((Severity::Error, "shell.id is empty".into()));
@@ -189,11 +191,12 @@ impl Severity {
 /// `style.css` / `script.js` if present; doesn't yet vendor remote
 /// imports). Returns the written path.
 pub fn shell_pack(src: &Path, dest: &Path) -> Result<PathBuf, String> {
-    let manifest_path = src.join("shell.json");
+    let manifest_path = super::manifest::find_manifest(src)
+        .ok_or_else(|| format!("missing shell.json (or manifest.json) in {}", src.display()))?;
     let raw = fs::read_to_string(&manifest_path)
         .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
-    let manifest: super::manifest::ShellManifest =
-        serde_json::from_str(&raw).map_err(|e| format!("parse shell.json: {e}"))?;
+    let manifest: super::manifest::ShellManifest = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse {}: {e}", manifest_path.display()))?;
     let entry = src.join(&manifest.entry);
     let html = fs::read_to_string(&entry).map_err(|e| format!("read {}: {e}", entry.display()))?;
 

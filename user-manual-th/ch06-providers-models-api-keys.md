@@ -12,6 +12,10 @@ thClaws คุยกับ **provider ได้ทั้งหมดสามส
 | xAI | `xai/*` | `XAI_API_KEY` | xAI Grok; ค่า default `xai/grok-4.3` |
 | Groq | `groq/*` | `GROQ_API_KEY` | Groq LPU (เร็วมาก); `groq/llama-3.3-70b-versatile` |
 | TokenRouter | `tokenrouter/*` | `TOKENROUTER_API_KEY` | Router รวมเข้าถึง 300+ model (`tokenrouter/<vendor>/<model>`) |
+| AtlasCloud | `atlascloud/*` | `ATLASCLOUD_API_KEY` | router แบบ OpenAI-compatible ที่โฮสต์ให้; ค่าเริ่มต้น `atlascloud/qwen/qwen3.5-flash` |
+| Meta | `meta/*` | `META_API_KEY` | API ที่ Meta โฮสต์เอง; ค่าเริ่มต้น `meta/muse-spark-1.2` |
+| 9router | `9router/*` | `NINEROUTER_API_KEY` | router แบบ **self-host** — ตั้ง `NINEROUTER_BASE_URL` (ค่าเริ่มต้น `http://localhost:20128/v1`) แก้ base URL ได้ใน Settings |
+| Qwen Cloud | `qwen-cloud/*` | `QWENCLOUD_API_KEY` | บริการ Qwen ที่โฮสต์โดย Alibaba |
 | Anthropic | `claude-*` | `ANTHROPIC_API_KEY` | extended thinking, prompt caching (system + tools) |
 | Anthropic Agent SDK | `agent/*` | — (ใช้ auth ของ Claude Code เอง) | ขับ `claude` CLI ผ่าน subscription Claude Pro / Max แทนการคิดเงินแบบ API ⚠ tool registry ของ thClaws ไม่ข้าม subprocess boundary — model เห็นเฉพาะ toolset ของ Claude Code เท่านั้น tool ของ KMS / MCP / Agent Teams เข้าถึงไม่ได้จาก provider นี้ ต้องสลับไป `claude-*` หากต้องการใช้ |
 | OpenAI | `gpt-*`, `o1-*`, `o3*`, `o4-*` | `OPENAI_API_KEY` | Chat Completions; prompt caching อัตโนมัติ |
@@ -98,6 +102,13 @@ session นั้นยังไม่ได้ตั้ง API key ไว้ (�
 | `opus`   | `claude-opus-4-6` |
 | `haiku`  | `claude-haiku-4-5` |
 | `flash`  | `gemini-2.5-flash` |
+| `openthaigpt` | `thaillm/OpenThaiGPT-ThaiLLM-8B-Instruct-v7.2` |
+| `typhoon` | `thaillm/Typhoon-S-ThaiLLM-8B-Instruct` |
+| `pathumma` | `thaillm/Pathumma-ThaiLLM-qwen3-8b-think-3.0.0` |
+| `thalle` | `thaillm/THaLLE-0.2-ThaiLLM-8B-fa` |
+
+สี่ตัวท้ายคือโมเดล Thai LLM ของ NSTDA — พิมพ์ `/model typhoon` ง่ายกว่า
+พิมพ์ id เต็มเยอะ
 
 ```
 ❯ /model sonnet

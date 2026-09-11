@@ -1,6 +1,6 @@
 # TodoWrite
 
-Casual, low-ceremony scratchpad the model uses to track its own multi-step work. One JSON tool call replaces the entire list (full state replacement, not append). Persists as a markdown checklist at `<cwd>/.thclaws/todos.md`. Invisible in the chat surface unless the user opens the file directly. Distinct from the structured plan tools (`SubmitPlan` / `UpdatePlanStep` — sidebar-rendered, sequential-gated, audit-required) and from the in-memory `TaskCreate/Update/Get/List` tools (process-only, no persistence).
+Casual, low-ceremony scratchpad the model uses to track its own multi-step work. One JSON tool call replaces the entire list (full state replacement, not append). Persists as a markdown checklist at `<cwd>/.thclaws/state/todos.md`. Invisible in the chat surface unless the user opens the file directly. Distinct from the structured plan tools (`SubmitPlan` / `UpdatePlanStep` — sidebar-rendered, sequential-gated, audit-required) and from the in-memory `TaskCreate/Update/Get/List` tools (process-only, no persistence).
 
 This doc covers: the concept + when to use vs other planning tools, the wire format + on-disk markdown shape, the M6.30 validation chain (symlink defense, content sanitization, status validation, duplicate-id check), the per-turn `build_todos_reminder` system-prompt injection, the plan-mode block, the GUI custom-renderer checklist card, the sandbox carve-out, and the testing surface.
 
@@ -60,7 +60,7 @@ The model COULD use the generic `Write` tool to maintain its own todos.md. Three
 ## 2. On-disk layout
 
 ```
-<cwd>/.thclaws/todos.md      # the only file TodoWrite touches
+<cwd>/.thclaws/state/todos.md      # the only file TodoWrite touches
 ```
 
 Path is **relative to process cwd** at write time. When the GUI's "change directory" modal swaps workspace via `std::env::set_current_dir`, subsequent TodoWrite calls land in the new project's `.thclaws/`. Worktree teammates get their own per-worktree `todos.md` (cwd is the worktree root).
@@ -121,7 +121,7 @@ This is intentional — partial-update semantics would require the model to reme
 ### Output
 
 ```
-"Wrote N todo(s) to .thclaws/todos.md (P pending, I in progress, C completed)"
+"Wrote N todo(s) to .thclaws/state/todos.md (P pending, I in progress, C completed)"
 ```
 
 Always small (<100 chars). Never triggers the `TOOL_RESULT_CONTEXT_LIMIT = 50_000` truncate-to-disk path.
@@ -209,7 +209,7 @@ fn check_thclaws_not_symlinked() -> Result<()> {
 }
 ```
 
-Pre-fix `std::fs::write(.thclaws/todos.md, ...)` followed the symlink. An attacker-planted `.thclaws -> /tmp/anywhere` symlink (from a malicious clone or shared misconfigured workspace) let TodoWrite escape the project root. **Verified empirically before fix** with a 30-line repro:
+Pre-fix `std::fs::write(.thclaws/state/todos.md, ...)` followed the symlink. An attacker-planted `.thclaws -> /tmp/anywhere` symlink (from a malicious clone or shared misconfigured workspace) let TodoWrite escape the project root. **Verified empirically before fix** with a 30-line repro:
 
 ```
 LEAKED: write escaped via .thclaws symlink → /var/folders/.../outside-N/todos.md
@@ -230,7 +230,7 @@ The `requires_approval=true` gate did not protect — the approval modal shows t
 
 ## 5. Per-turn reminder injection
 
-`crate::agent::build_todos_reminder()` is called every turn before the agent runs ([agent.rs:580](thclaws/crates/core/src/agent.rs#L580)). It reads `.thclaws/todos.md` from cwd and returns `Some(reminder_text)` when:
+`crate::agent::build_todos_reminder()` is called every turn before the agent runs ([agent.rs:580](thclaws/crates/core/src/agent.rs#L580)). It reads `.thclaws/state/todos.md` from cwd and returns `Some(reminder_text)` when:
 
 - File exists AND
 - File is non-empty AND
@@ -244,7 +244,7 @@ Returns `None` when:
 When fired, the reminder looks like:
 
 ```markdown
-## Existing todos (.thclaws/todos.md)
+## Existing todos (.thclaws/state/todos.md)
 
 A scratchpad todo list from a prior session is present in this workspace.
 Surface this to the user before asking what to work on, and offer to
@@ -266,7 +266,7 @@ TodoWrite that reflects the new direction.
 
 ### Caps (M6.18 BUG M6)
 
-`crate::memory::truncate_for_prompt(raw, 80, 6_000, ".thclaws/todos.md")` — 80 lines / 6 KB cap. An unmaintained list (200+ entries) gets truncated with a notice. Cap is generous for a typical scratchpad: headers + bullets average ~50 bytes/line.
+`crate::memory::truncate_for_prompt(raw, 80, 6_000, ".thclaws/state/todos.md")` — 80 lines / 6 KB cap. An unmaintained list (200+ entries) gets truncated with a notice. Cap is generous for a typical scratchpad: headers + bullets average ~50 bytes/line.
 
 ### Why always-on instead of every-N-turns
 
@@ -274,7 +274,7 @@ Claude Code's analog (`todo_reminder` in `claude-code-src/utils/messages.ts:3663
 1. We don't have the turn-count tracking infrastructure
 2. The content is small enough (~200 bytes for a typical 3-5 item list, 6KB worst case) that always-on is acceptable
 
-Real-world testing showed prompt-only guidance ("check `.thclaws/todos.md` before asking") wasn't enough on some models — gpt-4.1 in particular still asked the user instead of reading the file. Auto-injecting the contents removes the model's option to ignore the rule.
+Real-world testing showed prompt-only guidance ("check `.thclaws/state/todos.md` before asking") wasn't enough on some models — gpt-4.1 in particular still asked the user instead of reading the file. Auto-injecting the contents removes the model's option to ignore the rule.
 
 ### Composition with plan reminder
 
@@ -332,7 +332,7 @@ The chat surface picks a custom checklist-card renderer for `tool_name === "Todo
 
 `tool_name` is the dispatch key. `input` carries the raw todos array so the renderer doesn't need a follow-up IPC round-trip.
 
-### Frontend renderer ([ChatView.tsx:629-723](thclaws/frontend/src/components/ChatView.tsx))
+### Frontend renderer ([ChatView.tsx:629-723](../frontend/src/components/ChatView.tsx))
 
 ```tsx
 const todos = (() => {
@@ -374,13 +374,13 @@ XSS-safe: React's default text-node escaping renders `t.content` literally (any 
 
 `<cwd>/.thclaws/` is normally **write-blocked** by `Sandbox::check_write` ([app-architecture.md §8](app-architecture.md)) — that directory holds team state (`settings.json`, `agents/`, `mailboxes/`, `sessions/`, `kms/`, `memory/`). Generic `Write` / `Edit` / `Bash mv` etc. all reject paths inside it.
 
-TodoWrite intentionally bypasses this check. It calls `std::fs::write` directly with the hardcoded path `.thclaws/todos.md`, never going through `Sandbox::check_write`. Same intentional carve-out family as `KmsWrite` / `KmsAppend` (writes inside `.thclaws/kms/`) and `MemoryWrite` / `MemoryAppend` (writes inside `.thclaws/memory/`).
+TodoWrite intentionally bypasses this check. It calls `std::fs::write` directly with the hardcoded path `.thclaws/state/todos.md`, never going through `Sandbox::check_write`. Same intentional carve-out family as `KmsWrite` / `KmsAppend` (writes inside `.thclaws/state/kms/`) and `MemoryWrite` / `MemoryAppend` (writes inside `.thclaws/memory/`).
 
 ### Why bypass is safe
 
 | Property | TodoWrite |
 |---|---|
-| Path is user-controlled? | No — hardcoded `.thclaws/todos.md` |
+| Path is user-controlled? | No — hardcoded `.thclaws/state/todos.md` |
 | Path traversal vector? | No — no `..`, no separators in user input that touches the path |
 | Symlink escape? | **Defended by M6.30 `check_thclaws_not_symlinked`** |
 | Approval-gated? | Yes (`requires_approval = true`) — Ask mode prompts |
@@ -413,7 +413,7 @@ crates/core/src/default_prompts/
 └── system.md                         TodoWrite framing (lines 30, 36, 49):
                                        "scratchpad", "small job → use",
                                        "BEFORE asking for context, check
-                                       `.thclaws/todos.md`"
+                                       `.thclaws/state/todos.md`"
 
 frontend/src/components/
 └── ChatView.tsx                      Custom checklist card renderer
@@ -459,7 +459,7 @@ The symlink test mutates process cwd (via `std::env::set_current_dir`) so it sha
 ### Backwards compatibility
 
 The M6.30 validation chain is backwards compatible for all well-formed callers — every new error fires on inputs that were previously silently corrupting state:
-- Pre-existing `.thclaws/todos.md` files render correctly (validation only applies to new writes)
+- Pre-existing `.thclaws/state/todos.md` files render correctly (validation only applies to new writes)
 - Models that pass valid JSON Schema-conforming inputs see no change
 - The model now sees clear errors it can correct on retry where it previously saw silent corruption
 
@@ -475,8 +475,8 @@ If a user has `.thclaws` as a symlink (rare but possible — some shared workspa
 
 ### Not currently planned
 
-- **Multiple lists** — a single `.thclaws/todos.md` per project. No `/todo new <name>` for separate lists. KMS (`/kms use <name>`) is the precedent for multi-list patterns.
-- **History / undo** — full replacement loses prior state. The user can `git diff .thclaws/todos.md` if `.thclaws/` is committed; otherwise gone.
+- **Multiple lists** — a single `.thclaws/state/todos.md` per project. No `/todo new <name>` for separate lists. KMS (`/kms use <name>`) is the precedent for multi-list patterns.
+- **History / undo** — full replacement loses prior state. The user can `git diff .thclaws/state/todos.md` if `.thclaws/` is committed; otherwise gone.
 - **Sidebar surfacing** — by design, TodoWrite is invisible in the chat surface (no sidebar entry). The custom checklist card in chat is the only UI affordance. Users who want sidebar-rendered plans use `SubmitPlan`.
 
 ---

@@ -13,12 +13,18 @@ skill คือวิธีย่อ "ช่วย deploy ตามพิธี�
 
 ## การค้นพบ (Discovery)
 
-ตอนเริ่มต้น thClaws จะไล่หาในไดเรกทอรีเหล่านี้ตามลำดับ:
+ตอนเริ่มต้น thClaws จะไล่หาห้าตำแหน่ง เรียงตามลำดับที่สแกน และ
+**ตัวหลังชนะเมื่อชื่อซ้ำกัน** — scope ที่เฉพาะเจาะจงที่สุดคือโปรเจกต์ของคุณ
+จึงเป็นคนพูดคำสุดท้าย:
 
-1. `.thclaws/skills/` — scope ของโปรเจกต์
-2. `~/.config/thclaws/skills/` — scope ระดับ user
-3. `~/.claude/skills/` — เพื่อรองรับ Claude Code
-4. ไดเรกทอรีที่ plugin เพิ่มเข้ามา
+1. `~/.claude/skills/` — ระดับ user แบบที่เข้ากับ Claude Code
+2. `~/.config/thclaws/skills/` — ระดับ user ของ thClaws
+3. ไดเรกทอรีที่ plugin เพิ่มเข้ามา — ดู[บทที่ 16](ch16-plugins.md)
+4. `.claude/skills/` — ระดับโปรเจกต์ แบบที่เข้ากับ Claude Code
+5. `.thclaws/skills/` — ระดับโปรเจกต์ของ thClaws (**ลำดับสูงสุด**)
+
+skill ชื่อ `deploy` ใน `.thclaws/skills/` จึงทับตัวที่ชื่อเดียวกันซึ่งมาจาก
+plugin หรือจากไดเรกทอรีระดับ user ของคุณ
 
 `/skills` แสดงรายการที่โหลดไว้ ส่วน `/skill show <name>` พิมพ์เนื้อหา
 SKILL.md ฉบับเต็มพร้อม path ที่ resolve เรียบร้อยแล้ว

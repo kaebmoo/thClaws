@@ -1,6 +1,6 @@
 # Google Gemini provider
 
-`GeminiProvider` (`providers/gemini.rs`, 1102 LOC) speaks Google's `generativelanguage.googleapis.com/v1beta` SSE format. The wire shape is different enough from Anthropic and OpenAI to need its own adapter rather than a config knob on the OpenAI-compat impl. One `ProviderKind` variant uses this impl: `Gemini`. Routing prefix: `gemini-` OR `gemma-` (Gemma open-weights are served via the same API).
+`GeminiProvider` (`providers/gemini.rs`) speaks Google's `generativelanguage.googleapis.com/v1beta` SSE format. The wire shape is different enough from Anthropic and OpenAI to need its own adapter rather than a config knob on the OpenAI-compat impl. One `ProviderKind` variant uses this impl: `Gemini`. Routing prefix: `gemini-` OR `gemma-` (Gemma open-weights are served via the same API).
 
 **Source:** `crates/core/src/providers/gemini.rs`
 **Constants:**

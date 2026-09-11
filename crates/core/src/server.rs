@@ -1184,7 +1184,23 @@ fn spawn_cloud_heartbeat(connections: Arc<AtomicUsize>) {
             }
             let connected = connections.load(Ordering::SeqCst) > 0;
             let busy = crate::agent_activity::is_agent_busy();
-            if !connected && !busy {
+            // Earliest pending `/schedule` fire, reported so the cloud
+            // reaper can resume this workspace in time to run it. On a
+            // paused runner nothing is executing when the cron comes
+            // due — `pause()` scales the Deployment to 0 — so without
+            // this the job simply never fires.
+            let next_schedule_at = crate::schedule::ScheduleStore::load()
+                .ok()
+                .and_then(|st| st.next_fire_across_all(chrono::Utc::now()))
+                .map(|t| t.to_rfc3339());
+            // Idle with nothing scheduled: stay quiet and let the
+            // reaper do its job. Idle WITH something scheduled: still
+            // ping, but flagged `activity: false` so the API records
+            // the time without treating it as someone being here —
+            // otherwise the pod would never be allowed to pause and
+            // every scheduled workspace would run 24/7.
+            let activity = connected || busy;
+            if !activity && next_schedule_at.is_none() {
                 continue;
             }
             // Body carries the current busy state so the cloud
@@ -1195,7 +1211,11 @@ fn spawn_cloud_heartbeat(connections: Arc<AtomicUsize>) {
             match client
                 .post(&endpoint)
                 .bearer_auth(&token)
-                .json(&serde_json::json!({ "busy": busy }))
+                .json(&serde_json::json!({
+                    "busy": busy,
+                    "activity": activity,
+                    "next_schedule_at": next_schedule_at,
+                }))
                 .send()
                 .await
             {

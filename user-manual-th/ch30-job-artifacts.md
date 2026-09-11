@@ -18,7 +18,8 @@ agent run โดย "job" คือ `session_id` ที่ `/agent/run` ตอ�
 
 ## ทำไมไม่ใช้ workspace sync?
 
-Sync surface (`/workspace/sync/*`, บทที่ 27) mirror *ทั้ง workspace*
+Sync surface — คือ route `/workspace/sync/*` ที่ `/cloud push` และ
+`/cloud pull` ใน[บทที่ 27](ch27-thclaws-cloud.md) วิ่งอยู่บนนั้น — mirror *ทั้ง workspace*
 และออกแบบมาสำหรับเครือข่ายที่เชื่อถือได้ (มี tunnel หรือ ForwardAuth
 คั่นหน้า) orchestrator ภายนอกที่ถือแค่ API token เจอช่องว่างสามข้อ:
 ไม่มี auth ที่รองรับอย่างเป็นทางการ, ไม่รู้ว่า job ไหนสร้างไฟล์อะไร,
@@ -123,6 +124,24 @@ directory ของ daemon
 - limit: ≤ 100 ไฟล์/request, decode แล้ว ≤ 64 MB · response ตอบ
   `sha256` ของทุกไฟล์ที่เขียนเพื่อให้ฝั่งส่งตรวจได้
 
+## manifest ว่างไม่ได้แปลว่าล้มเหลว
+
+มีสองผลลัพธ์ที่หน้าตาคล้ายกันจากภายนอกแต่คนละความหมาย manifest จึงระบุไว้
+ว่าคุณได้อันไหน
+
+| `status` | ความหมาย |
+|---|---|
+| `completed` | snapshot ทำงานแล้ว ส่วน `artifacts` **ว่างก็ได้** — pattern ที่ไม่ match อะไรเลยคือ snapshot ของความว่างเปล่าที่เสร็จสมบูรณ์ |
+| `failed` | ขอ snapshot ไว้แต่เขียนไม่สำเร็จ มีฟิลด์ `error` บอกเหตุผล |
+
+**การเก็บ artifact ล้มเหลวไม่ทำให้ run ล้มเหลว** ตรงนี้ตั้งใจไว้ เพราะ
+agent ทำงานของมันเสร็จแล้ว การคัดลอกไฟล์พลาดทีหลังไม่ควรย้อนกลับไปทำให้
+run ที่ดีกลายเป็นเสีย orchestrator จึงต้องอ่าน `status` — ถ้าตีความว่า
+"ไม่มี artifact" เท่ากับ "งานพัง" คุณจะไป retry งานที่สำเร็จไปแล้ว
+
+ตัว `error` ถูกพกมาใน manifest ไม่ได้ log ไว้เฉย ๆ ผู้เรียกจึงรู้ผลลัพธ์
+จาก API โดยไม่ต้องไปไล่อ่าน stderr ของ worker
+
 ## ขีดจำกัดการเก็บ artifacts
 
 snapshot ต่อ run สูงสุด **256 ไฟล์ / 300 MB** — ไฟล์ที่ match แต่เกิน
@@ -141,6 +160,34 @@ THCLAWS_SYNC_REQUIRE_AUTH=1 THCLAWS_API_TOKEN=secret thclaws --serve
 ทุก request ไป `/workspace/sync/*` จะต้องมี
 `Authorization: Bearer <token>` — ไม่ต้องมี tunnel หรือ ForwardAuth
 ไม่ตั้ง flag = พฤติกรรมเดิมทุกประการ deployment เก่าไม่กระทบ
+
+## ตัวอย่างไปป์ไลน์สอง worker ตั้งแต่ต้นจนจบ
+
+```bash
+# เครื่อง A เขียนโค้ด
+SID_A=$(curl -s -X POST http://worker-a:8443/agent/run \
+  -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
+  -d '{"prompt":"Implement the parser per spec.md","collect_files":["src/**/*.py"]}' \
+  | jq -r .session_id)
+
+# ดึง artifact ของ A แล้วส่งเข้า B เป็น input
+curl -s -H "Authorization: Bearer $TOK" \
+  http://worker-a:8443/v1/sessions/$SID_A/artifacts | jq -c '.artifacts[]' |
+while read -r art; do
+  aid=$(jq -r .id <<<"$art"); path=$(jq -r .path <<<"$art")
+  curl -s -H "Authorization: Bearer $TOK" \
+    http://worker-a:8443/v1/sessions/$SID_A/artifacts/$aid -o /tmp/f
+  curl -s -X POST http://worker-b:8443/v1/inputs \
+    -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
+    -d "{\"files\":[{\"path\":\"inputs/$path\",\"content_base64\":\"$(base64 < /tmp/f)\"}]}"
+done
+
+# เครื่อง B รีวิวไฟล์จริง
+curl -s -X POST http://worker-b:8443/agent/run \
+  -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
+  -d '{"prompt":"Review the code under inputs/ and write findings to review.md",
+       "collect_files":["review.md"]}'
+```
 
 ## ที่เก็บบน disk
 

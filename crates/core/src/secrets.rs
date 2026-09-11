@@ -101,6 +101,7 @@ const MANAGED: &[ProviderKind] = &[
     ProviderKind::Gemini,
     ProviderKind::DashScope,
     ProviderKind::QwenCloud,
+    ProviderKind::Sis,
     ProviderKind::OllamaCloud,
     ProviderKind::ZAi,
     ProviderKind::AzureAIFoundry,

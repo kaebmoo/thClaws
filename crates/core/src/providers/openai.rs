@@ -64,7 +64,7 @@ pub struct OpenAIProvider {
 impl OpenAIProvider {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: super::http_client(),
             api_key: api_key.into(),
             base_url: DEFAULT_API_URL.to_string(),
             strip_model_prefix: None,

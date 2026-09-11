@@ -1,6 +1,6 @@
 # Anthropic Messages API provider
 
-`AnthropicProvider` (`providers/anthropic.rs`, 806 LOC) speaks the official Anthropic Messages SSE format. Three `ProviderKind` variants resolve to this single impl with different URL/auth: `Anthropic` (api.anthropic.com), `OllamaAnthropic` (Ollama's `/v1/messages` shim), `AzureAIFoundry` (Azure deployment hosting Anthropic models).
+`AnthropicProvider` (`providers/anthropic.rs`) speaks the official Anthropic Messages SSE format. Three `ProviderKind` variants resolve to this single impl with different URL/auth: `Anthropic` (api.anthropic.com), `OllamaAnthropic` (Ollama's `/v1/messages` shim), `AzureAIFoundry` (Azure deployment hosting Anthropic models).
 
 This is the most feature-rich wire format — it's the only one that supports prompt caching (`cache_control: ephemeral`), extended thinking (`thinking.budget_tokens`), and granular content blocks (`tool_use` + `tool_result` + `image` + `text` + `thinking` all first-class). Most other providers normalize *toward* this shape.
 

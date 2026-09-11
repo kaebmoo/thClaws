@@ -41,6 +41,16 @@ pub use allowlist::{check_url, AllowDecision};
 pub use error::PolicyError;
 pub use verify::{KeySource, EMBEDDED_PUBKEY_BASE64};
 
+/// The signed policy baked in at build time. Empty when none was
+/// embedded — the open-core default.
+pub const EMBEDDED_POLICY_JSON_BASE64: &str = env!("THCLAWS_EMBEDDED_POLICY_JSON");
+
+/// `true` when this build must have a policy to run. Set by `build.rs`
+/// when the binary carries both a key and a policy (a per-customer
+/// build), or when `THCLAWS_REQUIRE_POLICY=1` forces it. A maintainer's
+/// local build, which picks up only `policy.pub`, stays runnable.
+pub const POLICY_REQUIRED: bool = matches!(env!("THCLAWS_POLICY_REQUIRED").as_bytes(), b"1");
+
 /// Policy schema version this build understands. Forward-compat guard:
 /// a policy declaring a higher version refuses to load rather than
 /// silently skipping unknown blocks.
@@ -388,19 +398,33 @@ pub fn external_mcp_disallowed() -> bool {
 /// and exits non-zero.
 pub fn load_or_refuse() -> Result<bool, PolicyError> {
     let key_source = KeySource::resolve()?;
-    let path = match find_file() {
-        Some(p) => p,
-        None => {
-            // No policy file found. Cache `None` so `active()` returns
-            // it without re-doing the search.
-            let _ = ACTIVE.set(None);
-            return Ok(false);
+    // Source order: a file on disk wins, so an org can rotate policy by
+    // re-signing and redistributing one file — no rebuild. The embedded
+    // copy is the fallback for a deployment with no endpoint management,
+    // where the file may never have been placed or may have been deleted.
+    // Both go through the identical signature / expiry / binding checks
+    // below; embedding is a delivery mechanism, not a shortcut.
+    let (path, body) = match find_file() {
+        Some(p) => {
+            let body = std::fs::read_to_string(&p).map_err(|e| PolicyError::Io {
+                path: p.clone(),
+                source: e,
+            })?;
+            (p, body)
         }
+        None => match embedded_policy_json() {
+            Some(body) => (PathBuf::from("<built-in>"), body),
+            None => {
+                if POLICY_REQUIRED {
+                    return Err(PolicyError::PolicyRequired);
+                }
+                // Open-core: no policy anywhere is the normal state.
+                // Cache `None` so `active()` skips the search next time.
+                let _ = ACTIVE.set(None);
+                return Ok(false);
+            }
+        },
     };
-    let body = std::fs::read_to_string(&path).map_err(|e| PolicyError::Io {
-        path: path.clone(),
-        source: e,
-    })?;
     let raw: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| PolicyError::InvalidJson {
             path: path.clone(),
@@ -555,6 +579,20 @@ pub fn status_text() -> String {
         lines.push(format!("runtime: {}", parts.join(" · ")));
     }
     lines.join("\n")
+}
+
+/// The policy baked in at build time, if any. Base64 in the binary so
+/// arbitrary JSON survives `rustc-env`; decoded on the one call that
+/// needs it rather than kept resident.
+fn embedded_policy_json() -> Option<String> {
+    use base64::Engine;
+    if EMBEDDED_POLICY_JSON_BASE64.is_empty() {
+        return None;
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(EMBEDDED_POLICY_JSON_BASE64)
+        .ok()
+        .and_then(|b| String::from_utf8(b).ok())
 }
 
 /// Walk the documented search path and return the first existing file.
@@ -1004,6 +1042,67 @@ mod tests {
         assert_eq!(
             parsed.policies.plugins.as_ref().unwrap().allowed_hosts,
             vec!["github.com/acme/*"]
+        );
+    }
+}
+
+#[cfg(test)]
+mod embedded_policy_tests {
+    use super::*;
+
+    /// The open-core build must carry neither, and must not require one.
+    /// If this fails on CI, a key or policy leaked into a public build.
+    #[test]
+    fn open_core_build_embeds_nothing_and_requires_nothing() {
+        if EMBEDDED_PUBKEY_BASE64.is_empty() {
+            assert!(
+                EMBEDDED_POLICY_JSON_BASE64.is_empty(),
+                "a policy is embedded but no key is — it could never be verified"
+            );
+            assert!(
+                !POLICY_REQUIRED,
+                "a build with no key demands a policy it has no way to check"
+            );
+        }
+    }
+
+    /// A policy without a key is unverifiable, so that combination must
+    /// never enable the requirement. Guards the build.rs condition.
+    #[test]
+    fn requirement_implies_a_key_to_verify_against() {
+        if POLICY_REQUIRED {
+            assert!(
+                !EMBEDDED_PUBKEY_BASE64.is_empty()
+                    || std::env::var("THCLAWS_POLICY_PUBLIC_KEY").is_ok(),
+                "policy required but nothing to verify it with"
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_decoder_round_trips() {
+        use base64::Engine;
+        let json = r#"{"version":1,"issuer":"ACME"}"#;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(json);
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&b64)
+            .map(|b| String::from_utf8(b).unwrap());
+        assert_eq!(decoded.unwrap(), json);
+    }
+
+    /// The message an ordinary employee sees must tell them where to put
+    /// the file, not just that something failed.
+    #[test]
+    fn the_missing_policy_message_is_actionable() {
+        let msg = PolicyError::PolicyRequired.refuse_message();
+        assert!(msg.contains("/etc/thclaws/policy.json"), "no system path");
+        assert!(
+            msg.contains("~/.config/thclaws/policy.json"),
+            "no user path"
+        );
+        assert!(
+            msg.contains("Ask whoever provided thClaws"),
+            "no route to a human"
         );
     }
 }

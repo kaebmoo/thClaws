@@ -2225,3 +2225,72 @@ fn now_string() -> String {
         .map(|d| d.as_secs().to_string())
         .unwrap_or_default()
 }
+
+/// `/publish <file.html>` — put a self-contained page on the web.
+///
+/// The one cloud command that works logged out. A token is not a gate
+/// here, only a lifetime: an hour without, three days with. That
+/// asymmetry is the whole design — "show someone this page" has to work
+/// the moment the agent finishes writing it, not after a signup.
+pub async fn publish_app_lines(
+    path: &str,
+    cloud_url: Option<&str>,
+    cloud_cfg: Option<&CloudConfig>,
+) -> Vec<String> {
+    let p = std::path::Path::new(path);
+    // Read through the sandbox so /publish can't be talked into
+    // uploading a file outside the workspace — this command sends bytes
+    // to a public URL, which makes an arbitrary-read a data leak.
+    let resolved = match crate::sandbox::Sandbox::check(path) {
+        Ok(r) => r,
+        Err(e) => return vec![format!("cannot read {}: {e}", p.display())],
+    };
+    let body = match std::fs::read(&resolved) {
+        Ok(b) => b,
+        Err(e) => return vec![format!("cannot read {}: {e}", resolved.display())],
+    };
+    // Advisory, not enforced: the server accepts any UTF-8 text. Saying
+    // so early beats a confusing render later.
+    if !path.to_ascii_lowercase().ends_with(".html") && !path.to_ascii_lowercase().ends_with(".htm")
+    {
+        return vec![format!(
+            "{} doesn't look like an HTML file. /publish serves whatever it \
+             uploads as text/html, so a non-HTML file will render as markup.",
+            p.display()
+        )];
+    }
+
+    let url = resolve_cloud_url(cloud_url, cloud_cfg);
+    let token = crate::cloud::token();
+    let anonymous = token.is_none();
+    let client = Client::new(&url, token);
+
+    match client.publish_app(body).await {
+        Ok(app) => {
+            let mut lines = vec![
+                app.url.clone(),
+                String::new(),
+                format!(
+                    "  {}  ·  {:.0} KB  ·  expires {}",
+                    app.title.as_deref().unwrap_or("(untitled)"),
+                    app.size_bytes as f64 / 1024.0,
+                    app.expires_at,
+                ),
+            ];
+            if anonymous {
+                // Only reachable once the server opens the anonymous
+                // tier — until then a token-less publish is refused with
+                // its own message. Told here, at the moment it matters,
+                // rather than buried in docs nobody reads first.
+                lines.push(String::new());
+                lines.push(
+                    "  Published anonymously, so the link lives 1 hour. Save a \
+                     thClaws.cloud token in Settings for 3 days."
+                        .into(),
+                );
+            }
+            lines
+        }
+        Err(e) => vec![format!("publish failed: {e}")],
+    }
+}

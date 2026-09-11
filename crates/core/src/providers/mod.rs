@@ -89,6 +89,20 @@ pub enum ProviderKind {
     /// `DashScope` but a different account / region / key, so it
     /// gets its own variant and `qwen-cloud/` model namespace.
     QwenCloud,
+    /// Alibaba Cloud Model Studio "SIS" workspace endpoints
+    /// (`ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1`).
+    /// Same OpenAI-compatible wire as [`DashScope`], so it follows
+    /// [`QwenCloud`]'s shape: own variant, own key, own `sis/` model
+    /// namespace, Additional tier, BYOK only (the metered gateway sells
+    /// the ten Featured providers and dropped the regional Alibaba
+    /// siblings on 2026-08-10).
+    ///
+    /// Unlike every other hosted provider it has NO default endpoint:
+    /// the host carries a workspace id, so it differs per account.
+    /// `SIS_BASE_URL` is required and `build_provider` refuses without
+    /// it — a shared default would silently route one account's traffic
+    /// into another's workspace.
+    Sis,
     ZAi,
     LMStudio,
     /// vLLM (`vllm serve`) — the standard self-hosted inference server for
@@ -270,6 +284,7 @@ impl ProviderKind {
         Self::OllamaCloud,
         Self::DashScope,
         Self::QwenCloud,
+        Self::Sis,
         Self::ZAi,
         Self::LMStudio,
         Self::VLlm,
@@ -305,6 +320,7 @@ impl ProviderKind {
             Self::OllamaCloud => "ollama-cloud",
             Self::DashScope => "dashscope",
             Self::QwenCloud => "qwen-cloud",
+            Self::Sis => "sis",
             Self::ZAi => "zai",
             Self::LMStudio => "lmstudio",
             Self::VLlm => "vllm",
@@ -364,6 +380,12 @@ impl ProviderKind {
             // reaches the upstream (which expects bare `qwen-max`,
             // `qwen-plus`, etc.).
             Self::QwenCloud => "qc/qwen-max",
+            // Bootstrap only — enough to establish a connection so the
+            // user can `/model sis/<id>` from the live roster. A SIS
+            // workspace serves whatever its owner enabled, so no id is
+            // guaranteed present; this one was verified against a real
+            // workspace on 2026-09-10.
+            Self::Sis => "sis/qwen3.8-flash",
             Self::ZAi => "zai/glm-5.2",
             // Most LMStudio installs change models constantly; this is a
             // placeholder that lets the connection establish so the user
@@ -450,6 +472,7 @@ impl ProviderKind {
             Self::NineRouter => Some("NINEROUTER_BASE_URL"),
             Self::DashScope => Some("DASHSCOPE_BASE_URL"),
             Self::QwenCloud => Some("QWENCLOUD_BASE_URL"),
+            Self::Sis => Some("SIS_BASE_URL"),
             Self::Ollama => Some("OLLAMA_BASE_URL"),
             Self::OllamaAnthropic => Some("OLLAMA_BASE_URL"),
             Self::ZAi => Some("ZAI_BASE_URL"),
@@ -643,6 +666,7 @@ impl ProviderKind {
             Self::OllamaCloud => Some("OLLAMA_CLOUD_API_KEY"),
             Self::DashScope => Some("DASHSCOPE_API_KEY"),
             Self::QwenCloud => Some("QWENCLOUD_API_KEY"),
+            Self::Sis => Some("SIS_API_KEY"),
             Self::ZAi => Some("ZAI_API_KEY"),
             Self::LMStudio => None, // Local runtime, no auth.
             // Self-hosted; auth only if started with --api-key, which
@@ -752,6 +776,7 @@ impl ProviderKind {
             | Self::OllamaCloud
             | Self::DashScope
             | Self::QwenCloud
+            | Self::Sis
             | Self::ZAi
             | Self::LMStudio
             | Self::VLlm
@@ -841,6 +866,11 @@ impl ProviderKind {
             // `qc/` prefix is stripped before the request reaches the
             // upstream so it sees the bare `qwen-*` id.
             Some(Self::QwenCloud)
+        } else if model.starts_with("sis/") {
+            // Alibaba Model Studio workspace endpoint. Models look like
+            // `sis/qwen3.8-flash`; the prefix is stripped before the
+            // request reaches the upstream, which expects the bare id.
+            Some(Self::Sis)
         } else if model.starts_with("dashscope/") {
             // Alibaba Cloud mainland DashScope routing prefix. Models look
             // like `dashscope/qwen-max`, `dashscope/deepseek-v3.2`,
@@ -1845,6 +1875,38 @@ pub async fn build_all_models_payload() -> String {
 /// a probed-reachable local runtime — in memory only — after the
 /// configured provider fails to build; this picks the preferred *paid*
 /// default when nothing is configured yet.
+/// Model ids that have left the catalogue, and what to use instead.
+///
+/// A persisted `model` counts as "explicit" at load, so the credential-aware
+/// default never re-runs for an existing workspace — a retired id would sit in
+/// `.thclaws/settings.json` forever. That is not a cosmetic problem: a model
+/// with no priced catalogue entry is not gateway-servable, so
+/// `gateway_overlay_for_model` returns `None`, routing falls through to BYOK,
+/// and a gateway user with no keys of their own gets "No keys" on a workspace
+/// that worked yesterday.
+///
+/// Both the bare id and the `deepseek/`-prefixed spelling are listed. They fail
+/// differently — the bare one matches no catalogue entry at all, while the
+/// prefixed one still resolves to OpenRouter's copy of the same retired model
+/// and would route to a DeepSeek endpoint that no longer serves it — so both
+/// need repointing.
+pub const RETIRED_MODELS: &[(&str, &str)] = &[
+    // DeepSeek retired the V4 flash line from api.deepseek.com (it left the
+    // `deepseek` catalogue block on 2026-09-10); `deepseek-flash` is the
+    // successor and is priced, hence gateway-servable.
+    ("deepseek-v4-flash", "deepseek-flash"),
+    ("deepseek/deepseek-v4-flash", "deepseek-flash"),
+];
+
+/// The successor for a retired model id, or `None` when `model` is still good.
+/// Case-insensitive to match the rest of the model-id handling here.
+pub fn retired_model_successor(model: &str) -> Option<&'static str> {
+    RETIRED_MODELS
+        .iter()
+        .find(|(old, _)| model.eq_ignore_ascii_case(old))
+        .map(|(_, new)| *new)
+}
+
 pub fn preferred_default_model(cfg: &crate::config::AppConfig) -> Option<String> {
     // On a DGX Spark appliance the box *is* the provider: AI Server's
     // gateway is already running on loopback and needs no credentials, so it
@@ -1861,7 +1923,7 @@ pub fn preferred_default_model(cfg: &crate::config::AppConfig) -> Option<String>
     // each provider's standalone default. All four are priced in the
     // catalogue, so they're gateway-servable for proxied sessions.
     const ORDER: &[(ProviderKind, &str)] = &[
-        (ProviderKind::DeepSeek, "deepseek-v4-flash"),
+        (ProviderKind::DeepSeek, "deepseek-flash"),
         (ProviderKind::DashScope, "dashscope/qwen3.7-max"),
         (ProviderKind::OpenAI, "gpt-5.5"),
         (ProviderKind::Anthropic, "claude-sonnet-4-6"),
@@ -2189,6 +2251,45 @@ mod tests {
         );
         assert!(
             ProviderKind::resolve_alias_for_provider("sonnet", ProviderKind::ThaiLLM).is_none()
+        );
+    }
+
+    #[test]
+    fn sis_is_byok_only_and_has_no_shared_default_endpoint() {
+        // `sis/` routes to the workspace endpoint; bare qwen ids keep
+        // going to mainland DashScope, so the two stay distinguishable
+        // the same way `qc/` does.
+        assert_eq!(
+            ProviderKind::detect("sis/qwen3.8-flash"),
+            Some(ProviderKind::Sis)
+        );
+        assert_eq!(
+            ProviderKind::detect("qwen-max"),
+            Some(ProviderKind::DashScope),
+            "bare qwen-* must not be captured by the sis prefix"
+        );
+        assert_eq!(ProviderKind::Sis.name(), "sis");
+        assert_eq!(ProviderKind::Sis.api_key_env(), Some("SIS_API_KEY"));
+        assert_eq!(ProviderKind::Sis.endpoint_env(), Some("SIS_BASE_URL"));
+
+        // The load-bearing one. A SIS host embeds a workspace id, so a
+        // shared default would route one account's traffic into
+        // another's workspace. `build_provider` refuses without
+        // SIS_BASE_URL; this pins the absence so nobody "fixes" it by
+        // adding a plausible-looking URL.
+        assert_eq!(
+            ProviderKind::Sis.default_endpoint(),
+            None,
+            "SIS endpoints are per-workspace — there is no default to share"
+        );
+
+        // Additional, not Featured: the metered gateway sells the ten
+        // Featured providers and dropped the regional Alibaba siblings
+        // on 2026-08-10. SIS is BYOK, like QwenCloud.
+        assert_eq!(ProviderKind::Sis.tier(), ProviderTier::Additional);
+        assert!(
+            !ProviderKind::FEATURED_ORDER.contains(&ProviderKind::Sis),
+            "SIS must not appear in the Featured order"
         );
     }
 
@@ -2591,6 +2692,63 @@ mod tests {
         assert_eq!(ProviderKind::Anthropic.default_model(), "claude-sonnet-4-6");
     }
 
+    /// Every model `preferred_default_model` can hand back must have a priced
+    /// catalogue entry, because that is exactly what makes it gateway-servable
+    /// (`gateway_overlay_for_model` → `is_priced`). When `deepseek-v4-flash`
+    /// left the `deepseek` catalogue block upstream this invariant broke
+    /// silently: the default still pointed at it, routing found no price, fell
+    /// through to BYOK, and gateway users with no keys of their own were told
+    /// "No keys". Pin the invariant rather than the one id that broke it.
+    #[test]
+    fn every_preferred_default_is_priced_and_therefore_gateway_servable() {
+        let cat = crate::model_catalogue::EffectiveCatalogue::load();
+        for (kind, model) in [
+            (ProviderKind::DeepSeek, "deepseek-flash"),
+            (ProviderKind::DashScope, "dashscope/qwen3.7-max"),
+            (ProviderKind::OpenAI, "gpt-5.5"),
+            (ProviderKind::Anthropic, "claude-sonnet-4-6"),
+        ] {
+            assert!(
+                cat.is_priced(model),
+                "{kind:?} default {model} has no priced catalogue entry, so the \
+                 gateway cannot serve it and a keyless user falls back to BYOK"
+            );
+        }
+    }
+
+    /// A workspace pinned to a retired id must land on the successor, in both
+    /// the bare and the `deepseek/`-prefixed spelling, and the successor must
+    /// itself still be a live id.
+    #[test]
+    fn retired_model_ids_repoint_to_a_live_successor() {
+        assert_eq!(
+            retired_model_successor("deepseek-v4-flash"),
+            Some("deepseek-flash")
+        );
+        assert_eq!(
+            retired_model_successor("deepseek/deepseek-v4-flash"),
+            Some("deepseek-flash")
+        );
+        // Case-insensitive, like the rest of the model-id handling.
+        assert_eq!(
+            retired_model_successor("DeepSeek-V4-Flash"),
+            Some("deepseek-flash")
+        );
+        // A live id is left alone.
+        assert_eq!(retired_model_successor("deepseek-flash"), None);
+        assert_eq!(retired_model_successor("gpt-5.5"), None);
+        // No entry may point at another retired entry, or load would need to
+        // iterate to reach a live id.
+        for (_, successor) in RETIRED_MODELS {
+            assert_eq!(
+                retired_model_successor(successor),
+                None,
+                "{successor} is itself retired — RETIRED_MODELS must map straight \
+                 to a live id"
+            );
+        }
+    }
+
     #[test]
     fn preferred_default_model_follows_deepseek_dashscope_openai_anthropic_order() {
         let _guard = PREF_ENV_LOCK.lock().unwrap();
@@ -2623,7 +2781,7 @@ mod tests {
         cfg.gateway_use_for = vec!["openai".into(), "dashscope".into(), "deepseek".into()];
         assert_eq!(
             preferred_default_model(&cfg).as_deref(),
-            Some("deepseek-v4-flash")
+            Some("deepseek-flash")
         );
 
         // None configured (no gateway route, host keys cleared) → None so
@@ -2961,5 +3119,76 @@ mod thinking_level_tests {
         assert_eq!(L::json(Some(0))["level"], 0);
         assert!(L::json(None)["level"].is_null());
         assert_eq!(L::update_payload(Some(32000))["thinking"]["name"], "high");
+    }
+}
+
+/// The HTTP client every provider streams through.
+///
+/// `reqwest::Client::new()` keeps idle connections forever and imposes
+/// no connect timeout. Over a long-lived process that is a slow leak of
+/// *latency*: the pool hands back a keep-alive socket the upstream shut
+/// hours ago, and with no connect timeout the request waits on the OS
+/// default before anything retries. The user sees a turn that produces
+/// no first token for tens of seconds, on every provider and every
+/// model, until the process restarts.
+///
+/// The three settings below are the same ones the cloud gateway adopted
+/// in June for exactly this symptom (`thclaws-cloud/gateway/src/state.rs`).
+/// A short idle timeout retires sockets before they go stale, TCP
+/// keepalive notices a dead peer, and `connect_timeout` fails a dead
+/// connection fast enough to retry cleanly.
+///
+/// Deliberately NO overall request timeout: a long generation is a
+/// legitimately long response, and a timeout here would sever it.
+pub(crate) fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .tcp_keepalive(std::time::Duration::from_secs(30))
+        .pool_idle_timeout(std::time::Duration::from_secs(20))
+        .build()
+        // A builder failure here means the TLS backend is unusable, in
+        // which case a default client would not work either. Falling
+        // back keeps construction infallible for every caller.
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+#[cfg(test)]
+mod http_client_tests {
+    /// Pins the settings, not the behaviour — reqwest exposes no getters,
+    /// so the guard this test gives is that the builder still accepts the
+    /// configuration and produces a client. The regression it exists for
+    /// is someone replacing a provider's `super::http_client()` with a
+    /// bare `Client::new()` again, which the grep in the sibling test
+    /// below catches.
+    #[test]
+    fn builds() {
+        let _ = super::http_client();
+    }
+
+    /// No provider may construct its own unconfigured client. A default
+    /// `reqwest::Client` keeps idle sockets forever and has no connect
+    /// timeout, which is how first-token latency degrades to tens of
+    /// seconds in a long-lived process.
+    #[test]
+    fn no_provider_uses_a_bare_client() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/providers");
+        let mut offenders = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("providers dir") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            if path.file_name().and_then(|n| n.to_str()) == Some("mod.rs") {
+                continue; // defines the helper + documents the anti-pattern
+            }
+            let src = std::fs::read_to_string(&path).expect("read provider");
+            if src.contains("Client::new()") {
+                offenders.push(path.file_name().unwrap().to_string_lossy().to_string());
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these providers build an unconfigured HTTP client — use super::http_client(): {offenders:?}"
+        );
     }
 }

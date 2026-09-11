@@ -386,15 +386,27 @@ async fn run_turn_from_messages(req: &ChatRequest) -> crate::error::Result<Agent
 /// prompt, parameterized by the request's model + max_tokens. Shared
 /// between the non-stream and SSE paths.
 fn build_agent(req: &ChatRequest, extra_system: Option<String>) -> crate::error::Result<Agent> {
+    build_agent_with(&req.model, req.max_tokens, extra_system)
+}
+
+/// The actual construction, parameterized rather than tied to the
+/// OpenAI request struct — `/v1/messages` builds the same agent from an
+/// Anthropic-shaped request. Keep this the ONLY place the API-surface
+/// toolset is assembled, so the two endpoints can't drift apart.
+pub(super) fn build_agent_with(
+    model: &str,
+    max_tokens: Option<u32>,
+    extra_system: Option<String>,
+) -> crate::error::Result<Agent> {
     // Load the user's full config (~/.config/thclaws + project) so the
     // configured default model is used when a caller (e.g. a widget's
     // server-side tool call going through our loopback) omits `model`
     // or sends `""`. Falls back to bare defaults if load fails.
     let mut config = AppConfig::load().unwrap_or_default();
-    if !req.model.trim().is_empty() {
-        config.model = req.model.clone();
+    if !model.trim().is_empty() {
+        config.model = model.to_string();
     }
-    if let Some(max) = req.max_tokens {
+    if let Some(max) = max_tokens {
         config.max_tokens = max;
     }
 

@@ -110,13 +110,24 @@ Ctrl-C ใช้ `.thclaws/settings.json` ตัวเดียวกับ REPL
 
 > การ redeem pairing code แบบ headless (ใส่เลข 6 หลักโดยไม่ผ่าน GUI
 > modal) เป็น follow-up ตอนนี้ทำการ pair ครั้งเดียวผ่าน GUI บน
-> เครื่องไหนก็ได้ แล้ว copy `~/.config/thclaws/messenger.json` ไปยัง
-> เครื่อง headless ได้เลย
+> เครื่องไหนก็ได้ แล้ว copy `.thclaws/messenger.json` ที่ได้ ไปยัง
+> เครื่อง headless — ให้วางในโฟลเดอร์โปรเจกต์ที่คุณจะสั่ง `--messenger`
+> เพราะ binding เป็นระดับโปรเจกต์
 
 ## Configuration
 
-state ตอน run อยู่ที่ `~/.config/thclaws/messenger.json` (GUI modal
-เป็นคนเขียน) ตั้งใจให้เล็ก — ของ sensitive ทั้งหมดอยู่ที่ relay:
+state ตอน run อยู่ที่ **`./.thclaws/messenger.json`** — เป็นระดับโปรเจกต์
+resolve จากไดเรกทอรีที่คุณเปิด thClaws และ GUI modal เป็นคนเขียน แต่ละ
+โปรเจกต์จึงเป็นเจ้าของ binding ของ Page ตัวเองแยกกัน
+
+> **เดิมอยู่ที่ `~/.config/thclaws/messenger.json`** ตอนนี้ path ระดับ
+> user เป็น legacy แล้ว จะถูกอ่านเป็น fallback เท่านั้น และเฉพาะเมื่อ
+> ตั้ง `THCLAWS_MESSENGER_USER_CONFIG=1` ระบบไม่ย้ายให้อัตโนมัติ ถ้า
+> อัปเกรดแล้ว bridge หา binding ไม่เจอ ให้ย้าย `messenger.json` เดิม
+> เข้าไปในโฟลเดอร์ `.thclaws/` ของโปรเจกต์ หรือตั้ง env ตัวนั้นไว้ก่อน
+> ระหว่างรอย้าย
+
+ไฟล์นี้ตั้งใจให้เล็ก — ของ sensitive ทั้งหมดอยู่ที่ relay:
 
 ```json
 {
@@ -240,7 +251,8 @@ quick-reply approval + connect ผ่าน GUI/headless ที่จะมา�
 | "binding token rejected" ตอน connect | JWT เก่า / โดน revoke | pair ใหม่ผ่าน GUI; binding row เก่า revoke ที่ฝั่ง relay ได้ |
 | pairing code ไม่มา | `MESSENGER_PAGE_ACCESS_TOKEN` ที่ relay ไม่ถูก | log ของ relay จะแสดง error ของ Send API; generate token ใหม่ที่ Meta แล้ว update relay |
 | คำตอบมาแต่ถูกตัด | ลิมิตต่อ message (2,000) | ตามปกติ — คำตอบยาวจะมาเป็นหลาย message Messenger รักษาลำดับให้ |
-| chip approval ไม่โผล่ | `dmPolicy` กันผู้ส่งไว้ หรือ permission mode ไม่ใช่ `messengergated` | เช็ค `thclaws messenger status` + `/permissions` ใน REPL |
+| chip approval ไม่โผล่ | permission mode ไม่ใช่ `messengergated` — มีอะไรรีเซ็ตมันเป็น `auto` | เช็ค `/permissions` ใน REPL ค่า `auto` จะรัน tool โดยไม่ถามที่ไหนเลย |
+| `messenger status` บอกว่าไม่มี binding ทั้งที่ไฟล์อยู่ | binding อยู่ที่ path ระดับ user แบบ legacy หรือคุณเปิด thClaws จากโฟลเดอร์โปรเจกต์อื่น | ย้ายไปที่ `./.thclaws/messenger.json` หรือตั้ง `THCLAWS_MESSENGER_USER_CONFIG=1` |
 | message เดียวตอบหลายครั้ง | webhook re-delivery (Meta retry ตอน deliver fail) | dedup ทำที่ relay ด้วย `mid` ถ้ายังเจอ ดู log ของ relay |
 
 ## สิ่งที่ *ไม่* อยู่ในบทนี้

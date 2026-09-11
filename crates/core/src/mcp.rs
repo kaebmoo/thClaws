@@ -24,7 +24,7 @@ use crate::tools::Tool;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -140,6 +140,119 @@ pub struct McpServerConfig {
 
 fn default_transport() -> String {
     "stdio".into()
+}
+
+/// How much of a stdio child's stderr to keep. Enough lines to carry a
+/// whole npm/uvx error block, short enough that the resulting message
+/// still fits a GUI error panel.
+const STDERR_TAIL_LINES: usize = 8;
+const STDERR_TAIL_LINE_CHARS: usize = 300;
+
+fn clip_stderr_line(line: &str) -> String {
+    if line.chars().count() <= STDERR_TAIL_LINE_CHARS {
+        return line.to_string();
+    }
+    let mut out: String = line.chars().take(STDERR_TAIL_LINE_CHARS).collect();
+    out.push('\u{2026}');
+    out
+}
+
+/// The npx install directory named in an npm error (`…/.npm/_npx/<hash>/…`).
+/// Worth lifting out verbatim: that directory is pure cache, deleting it
+/// is the fix for the half-written state npm leaves behind when an
+/// install is interrupted, and the hash is unguessable.
+fn npx_cache_dir(tail: &str) -> Option<String> {
+    let idx = tail.find("/_npx/")?;
+    let start = tail[..idx]
+        .rfind(|c: char| c.is_whitespace() || c == '\'' || c == '"')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let after = idx + "/_npx/".len();
+    let rest = tail.get(after..)?;
+    let end = rest
+        .find(|c: char| c == '/' || c == '\'' || c == '"' || c.is_whitespace())
+        .unwrap_or(rest.len());
+    if end == 0 {
+        return None;
+    }
+    Some(format!("{}{}", &tail[start..after], &rest[..end]))
+}
+
+/// Map a dead child's stderr onto the command that fixes it. Only
+/// fingerprints we are sure about — a wrong suggestion costs the reader
+/// more than no suggestion.
+fn stderr_fix_hint(tail: &str) -> Option<String> {
+    let broken_install = [
+        "ENOTEMPTY",
+        "EEXIST",
+        "ENOTDIR",
+        "Cannot find module",
+        "ERR_MODULE_NOT_FOUND",
+    ];
+    if broken_install.iter().any(|p| tail.contains(p)) {
+        if let Some(dir) = npx_cache_dir(tail) {
+            return Some(format!(
+                "rm -rf {dir} — that npx cache entry is half-written (an install was interrupted); \
+                 it re-downloads on the next start"
+            ));
+        }
+    }
+    if tail.contains("Executable doesn't exist") || tail.contains("playwright install") {
+        return Some(
+            "npx playwright install chromium — the browser binary the server drives is missing"
+                .into(),
+        );
+    }
+    if tail.contains("ETARGET") || tail.contains("404 Not Found") {
+        return Some(
+            "check the package name/version in this server's command/args — the registry has no \
+             such version"
+                .into(),
+        );
+    }
+    if tail.contains("EACCES") || tail.to_lowercase().contains("permission denied") {
+        return Some(
+            "something in the install cache is not writable — fix its ownership, or delete the \
+             cache directory and retry"
+                .into(),
+        );
+    }
+    if ["ENOTFOUND", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN"]
+        .iter()
+        .any(|p| tail.contains(p))
+    {
+        return Some(
+            "the package registry was unreachable — check network/proxy, then retry".into(),
+        );
+    }
+    None
+}
+
+/// Compose what a failed stdio start-up reports: the protocol-level
+/// error, the child's own last words, and a fix when we can name one.
+/// Without the stderr block the user sees only `mcp transport closed`,
+/// which names the symptom and nothing else.
+fn start_failure_message(command: &str, err: &Error, tail: &[String]) -> String {
+    // Unwrap `Provider` rather than Display it: the caller re-wraps the
+    // result in the same variant, and "provider error: provider error:"
+    // is what that reads like otherwise.
+    let mut msg = match err {
+        Error::Provider(s) => s.clone(),
+        other => other.to_string(),
+    };
+    if tail.is_empty() {
+        return msg;
+    }
+    msg.push_str(&format!("\n`{command}` stderr:\n"));
+    for line in tail {
+        msg.push_str("  ");
+        msg.push_str(line);
+        msg.push('\n');
+    }
+    if let Some(hint) = stderr_fix_hint(&tail.join("\n")) {
+        msg.push_str(&format!("fix: {hint}"));
+    }
+    msg.trim_end().to_string()
 }
 
 // ── MCP stdio spawn allowlist ────────────────────────────────────────
@@ -377,6 +490,12 @@ pub struct McpClient {
     /// `Some("")` is treated as no-op; the renderer trims + skips
     /// empty strings.
     instructions: Mutex<Option<String>>,
+    /// Last few stderr lines from a stdio child, newest last. A
+    /// launcher (`npx`, `uvx`) that dies before the handshake leaves
+    /// the client nothing but EOF — its stderr is the only place that
+    /// says why, so we keep a bounded tail and attach it to the
+    /// start-up error. Always empty for HTTP transports.
+    stderr_tail: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl Drop for McpClient {
@@ -461,6 +580,7 @@ impl McpClient {
             trusted,
             closed,
             instructions: Mutex::new(None),
+            stderr_tail: Arc::new(Mutex::new(VecDeque::new())),
         })
     }
 
@@ -521,7 +641,10 @@ impl McpClient {
         cmd.args(&config.args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            // Captured, not discarded: when a launcher dies before the
+            // handshake all this client sees is EOF, and the reason
+            // ("npm error code ENOTEMPTY") lives only here.
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         for (k, v) in &config.env {
             cmd.env(k, v);
@@ -539,10 +662,50 @@ impl McpClient {
             .take()
             .ok_or_else(|| Error::Provider("mcp: child had no stdout".into()))?;
 
+        let stderr = child.stderr.take();
+
         let client = Self::from_streams(config.name.clone(), stdout, stdin, config.trusted);
+        let stderr_task = stderr.map(|stderr| {
+            let buf = client.stderr_tail.clone();
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let line = line.trim_end();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if let Ok(mut buf) = buf.lock() {
+                        if buf.len() == STDERR_TAIL_LINES {
+                            buf.pop_front();
+                        }
+                        buf.push_back(clip_stderr_line(line));
+                    }
+                }
+            })
+        });
         *client._child.lock().unwrap() = Some(child);
-        client.initialize().await?;
+        if let Err(e) = client.initialize().await {
+            // The child is dead or wedged; either way its stderr pump
+            // ends at EOF, so a short join collects the full tail
+            // before we report instead of racing it.
+            if let Some(task) = stderr_task {
+                let _ = timeout(Duration::from_millis(750), task).await;
+            }
+            return Err(Error::Provider(start_failure_message(
+                &config.command,
+                &e,
+                &client.stderr_tail_lines(),
+            )));
+        }
         Ok(client)
+    }
+
+    /// Snapshot of the child's captured stderr tail, oldest first.
+    fn stderr_tail_lines(&self) -> Vec<String> {
+        self.stderr_tail
+            .lock()
+            .map(|b| b.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Connect to an HTTP MCP server. Each JSON-RPC call is an independent
@@ -904,7 +1067,14 @@ impl McpClient {
         // legitimately race with shutdown — gate only the
         // request/response path here.
         if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(Error::Provider("mcp transport closed".into()));
+            // A server that crashes mid-session takes its tools with
+            // it; carry its last stderr line so the turn says what
+            // died, not just that something did.
+            let mut msg = "mcp transport closed".to_string();
+            if let Some(last) = self.stderr_tail_lines().last() {
+                msg.push_str(&format!(" (last stderr: {last})"));
+            }
+            return Err(Error::Provider(msg));
         }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
@@ -2029,6 +2199,79 @@ mod tests {
         assert!(browser.args.iter().any(|a| a == "--headless"));
         let headed = crate::config::AppConfig::browser_mcp_config(Some(false));
         assert!(!headed.args.iter().any(|a| a == "--headless"));
+    }
+
+    /// A stdio server whose launcher dies before the handshake must
+    /// report the launcher's own stderr and the command that fixes it.
+    /// Before this, every such failure read only "mcp transport
+    /// closed" — the symptom, with the cause thrown away by
+    /// `Stdio::null()`.
+    #[tokio::test]
+    async fn stdio_start_failure_reports_child_stderr_and_fix() {
+        let cfg = McpServerConfig {
+            name: "browser".into(),
+            transport: "stdio".into(),
+            command: "sh".into(),
+            args: vec![
+                "-c".into(),
+                "echo \"npm error code ENOTEMPTY\" >&2; \
+                 echo \"npm error ENOTEMPTY: directory not empty, rename \
+                 '/home/u/.npm/_npx/9833c18b2d85bc59/node_modules/playwright'\" >&2; \
+                 exit 1"
+                    .into(),
+            ],
+            env: HashMap::new(),
+            url: String::new(),
+            headers: HashMap::new(),
+            trusted: false,
+            // Skips the allowlist prompt, as the injected `browser`
+            // server does in the real failure this reproduces.
+            engine_managed: true,
+        };
+
+        let err = McpClient::spawn(cfg).await.unwrap_err().to_string();
+        assert!(err.contains("transport closed"), "got: {err}");
+        assert!(err.contains("ENOTEMPTY"), "stderr tail missing: {err}");
+        assert!(
+            err.contains("rm -rf /home/u/.npm/_npx/9833c18b2d85bc59"),
+            "fix hint missing: {err}"
+        );
+    }
+
+    #[test]
+    fn npx_cache_dir_lifted_from_npm_error() {
+        let tail = "npm error ENOTEMPTY: directory not empty, rename \
+                    '/Users/j/.npm/_npx/9833c18b2d85bc59/node_modules/playwright' -> '...'";
+        assert_eq!(
+            npx_cache_dir(tail).as_deref(),
+            Some("/Users/j/.npm/_npx/9833c18b2d85bc59")
+        );
+        assert_eq!(npx_cache_dir("nothing to see here"), None);
+    }
+
+    /// Silence beats a guess: stderr we can't fingerprint gets the raw
+    /// tail and no invented fix.
+    #[test]
+    fn stderr_fix_hint_stays_quiet_on_unknown_shapes() {
+        assert!(stderr_fix_hint("Traceback (most recent call last): KeyError").is_none());
+        assert!(stderr_fix_hint("ENOTEMPTY with no path at all").is_none());
+        assert!(
+            stderr_fix_hint("Error: Executable doesn't exist at /ms-playwright")
+                .unwrap()
+                .contains("playwright install")
+        );
+        assert!(stderr_fix_hint("npm error code ETARGET")
+            .unwrap()
+            .contains("registry has no"));
+    }
+
+    #[test]
+    fn start_failure_message_keeps_error_when_stderr_is_empty() {
+        let err = Error::Provider("mcp transport closed".into());
+        assert_eq!(
+            start_failure_message("npx", &err, &[]),
+            "mcp transport closed"
+        );
     }
 
     /// Build a client + a paired server IO that cleanly signals EOF when

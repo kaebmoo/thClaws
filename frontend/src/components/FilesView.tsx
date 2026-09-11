@@ -18,6 +18,7 @@ import {
   Code2,
   Type,
   ListTree,
+  Globe,
 } from "lucide-react";
 import { send, subscribe } from "../hooks/useIPC";
 import { assetUrl, workspacePrefix } from "../lib/assetUrl";
@@ -1843,6 +1844,24 @@ export function FilesView({ active }: Props) {
                 onClick={() => {
                   downloadFile(entryMenu.path);
                   setEntryMenu(null);
+                }}
+              />
+            )}
+            {/* HTML-only: hand the path to `/publish`. Deliberately a
+                `shell_input` rather than a dedicated IPC — the slash
+                command already validates, reads through the sandbox and
+                reports refusals (no token, no credit, too big), and
+                routing through it means the URL lands in the
+                conversation where it can be copied, instead of in a
+                toast that disappears. No backend change at all. */}
+            {!entryMenu.isDir && /\.(html|htm)$/i.test(entryMenu.name) && (
+              <MenuItem
+                icon={<Globe size={13} />}
+                label="Publish to the web…"
+                onClick={() => {
+                  const m = entryMenu;
+                  setEntryMenu(null);
+                  send({ type: "shell_input", text: `/publish ${m.path}` });
                 }}
               />
             )}

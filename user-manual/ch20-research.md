@@ -201,7 +201,7 @@ follows each. The KMS sidebar's page context menu has the same action
 |---|---|---|
 | `--kms <name>` | the most recently attached KMS, else a new one named from the query | Target KMS. `--kms new` forces a fresh KMS. The KMS a run writes into is attached to the project automatically, so consecutive queries keep building the same graph. |
 | `--lang th\|en\|…` | `th` | Language of note bodies, claim text and titles. Technical terms, model/API names and code stay in English in every language. `--lang query` follows the query's language. |
-| `--max-notes N` | 30 (max 50) | Ceiling on notes per run including the topic page. Thin entities are merged into their parent rather than dropped. |
+| `--max-notes N` | 30 | Ceiling on notes per run including the topic page. Thin entities are merged into their parent rather than dropped. **From the slash command the accepted range is 1–20** — the default of 30 and the pipeline's hard ceiling of 50 are only reachable by leaving the flag off. |
 | `--min-iter N` / `--max-iter N` | 2 / 4 | Round floor and ceiling. |
 | `--novelty 0.X` | 0.35 | Stop when a round adds fewer new entities than this share. `1.0` = always run to `--max-iter`. |
 | `--worker-model <id>` | your current model | Model for digests, gap queries, the plan and note bodies. thClaws never switches models on your behalf; name one here if you want research to run on a faster model than your chat model. |
@@ -210,7 +210,17 @@ follows each. The KMS sidebar's page context menu has the same action
 | `--budget-time 20m` | 25m | Wall-clock ceiling; the job ends as failed past it. |
 | `--legacy` | off | The pre-v0.121 page pipeline (`--max-pages`, `--score-threshold`, verify pass). Removed in a later release. |
 
-`--max-pages` is accepted as an alias of `--max-notes`.
+`--max-pages` is accepted as an alias of `--max-notes`, with the same 1–20 range.
+
+> **A rejected flag value becomes part of your query.** The parser eats
+> flags greedily from the front and stops at the first thing it doesn't
+> recognise, so that `/research --opinion of the user` researches that
+> phrase rather than erroring. The side effect is that a *known* flag
+> with an out-of-range or unparseable value — `--max-notes 30`,
+> `--novelty 5`, `--max-iter abc` — is not an error either: parsing stops
+> there and the flag text is prepended to the query. If a run comes back
+> with a topic page about your own flags, that is what happened. Check
+> the echoed query on the `[research started: …]` line.
 
 ## Why the worker model matters
 

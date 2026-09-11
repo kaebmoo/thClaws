@@ -37,7 +37,7 @@ DB เก็บเป็น microcent ต่อ 1k token (`µ¢/kt`) สูต�
 
 context ที่มี **`?`** คือค่าที่ provider ไม่เคยประกาศ — เป็นค่า default ของ provider นั้นที่ใส่ไว้เพราะถ้าเว้นว่างจะทำให้ตัวเลือกโมเดลพัง ให้ถือเป็นขอบล่าง ไม่ใช่สเปกจริง
 
-632 โมเดล จาก 14 provider
+626 โมเดล จาก 14 provider
 
 ### Anthropic
 
@@ -223,9 +223,9 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `cohere/command-r-plus-08-2024` | 128k | $3.12 | — | $12.50 |
 | `cohere/command-r7b-12-2024` | 128k | $0.05 | — | $0.19 |
 | `cohere/north-mini-code:free` | 256k | free | — | free |
-| `deepseek/deepseek-chat` | 164k | $0.40 | — | $1.11 |
-| `deepseek/deepseek-chat-v3-0324` | 164k | $0.31 | — | $1.25 |
-| `deepseek/deepseek-chat-v3.1` | 33k | $0.69 | — | $2.06 |
+| `deepseek/deepseek-chat` | 164k | $0.32 | — | $1.29 |
+| `deepseek/deepseek-chat-v3-0324` | 164k | $0.36 | — | $1.42 |
+| `deepseek/deepseek-chat-v3.1` | 33k | $0.31 | — | $1.19 |
 | `deepseek/deepseek-r1` | 64k | $0.88 | — | $3.12 |
 | `deepseek/deepseek-r1-0528` | 164k | $0.62 | — | $2.69 |
 | `deepseek/deepseek-r1-distill-llama-70b` | 131k | $1.00 | — | $1.00 |
@@ -233,10 +233,11 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `deepseek/deepseek-v3.2` | 131k | $0.34 | — | $0.50 |
 | `deepseek/deepseek-v3.2-exp` | 164k | $0.34 | — | $0.51 |
 | `deepseek/deepseek-v4-flash` | 1.04858M | $0.11 | — | $0.22 |
-| `deepseek/deepseek-v4-flash-0731` | 1.04858M | $0.18 | — | $0.35 |
-| `deepseek/deepseek-v4-flash-vision-exp` | 1.04858M | $0.55 | — | $1.65 |
-| `deepseek/deepseek-v4-pro` | 1.04858M | $1.29 | — | $2.59 |
-| `deepseek/deepseek-v4-pro-0813` | 1.04858M | $1.40 | — | $4.20 |
+| `deepseek/deepseek-v4-flash-0731` | 1.04858M | $0.08 | — | $0.22 |
+| `deepseek/deepseek-v4-flash-vision-exp` | 1.04858M | $0.28 | — | $0.83 |
+| `deepseek/deepseek-v4-pro` | 1.04858M | $1.19 | — | $2.39 |
+| `deepseek/deepseek-v4-pro-0813` | 1.04858M | $1.31 | — | $3.94 |
+| `deepseek/deepseek-v4.1-flash` | 1.04858M | $0.38 | — | $1.50 |
 | `dots-studio/dots-3-note-preview:free` | 512k | free | — | free |
 | `google/gemini-2.5-flash` | 1.04858M | $0.38 | — | $3.12 |
 | `google/gemini-2.5-flash-lite` | 1.04858M | $0.12 | $0.01 | $0.50 |
@@ -260,25 +261,26 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `google/gemma-3-12b-it` | 131k | $0.06 | — | $0.19 |
 | `google/gemma-3-27b-it` | 131k | $0.10 | — | $0.56 |
 | `google/gemma-3-4b-it` | 131k | $0.06 | — | $0.12 |
-| `google/gemma-4-26b-a4b-it` | 262k | $0.09 | — | $0.43 |
+| `google/gemma-4-26b-a4b-it` | 262k | $0.05 | — | $0.28 |
 | `google/gemma-4-26b-a4b-it:free` | 262k | free | — | free |
 | `google/gemma-4-31b-it` | 262k | $0.11 | — | $0.43 |
 | `google/gemma-4-31b-it:free` | 262k | free | — | free |
 | `gryphe/mythomax-l2-13b` | 4k | $0.07 | — | $0.07 |
 | `ibm-granite/granite-4.0-h-micro` | 131k | $0.02 | — | $0.14 |
-| `ibm-granite/granite-4.2-8b` | 131k | $0.12 | — | $0.19 |
+| `ibm-granite/granite-4.2-8b` | 131k | $0.07 | — | $0.31 |
 | `inception/mercury-2` | 128k | $0.31 | $0.03 | $0.94 |
-| `inception/mercury-2.5-preview` | 260k | $0.05 | — | $0.19 |
+| `inception/mercury-2.5` | 260k | $0.05 | — | $0.19 |
 | `inclusionai/ling-3.0-flash` | 262k | $0.03 | — | $0.08 |
 | `inclusionai/ling-3.0-flash-fin` | 262k | $0.07 | — | $0.22 |
 | `inclusionai/ling-3.0-flash-fin:free` | 262k | free | — | free |
 | `inclusionai/ling-3.0-flash-sante:free` | 262k | free | — | free |
+| `inclusionai/ling-3.0-flash-vl:free` | 262k | free | — | free |
 | `kwaipilot/kat-coder-pro-v2` | 256k | $0.38 | — | $1.50 |
 | `kwaipilot/kat-coder-pro-v2.5` | 256k | $0.93 | — | $3.70 |
 | `liquid/lfm-2.5-2.6b:free` | 66k | free | — | free |
 | `mancer/weaver` | 8k | $0.50 | — | $0.94 |
 | `meituan/longcat-2.0` | 1.04876M | $0.38 | — | $1.50 |
-| `meta-llama/llama-3.1-70b-instruct` | 131k | $0.50 | — | $0.50 |
+| `meta-llama/llama-3.1-70b-instruct` | 131k | $0.90 | — | $0.90 |
 | `meta-llama/llama-3.1-8b-instruct` | 16k | $0.06 | — | $0.10 |
 | `meta-llama/llama-3.2-1b-instruct` | 60k | $0.03 | — | $0.25 |
 | `meta-llama/llama-3.2-3b-instruct` | 80k | $0.06 | — | $0.41 |
@@ -299,11 +301,9 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `minimax/minimax-m2` | 197k | $0.32 | — | $1.27 |
 | `minimax/minimax-m2-her` | 66k | $0.38 | — | $1.50 |
 | `minimax/minimax-m2.1` | 197k | $0.38 | free | $1.50 |
-| `minimax/minimax-m2.5` | 197k | $0.34 | $0.19 | $1.35 |
+| `minimax/minimax-m2.5` | 197k | $0.38 | $0.19 | $1.50 |
 | `minimax/minimax-m2.7` | 197k | $0.38 | — | $1.50 |
-| `minimax/minimax-m2.7:free` | 197k | free | — | free |
 | `minimax/minimax-m3` | 1.04858M | $0.38 | — | $1.50 |
-| `minimax/minimax-m3:free` | 1.04858M | free | — | free |
 | `mistralai/codestral-2508` | 256k | $0.38 | — | $1.12 |
 | `mistralai/devstral-2512` | 262k | $0.50 | — | $2.50 |
 | `mistralai/ministral-14b-2512` | 262k | $0.25 | — | $0.25 |
@@ -328,16 +328,15 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `moonshotai/kimi-k2-thinking` | 262k | $0.75 | — | $3.12 |
 | `moonshotai/kimi-k2.5` | 262k | $0.56 | $0.12 | $2.81 |
 | `moonshotai/kimi-k2.6` | 256k | $1.19 | — | $5.00 |
-| `moonshotai/kimi-k2.7-code` | 262k | $0.83 | — | $4.25 |
-| `moonshotai/kimi-k3` | 1.04858M | $3.75 | — | $18.75 |
+| `moonshotai/kimi-k2.7-code` | 262k | $0.89 | — | $4.38 |
+| `moonshotai/kimi-k3` | 1.04858M | $2.92 | — | $14.62 |
 | `morph/morph-v3-fast` | 82k | $1.00 | — | $1.50 |
 | `morph/morph-v3-large` | 262k | $1.12 | — | $2.38 |
-| `nex-agi/nex-n2-mini` | 262k | $0.03 | — | $0.12 |
-| `nex-agi/nex-n2-pro` | 262k | $0.31 | — | $1.25 |
+| `nex-agi/nex-n2.5-mini:free` | 262k | free | — | free |
+| `nex-agi/nex-n2.5-pro:free` | 262k | free | — | free |
 | `nousresearch/hermes-3-llama-3.1-405b` | 131k | $1.25 | — | $1.25 |
 | `nousresearch/hermes-3-llama-3.1-70b` | 131k | $0.88 | — | $0.88 |
 | `nousresearch/hermes-4-405b` | 131k | $1.25 | — | $3.75 |
-| `nousresearch/hermes-4-70b` | 131k | $0.16 | — | $0.50 |
 | `nvidia/nemotron-3-nano-30b-a3b` | 262k | $0.06 | — | $0.25 |
 | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | 256k | free | — | free |
 | `nvidia/nemotron-3-super-120b-a12b` | 262k | $0.11 | — | $0.50 |
@@ -403,11 +402,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `openai/o3-pro` | 200k | $25.00 | — | $100.00 |
 | `openai/o4-mini` | 200k | $1.38 | $0.34 | $5.50 |
 | `openai/o4-mini-high` | 200k | $1.38 | — | $5.50 |
-| `openrouter/auto-beta` | 2M | $-1250000 | — | $-1250000 |
-| `openrouter/bodybuilder` | 128k | $-1250000 | — | $-1250000 |
 | `openrouter/free` | 200k | free | — | free |
-| `openrouter/fusion` | 1M | $-1250000 | — | $-1250000 |
-| `openrouter/pareto-code` | 200k | $-1250000 | — | $-1250000 |
 | `perceptron/perceptron-mk1` | 33k | $0.19 | — | $1.88 |
 | `perplexity/sonar` | 127k | $1.25 | — | $1.25 |
 | `perplexity/sonar-deep-research` | 128k | $2.50 | — | $10.00 |
@@ -424,12 +419,12 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `qwen/qwen-plus` | 1M | $0.33 | — | $0.98 |
 | `qwen/qwen-plus-2025-07-28` | 1M | $0.33 | — | $0.98 |
 | `qwen/qwen2.5-vl-72b-instruct` | 32k | $1.00 | — | $1.25 |
-| `qwen/qwen3-14b` | 41k | $0.15 | — | $0.30 |
+| `qwen/qwen3-14b` | 41k | $0.28 | — | $1.14 |
 | `qwen/qwen3-235b-a22b` | 131k | $0.57 | — | $2.27 |
-| `qwen/qwen3-235b-a22b-2507` | 262k | $0.11 | — | $0.69 |
+| `qwen/qwen3-235b-a22b-2507` | 262k | $0.28 | — | $1.10 |
 | `qwen/qwen3-235b-a22b-thinking-2507` | 131k | $0.29 | — | $2.88 |
 | `qwen/qwen3-30b-a3b` | 41k | $0.15 | — | $0.62 |
-| `qwen/qwen3-30b-a3b-instruct-2507` | 262k | $0.06 | — | $0.24 |
+| `qwen/qwen3-30b-a3b-instruct-2507` | 262k | $0.11 | — | $0.38 |
 | `qwen/qwen3-30b-a3b-thinking-2507` | 131k | $0.25 | — | $3.00 |
 | `qwen/qwen3-32b` | 41k | $0.10 | — | $0.35 |
 | `qwen/qwen3-8b` | 41k | $0.15 | — | $0.57 |
@@ -440,7 +435,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `qwen/qwen3-coder-plus` | 1M | $0.81 | — | $4.06 |
 | `qwen/qwen3-max` | 262k | $0.98 | — | $4.88 |
 | `qwen/qwen3-max-thinking` | 262k | $0.98 | — | $4.88 |
-| `qwen/qwen3-next-80b-a3b-instruct` | 262k | $0.12 | — | $1.38 |
+| `qwen/qwen3-next-80b-a3b-instruct` | 262k | $0.11 | — | $1.38 |
 | `qwen/qwen3-next-80b-a3b-thinking` | 131k | $0.19 | — | $1.50 |
 | `qwen/qwen3-vl-235b-a22b-instruct` | 262k | $0.26 | — | $2.38 |
 | `qwen/qwen3-vl-235b-a22b-thinking` | 131k | $0.50 | — | $5.00 |
@@ -449,10 +444,10 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `qwen/qwen3-vl-32b-instruct` | 131k | $0.13 | — | $0.52 |
 | `qwen/qwen3-vl-8b-instruct` | 131k | $0.15 | — | $0.57 |
 | `qwen/qwen3-vl-8b-thinking` | 131k | $0.22 | — | $2.62 |
-| `qwen/qwen3.5-122b-a10b` | 262k | $0.36 | — | $3.00 |
+| `qwen/qwen3.5-122b-a10b` | 262k | $0.33 | — | $2.60 |
 | `qwen/qwen3.5-27b` | 262k | $0.24 | — | $1.95 |
 | `qwen/qwen3.5-35b-a3b` | 262k | $0.39 | — | $1.56 |
-| `qwen/qwen3.5-397b-a17b` | 262k | $0.49 | — | $2.92 |
+| `qwen/qwen3.5-397b-a17b` | 262k | $0.69 | — | $4.38 |
 | `qwen/qwen3.5-9b` | 262k | $0.12 | — | $0.19 |
 | `qwen/qwen3.5-flash-02-23` | 1M | $0.08 | — | $0.33 |
 | `qwen/qwen3.5-plus-02-15` | 1M | $0.33 | — | $1.95 |
@@ -496,7 +491,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `thinkingmachines/inkling:free` | 262k | free | — | free |
 | `undi95/remm-slerp-l2-13b` | 6k | $0.44 | — | $0.81 |
 | `upstage/solar-pro-3` | 131k | $0.19 | — | $0.75 |
-| `upstage/solar-pro4` | 524k | $0.04 | — | $0.15 |
+| `upstage/solar-pro4` | 524k | $0.11 | — | $0.45 |
 | `writer/palmyra-x5` | 1.04M | $0.75 | — | $7.50 |
 | `x-ai/grok-4.20` | 2M | $1.56 | — | $3.12 |
 | `x-ai/grok-4.20-multi-agent` | 2M | $1.56 | — | $3.12 |
@@ -512,13 +507,13 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `z-ai/glm-4.6` | 205k | $0.54 | — | $2.19 |
 | `z-ai/glm-4.6v` | 131k | $0.38 | — | $1.12 |
 | `z-ai/glm-4.7` | 203k | $0.50 | free | $2.19 |
-| `z-ai/glm-4.7-flash` | 203k | $0.07 | free | $0.50 |
+| `z-ai/glm-4.7-flash` | 203k | $0.08 | free | $0.50 |
 | `z-ai/glm-5` | 203k | $0.75 | — | $2.40 |
 | `z-ai/glm-5-turbo` | 203k | $1.50 | — | $5.00 |
 | `z-ai/glm-5.1` | 203k | $1.21 | — | $3.79 |
 | `z-ai/glm-5.2` | 1.04858M | $1.21 | — | $3.79 |
 | `z-ai/glm-5.3` | 1.04858M | $1.75 | — | $5.50 |
-| `z-ai/glm-5.3-flash` | 1.31072M | $0.09 | — | $0.31 |
+| `z-ai/glm-5.3-flash` | 1.31072M | $0.19 | — | $0.62 |
 | `z-ai/glm-5v-turbo` | 203k | $1.50 | — | $5.00 |
 | `~anthropic/claude-fable-latest` | 1M | $12.50 | — | $62.50 |
 | `~anthropic/claude-haiku-latest` | 200k | $1.25 | — | $6.25 |
@@ -526,7 +521,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `~anthropic/claude-sonnet-latest` | 1M | $2.50 | — | $12.50 |
 | `~google/gemini-flash-latest` | 1.04858M | $0.94 | $0.04 | $4.69 |
 | `~google/gemini-pro-latest` | 1.04858M | $2.50 | $0.16 | $15.00 |
-| `~moonshotai/kimi-latest` | 256k | $3.19 | — | $15.94 |
+| `~moonshotai/kimi-latest` | 256k | $2.92 | — | $14.62 |
 | `~openai/gpt-latest` | 1.05M | $2.50 | — | $12.50 |
 | `~openai/gpt-mini-latest` | 400k | $0.94 | — | $5.62 |
 
@@ -666,11 +661,10 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 
 ### DeepSeek
 
-| Model | Context | Input ($/M) | Output ($/M) |
-|---|---:|---:|---:|
-| `deepseek-v4-flash` | 1.04858M | $0.18 | $0.35 |
-| `deepseek-v4-flash-vision-exp` | 262k? | $0.18 | $0.35 |
-| `deepseek-v4-pro` | 1.04858M | $0.54 | $1.09 |
+| Model | Context | Input ($/M) | Cached in ($/M) | Output ($/M) |
+|---|---:|---:|---:|---:|
+| `deepseek-flash` | 1.04858M | $0.43 | $0.0086 | $1.72 |
+| `deepseek-v4-pro` | 1.04858M | $1.90 | $0.06 | $5.69 |
 
 ### MiniMax
 

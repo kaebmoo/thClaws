@@ -1291,7 +1291,6 @@ pub async fn dispatch(
             max_iter,
             score_threshold_pct,
             max_pages,
-            budget_tokens: _,
             budget_time_secs,
             max_notes,
             novelty_pct,
@@ -3925,6 +3924,19 @@ pub async fn dispatch(
                 let _ = events_tx_clone.send(ViewEvent::SlashOutput(format!(
                     "[deploy] finished (exit code {code})"
                 )));
+            });
+        }
+        SlashCommand::PublishApp { path } => {
+            let cloud_cfg = crate::config::ProjectConfig::load().and_then(|c| c.cloud.clone());
+            let events_tx_clone = events_tx.clone();
+            // Spawned: the upload is network-bound and the chat tab must
+            // stay responsive, same as every other cloud command here.
+            tokio::spawn(async move {
+                for line in
+                    crate::cloud::cmd::publish_app_lines(&path, None, cloud_cfg.as_ref()).await
+                {
+                    let _ = events_tx_clone.send(ViewEvent::SlashOutput(line));
+                }
             });
         }
         SlashCommand::Cloud(sub) => {

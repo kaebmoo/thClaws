@@ -157,6 +157,9 @@ land at `output/vid-<ts>-<hash>.mp4` once finished.
 | `TextToVideo` | prompt | Prompt → video (async job) |
 | `ImageToVideo` | prompt | Source image as first frame + prompt → video (async job) |
 | `MediaJobStatus` | auto | Poll an async video job by `job_id` → `running` / `done` (path) / `failed` |
+| `TextToSpeech` | prompt | Text → speech audio (Gemini TTS). Written to `output/` like the other media, so a long narration never travels through the conversation |
+| `RenderSlides` | prompt | A Marp markdown deck → PDF + one PNG per slide, via the thClaws slide-render service |
+| `QuizRender` | prompt | Renders a generated study quiz into a playable artifact — what `/quiz` calls |
 
 **Models & keys** (choose with the `model` argument):
 
@@ -171,7 +174,7 @@ land at `output/vid-<ts>-<hash>.mp4` once finished.
   job and return a `job_id` immediately — the file isn't ready yet. Call
   `MediaJobStatus { job_id }` to poll: `running`, `done` (with the saved
   `output/…mp4` path), or `failed` (with the provider error). Job state
-  is journalled to `.thclaws/media-jobs.jsonl`, so a poll survives a
+  is journalled to `.thclaws/state/media-jobs.jsonl`, so a poll survives a
   restart.
 - **Clips are 4–8 seconds.** `resolution` is honoured by LTX and
   HappyHorse (`720P` / `1080P`, plus `4K` on LTX); Veo ignores it and
@@ -215,7 +218,7 @@ chat.
 | Tool | Approval | What it does |
 |---|---|---|
 | `WatchVideo` | prompt | Lets the model **watch** a local video: pulls scene-aware key frames (so it can *see* what happens) + a Whisper transcript when `GROQ_API_KEY` is set. Use it to review or critique a clip. |
-| `FilmCompile` / `FilmGenerate` / `FilmJobStatus` / `FilmJobCancel` / `FilmAssetImport` | `FilmGenerate` + `FilmAssetImport` prompt | The **Movie Maker** toolkit — turn a `.film` screenplay into a finished AI video. Hidden until you install the Movie Maker agent (which opens the `filmscript` gate). `FilmGenerate` needs a `budgetUsd` — that's your spend cap + consent. See Chapter 29. |
+| `FilmCompile` / `FilmGenerate` / `FilmJobStatus` / `FilmJobCancel` / `FilmAssetImport` | `FilmGenerate` + `FilmAssetImport` prompt | The **Movie Maker** toolkit — turn a `.film` screenplay into a finished AI video. Hidden until you install the Movie Maker agent (which opens the `filmscript` gate). `FilmGenerate` needs a `budgetUsd` — that's your spend cap + consent. Movie Maker is a catalog agent, not part of the engine: install it with `/cloud get movie-maker-2` and it ships its own guide. |
 
 ## Other tools
 
@@ -305,6 +308,7 @@ them to report progress and decide when to stop.
 | `KmsAppend` | prompt | Append content to an existing page |
 | `KmsDelete` | prompt | Remove a page (last resort; prefer KmsWrite to merge or supersede) |
 | `KmsCreate` | auto | Ensure a KMS exists (idempotent). Used by `/dream` to bootstrap the `dreams` audit KMS. |
+| `KmsWriteSource` | prompt | Save a fetched web page into the KMS's `sources/` directory as an **offline** reference — the raw layer-1 input that a synthesis page cites, kept so a page's evidence survives the URL going away |
 
 These are **always registered** regardless of whether a KMS is currently active. Pre-fix the registration was gated on `kms_active` being non-empty, which silently broke `/dream` and other side-channel agents that need to bootstrap an audit KMS from a zero state. The model sees each active KMS's `index.md` in the system prompt and calls these tools to pull in specific pages on demand.
 

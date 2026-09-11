@@ -1059,6 +1059,7 @@ pub fn provider_kind_name(k: crate::providers::ProviderKind) -> &'static str {
         ProviderKind::OllamaCloud => "ollama-cloud",
         ProviderKind::DashScope => "dashscope",
         ProviderKind::QwenCloud => "qwen-cloud",
+        ProviderKind::Sis => "sis",
         ProviderKind::ZAi => "zai",
         ProviderKind::LMStudio => "lmstudio",
         ProviderKind::VLlm => "vllm",
@@ -2136,7 +2137,26 @@ mod tests {
 
 #[cfg(test)]
 mod known_model_tests {
-    use super::is_known_model;
+    use super::{is_known_model, EffectiveCatalogue};
+
+    /// Any id the catalogue currently carries for `provider`. Taking the
+    /// fixture from the catalogue rather than naming a model is the whole
+    /// point: this test used to assert on `deepseek-v4-flash`, DeepSeek
+    /// renamed it to `deepseek-flash` on 2026-09-10, and the test failed —
+    /// which is precisely the scenario its own doc comment describes. A
+    /// hardcoded vendor id has the vendor's lifetime, not ours.
+    fn any_id_for(provider: &str) -> String {
+        let cat = EffectiveCatalogue::load();
+        let mut ids: Vec<String> = cat
+            .list_models_for_provider(provider)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        ids.sort();
+        ids.into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("catalogue carries no models for {provider}"))
+    }
 
     /// A skill's `model:` ages out — the vendor retires the id while the
     /// frontmatter still names it — and switching onto an id the catalogue no
@@ -2145,10 +2165,14 @@ mod known_model_tests {
     /// write: bare, and vendor-prefixed.
     #[test]
     fn known_ids_are_recognised_bare_and_vendor_prefixed() {
-        assert!(is_known_model("deepseek-v4-flash"));
-        assert!(is_known_model("deepseek/deepseek-v4-flash"));
-        assert!(is_known_model("gpt-4.1-mini"));
-        assert!(is_known_model("openai/gpt-4.1-mini"));
+        for provider in ["deepseek", "openai"] {
+            let id = any_id_for(provider);
+            assert!(is_known_model(&id), "bare {id} should be known");
+            assert!(
+                is_known_model(&format!("{provider}/{id}")),
+                "{provider}/{id} should be known"
+            );
+        }
         assert!(!is_known_model("gpt-4o-mini-2024-07-18-retired"));
         assert!(!is_known_model(""));
     }

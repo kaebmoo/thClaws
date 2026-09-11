@@ -29,7 +29,7 @@ This doc covers: the three-layer architecture, on-disk layout, YAML frontmatter 
 
 ### Concept
 
-A KMS implements the [llm-wiki pattern](../docs/llm-wiki.md): a persistent, **compounding** knowledge base maintained by the LLM. Most LLM-document workflows look like RAG — index a corpus, retrieve chunks at query time, generate. Knowledge gets re-derived on every question. A KMS instead has the LLM build and maintain a structured wiki between you and the raw sources: cross-references compiled once and kept current, contradictions flagged, summaries refreshed when sources change.
+A KMS implements the **llm-wiki pattern** (Karpathy): a persistent, **compounding** knowledge base maintained by the LLM. Most LLM-document workflows look like RAG — index a corpus, retrieve chunks at query time, generate. Knowledge gets re-derived on every question. A KMS instead has the LLM build and maintain a structured wiki between you and the raw sources: cross-references compiled once and kept current, contradictions flagged, summaries refreshed when sources change.
 
 The maintenance burden is the LLM's job; the curation + question-asking + direction is yours.
 
@@ -99,13 +99,13 @@ USER  /kms off mynotes              → unregisters tools, removes from kms_acti
 ### Two scopes
 
 ```
-<project>/.thclaws/kms/<name>/     # Project scope — only visible from this project (DEFAULT)
+<project>/.thclaws/state/kms/<name>/     # Project scope — only visible from this project (DEFAULT)
 ~/.config/thclaws/kms/<name>/      # User scope — visible from any project (--user opt-in)
 ```
 
 `KmsScope` is a closed enum (`User` | `Project`). Both directories are walked by `list_all()`. `resolve(name)` checks **project first**, falls back to user — so a project-scope `notes` overrides a user-scope `notes` for that project. Same precedence pattern as project CLAUDE.md vs user CLAUDE.md.
 
-`/kms new <name>` defaults to project scope (a KMS is typically tied to the code you're working on, so `./.thclaws/kms/<name>` follows the repo). `--user` opts out into user-global. `--project` is accepted as a no-op alias so muscle memory from the old default doesn't break.
+`/kms new <name>` defaults to project scope (a KMS is typically tied to the code you're working on, so `./.thclaws/state/kms/<name>` follows the repo). `--user` opts out into user-global. `--project` is accepted as a no-op alias so muscle memory from the old default doesn't break.
 
 ### Directory contents (`kms::create` seeds)
 
@@ -601,7 +601,7 @@ _… index truncated at 200 entries (total: 487)_
 | Syntax | Effect |
 |---|---|
 | `/kms` (or `/kms list` / `/kms ls`) | List KMSes, mark active with `*` |
-| `/kms new <name>` | Create **project-scope** KMS (default — `./.thclaws/kms/<name>`) |
+| `/kms new <name>` | Create **project-scope** KMS (default — `./.thclaws/state/kms/<name>`) |
 | `/kms new --user <name>` | Create user-scope KMS (`~/.config/thclaws/kms/<name>`) |
 | `/kms use <name>` | Attach (registers tools, includes in prompt, persists to `.thclaws/settings.json`) |
 | `/kms off <name>` | Detach (drops tools when last KMS detaches) |
@@ -625,7 +625,7 @@ _… index truncated at 200 entries (total: 487)_
 | `/kms migrate <name> --apply` | Execute the chain. Aliases: `--execute`, `--run` (and `--dry-run` / `--plan` to opt back) |
 | `/kms file-answer <kms> <title>` (or `file`) | File latest assistant message as a new page |
 | `/kms export-okf <name> [<out-dir>]` (or `okf-export`) | Export the KMS as a conformant OKF v0.1 bundle to `./<name>-okf/` (or `<out-dir>`). See §16. |
-| `/kms import-okf <bundle-dir> <name> [--project]` (or `okf-import`) | Create a new KMS from an OKF bundle dir. Defaults to user scope; `--project` → `./.thclaws/kms/`. See §16. |
+| `/kms import-okf <bundle-dir> <name> [--project]` (or `okf-import`) | Create a new KMS from an OKF bundle dir. Defaults to user scope; `--project` → `./.thclaws/state/kms/`. See §16. |
 
 **Source auto-detection** in `parse_slash`: `t == "$"` → `KmsIngestSession` (M6.28); `t.starts_with("http://") || t.starts_with("https://")` → `KmsIngestUrl`; `t.to_ascii_lowercase().ends_with(".pdf")` → `KmsIngestPdf`; otherwise `KmsIngest`.
 
@@ -822,14 +822,14 @@ When `kms_active` empties (last `/kms off`), all five tools are removed from the
 
 ### Sandbox carve-out (M6.25 BUG #1)
 
-`KmsWrite` and `KmsAppend` deliberately bypass `Sandbox::check_write`. Rationale: project-scope KMS lives at `.thclaws/kms/.../pages/...` which the sandbox blocks (the `.thclaws/` reserved-dir rule). User-scope KMS lives at `~/.config/thclaws/kms/...` which is also outside any project root.
+`KmsWrite` and `KmsAppend` deliberately bypass `Sandbox::check_write`. Rationale: project-scope KMS lives at `.thclaws/state/kms/.../pages/...` which the sandbox blocks (the `.thclaws/` reserved-dir rule). User-scope KMS lives at `~/.config/thclaws/kms/...` which is also outside any project root.
 
 Path safety is enforced at finer grain via `kms::writable_page_path` instead:
 - Reject `..`, path separators, control chars, absolute paths, reserved stems
 - Canonicalize the parent dir inside `pages_dir` (symlink-escape defeated)
 - Refuse if `pages/` itself is a symlink
 
-Same intentional carve-out pattern as `TodoWrite`'s `.thclaws/todos.md` write — clear precedent in the codebase.
+Same intentional carve-out pattern as `TodoWrite`'s `.thclaws/state/todos.md` write — clear precedent in the codebase.
 
 ### Tool registration sites
 
@@ -893,7 +893,7 @@ The `system_prompt_section` injection also refuses to read `index.md` / `SCHEMA.
 
 A KMS root opens cleanly as an Obsidian vault — pages, index, log, schema are all plain `.md` with valid YAML frontmatter:
 
-1. Obsidian → "Open folder as vault" → `~/.config/thclaws/kms/<name>` (user) or `<project>/.thclaws/kms/<name>` (project — `.thclaws` is hidden, use the path bar).
+1. Obsidian → "Open folder as vault" → `~/.config/thclaws/kms/<name>` (user) or `<project>/.thclaws/state/kms/<name>` (project — `.thclaws` is hidden, use the path bar).
 2. Install **Dataview** plugin → query frontmatter:
    ```dataview
    LIST FROM "pages" WHERE category = "research"
@@ -1035,7 +1035,7 @@ Cure: `/kms migrate <name> --apply` runs the `0.x → 1.0` step (writes `manifes
 
 ### M6.25 changes (`dev-log/143`)
 
-10 of 11 audit issues from `docs/llm-wiki.md` gap analysis shipped:
+10 of 11 audit issues from the llm-wiki gap analysis shipped:
 - BUG #1 — `KmsWrite` + `KmsAppend` tools (sandbox carve-out)
 - BUG #2 — Source/page split in `ingest()`
 - BUG #3 — `/kms lint` health check
@@ -1215,7 +1215,7 @@ The split is deliberate. `kms-linker` is *deterministic* — the lint report is 
 `def: default_prompts/kms-maintain.md`; dispatched by `/kms maintain <name> [--apply]`. A single side-channel agent that runs the whole maintenance surface as a **staged pipeline**, so users don't have to know which of `lint` / `wrap-up` / `reconcile` to reach for. Dispatch (`shell_dispatch.rs`) computes the `LintReport` + `Vec<StaleEntry>` in Rust (same inputs as `kms-linker`) and feeds them via `compose_kms_maintain_prompt(name, lint, stale, apply)`; the agent's manual carries the five-stage procedure:
 
 1. **Structural fixes** — broken links, missing-in-index, missing required frontmatter (linker's job).
-2. **Source reconciliation** — `Glob .thclaws/sessions/*.jsonl` (uncapped), drop any `sess-<id>` from a page's `sources:` whose session file is gone. **Never deletes a page** — full-vault analogue of `dream`'s incremental sweep (see `dream.md`). This is why `kms-maintain` is the only maintenance agent with `Glob` in its tool list.
+2. **Source reconciliation** — `Glob .thclaws/state/sessions/*.jsonl` (uncapped), drop any `sess-<id>` from a page's `sources:` whose session file is gone. **Never deletes a page** — full-vault analogue of `dream`'s incremental sweep (see `dream.md`). This is why `kms-maintain` is the only maintenance agent with `Glob` in its tool list.
 3. **Stale refresh** — refresh `> ⚠ STALE`-marked pages.
 4. **Contradiction reconciliation** — the full `kms-reconcile` procedure across the whole vault.
 5. **Orphans** — listed, never modified.

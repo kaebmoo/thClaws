@@ -2,8 +2,8 @@
 
 Two variants share a near-identical NDJSON wire format but enough auth/feature differences to warrant separate impls:
 
-- `OllamaProvider` (`providers/ollama.rs`, 930 LOC) — **local**, no auth, configurable endpoint, leak-detection for small models
-- `OllamaCloudProvider` (`providers/ollama_cloud.rs`, 420 LOC) — **hosted**, Bearer auth, fixed endpoint, native thinking + image support
+- `OllamaProvider` (`providers/ollama.rs`) — **local**, no auth, configurable endpoint, leak-detection for small models
+- `OllamaCloudProvider` (`providers/ollama_cloud.rs`) — **hosted**, Bearer auth, fixed endpoint, native thinking + image support
 
 Two `ProviderKind` variants: `Ollama` (`ollama/` prefix) and `OllamaCloud` (`ollama-cloud/` prefix). Note: `OllamaAnthropic` (`oa/` prefix) is a THIRD path that uses `AnthropicProvider` against Ollama's Anthropic-compat shim — it's covered in [`provider-anthropic.md`](provider-anthropic.md), NOT here.
 

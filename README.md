@@ -15,7 +15,7 @@ A native-Rust AI agent workspace that codes, automates, remembers, and coordinat
 [![Platform](https://img.shields.io/badge/platform-macOS%20·%20Windows%20·%20Linux-lightgrey.svg)](#installation)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 
-[Website](https://thclaws.ai) · [Download](https://thclaws.ai/downloads.html) · [Manual](https://thclaws.ai/manual) · [Discussions](https://github.com/thClaws/thClaws/discussions) · [Contribute](#contribute) · [Supporters](SUPPORTERS.md)
+[Website](https://thclaws.ai) · [Download](https://thclaws.ai/downloads.html) · [Manual](https://thclaws.ai/manual) · [Enterprise](ENTERPRISE.md) · [Discussions](https://github.com/thClaws/thClaws/discussions) · [Contribute](#contribute) · [Supporters](SUPPORTERS.md)
 
 </div>
 
@@ -35,7 +35,7 @@ Three tabs, one binary — captured from a live thClaws session looking at its o
 
 ---
 
-## New in v0.61.0
+## Highlights
 
 ### 🎨 Media Studio — generate images & video, built in
 
@@ -59,11 +59,36 @@ A point-and-click shell for the new media tools — **Text → Image**, **Image 
 
 Docs: [media tools](https://thclaws.ai/manual/ch11-built-in-tools.html) · [Media Studio](https://thclaws.ai/manual/ch26-gui-shells.html) · [Fusion setup](https://thclaws.ai/manual/ch06-providers-models-api-keys.html)
 
+### Recently shipped
+
+A release most weeks. Full history in the [changelog](CHANGELOG.md); the
+things most likely to matter to you:
+
+- **Enterprise policy + client-side audit trail** — a signed org policy
+  file turns the same binary into a managed client: branding, an
+  extension allow-list, a forced LLM gateway, OIDC SSO, a forced
+  permission mode, and a payload-free record of every tool call.
+  ([ENTERPRISE.md](ENTERPRISE.md) · [ภาษาไทย](ENTERPRISE-th.md))
+- **OS-level Bash confinement, on by default** — shell commands run
+  inside a kernel-enforced filesystem boundary (macOS Seatbelt, Linux
+  Landlock, bubblewrap fallback), so an obfuscated command still can't
+  write outside the workspace.
+- **Thai PII masking** — an opt-in pipeline that detects and tokenizes
+  Thai personal data before it reaches the model, then restores it in
+  the output.
+- **Movie Maker** — screenplay → shots → generated video, end to end.
+- **Browser automation** — drive a real Chrome session as a tool.
+- **Workflows** — deterministic multi-agent scripts (`/workflow run`).
+- **GUI Shells** — ship a custom HTML surface with your agent, themed
+  and bridged to sessions, memory and tools.
+- **thclaws.cloud** — an agent catalog, a hosted runtime, and a metered
+  gateway for people who don't want to hold provider keys.
+
 ---
 
 ## Hacking in public
 
-thClaws started in April 2026. As of this writing the project has shipped **20+ releases**, drawn **27 contributors**, and lands roughly a release a week. It's developed by a small team at **ThaiGPT Co., Ltd.** — and a meaningful chunk of the codebase comes from outside contributors who heard about it and stayed.
+thClaws started in April 2026. Since then it has shipped **100+ public releases**, drawn **30+ contributors**, and lands roughly a release a week — the current release is **v0.121.0**. It's developed by a small team at **ThaiGPT Co., Ltd.** — and a meaningful chunk of the codebase comes from outside contributors who heard about it and stayed.
 
 We're aiming for **v1.0 = "the multi-platform agent"**: the same agent loop on your desktop, in your terminal, and bridged into Telegram, Discord, Slack, WhatsApp, Facebook Messenger, and LINE. Telegram, LINE, and Messenger are already shipping. Discord, Slack, and WhatsApp are next — and they're great places to plug in. ([Contribute →](#contribute))
 
@@ -78,7 +103,7 @@ The same `Agent` loop, `Session`, and `ToolRegistry` back every UX:
 - **Desktop GUI** (`thclaws`) — native window with Terminal, Chat, Files, and optional Team tabs.
 - **CLI REPL** (`thclaws --cli`) — interactive terminal prompt for SSH, headless servers, or zero-GUI workflows.
 - **Non-interactive mode** (`thclaws -p "prompt"`) — single turn, exits. Pipe-friendly for scripts and CI. `-v` for token usage on stderr.
-- **Webapp** (`thclaws --serve --port 7878`) — same engine over WebSocket/HTTP. SSH-tunnel for "Claude Code anywhere" without opening a port.
+- **Webapp** (`thclaws --serve --port 7878`) — same engine over WebSocket/HTTP, plus a drop-in API surface so other tools can drive the agent: **OpenAI-compatible** at `/v1/chat/completions` and **Anthropic-compatible** at `/v1/messages`. Point the openai or anthropic SDK at it, or set `ANTHROPIC_BASE_URL`. SSH-tunnel for "Claude Code anywhere" without opening a port.
 
 ---
 
@@ -86,7 +111,7 @@ The same `Agent` loop, `Session`, and `ToolRegistry` back every UX:
 
 Everything's in one binary. Pick the surface that fits the task, swap the provider, drop in a skill, glue in an MCP server, then walk away while a scheduled job or background agent finishes the work.
 
-- **Multi-provider** — Anthropic (native + Claude Agent SDK via Claude Code auth), OpenAI (Chat Completions + Responses/Codex), Google Gemini & Gemma, Alibaba DashScope (Qwen), DeepSeek, Z.ai (GLM Coding Plan), NVIDIA NIM, NSTDA Thai LLM (OpenThaiGPT, Typhoon, Pathumma, THaLLE), OpenRouter, Agentic Press, Azure AI Foundry, Ollama (local + Anthropic-compatible + Cloud), LMStudio, plus a generic **OpenAI-compatible** slot (`oai/*`) for LiteLLM / Portkey / Helicone / vLLM / internal proxies. Switch mid-session with `/model` or `/provider`.
+- **Multi-provider** — Anthropic (native + Claude Agent SDK via Claude Code auth), OpenAI (Chat Completions + Responses/Codex), Google Gemini & Gemma, Alibaba DashScope (Qwen), DeepSeek, Z.ai (GLM Coding Plan), NVIDIA NIM, NSTDA Thai LLM (OpenThaiGPT, Typhoon, Pathumma, THaLLE), xAI (Grok), Moonshot (Kimi), MiniMax, OpenRouter, Agentic Press, Azure AI Foundry, Ollama (local + Anthropic-compatible + Cloud), LMStudio, plus a generic **OpenAI-compatible** slot (`oai/*`) and first-class LiteLLM for internal proxies. The shipped catalogue carries **1,100+ models across 27 providers** — LLM plus image, video and audio. Switch mid-session with `/model` or `/provider`.
 - **Open standards, not a walled garden** — [Model Context Protocol](https://modelcontextprotocol.io/) for tools, [`AGENTS.md`](https://agents.md) for project instructions (adopted by Google, OpenAI, Factory, Sourcegraph, Cursor), `SKILL.md` with YAML frontmatter for packaged workflows. Configuration portable between thClaws, other compliant agents, and whatever comes next.
 - **Skills, plugins, MCP servers, hooks** — extend the agent without touching Rust. Skills are folders with a `SKILL.md`. Plugins bundle skills + commands + agent definitions + MCP servers under one manifest. MCP brings in third-party tools (GitHub, filesystems, browsers, Slack…) over stdio or HTTP-Streamable with OAuth 2.1+PKCE. Hooks run shell scripts on lifecycle events (`pre_tool_use`, `permission_denied`, `session_start`, …).
 - **Three tiers of agent orchestration** — model-driven subagents (`Task` tool, blocking, up to 3 levels deep); user-driven concurrent side-channels (`/agent <name> <prompt>`, parallel to main, own cancel token); multi-process **Agent Teams** with shared mailbox, task queue, tmux panes, and optional git worktrees.
@@ -97,9 +122,15 @@ Everything's in one binary. Pick the surface that fits the task, swap the provid
 - **Document workflow** — native PDF, DOCX, PPTX, XLSX read + edit + create tools, plus image rendering. Ingest a 50-page PDF, summarize into KMS, produce a follow-up deck — one conversation.
 - **Memory & project instructions** — `AGENTS.md` (or `CLAUDE.md`) walked up from `cwd` and injected into the system prompt. Persistent memory store classified as `user` / `feedback` / `project` / `reference`, stored as markdown you can read, edit, or commit.
 - **Settings as one file** — `.thclaws/settings.json` (project) or `~/.config/thclaws/settings.json` (user). API keys go in the OS keychain by default (macOS Keychain / Windows Credential Manager / Linux Secret Service) with `.env` fallback for CI.
-- **Session resume** — `thclaws --resume last` or `--resume <id>`. Sessions live as JSONL under `.thclaws/sessions/` — git-friendly, grep-friendly, never opaque.
-- **Safety first** — filesystem sandbox scoped to working directory. Destructive shell commands flagged. You approve every mutating tool call unless you've opted into auto-approve. Permission requests label which agent is asking when multiple are running.
+- **Session resume** — `thclaws --resume last` or `--resume <id>`. Sessions live as JSONL under `.thclaws/state/sessions/` — git-friendly, grep-friendly, never opaque.
+- **Safety first** — shell commands run inside an **OS-enforced** filesystem boundary (macOS Seatbelt, Linux Landlock, bubblewrap fallback), so obfuscation doesn't get a command out of the workspace; modes `workspace` (default) / `strict` / `off`. On top of that: a filesystem sandbox scoped to the working directory, destructive commands flagged, and your approval on every mutating tool call unless you've opted into auto-approve. Permission requests label which agent is asking when multiple are running.
 - **Offline-capable** — Ollama (native + Anthropic-compatible) lets you run entirely against a local model. No cloud round-trip, no API key.
+- **Media, end to end** — Media Studio generates images and video (Gemini, OpenAI `gpt-image`, Qwen, Veo, LTX, iApp for Thai text) from a point-and-click shell or from chat; **Movie Maker** takes a screenplay through shots to a finished film.
+- **Browser automation** — drive a real Chrome session as a tool: navigate, read the page, fill forms, capture screenshots.
+- **Workflows & GUI Shells** — `/workflow run` scripts deterministic multi-agent pipelines; GUI Shells let you ship a custom HTML surface bridged to sessions, memory and tools, themed with the app.
+- **Thai PII masking (opt-in)** — detects and tokenizes Thai personal data before the model ever sees it, then restores it on the way out. Per-workspace toggle.
+- **Enterprise Edition — same binary, your rules** — a signed org policy file adds branding, an install allow-list, a forced LLM gateway, OIDC single sign-on, a forced permission mode and tool deny-list, and a payload-free audit trail of every tool call. No licence server, nothing phones home, and every control is in this repo. See [ENTERPRISE.md](ENTERPRISE.md) ([ภาษาไทย](ENTERPRISE-th.md)).
+- **thclaws.cloud** — an agent catalog, a hosted runtime, and a metered gateway, for people who'd rather not hold provider keys. Optional; the desktop binary never needs it.
 - **Deploy what you build** — ship landing pages, web apps, APIs, and AI agents through [Agentic Press Hosting](https://agentic-press.com) (partnered with SIS Cloud Service and Artech.Cloud) — or any host you prefer. Deploy flow ships as a plugin (`/plugin install …-deploy`), so hosts are swappable. The client never locks you in.
 - **Shell escape** — prefix any REPL line with `!` to run a shell command directly. No tokens, no approval prompt, no agent round-trip (`! git status`, `! ls`).
 
@@ -107,7 +138,7 @@ Everything's in one binary. Pick the surface that fits the task, swap the provid
 
 ## Contribute
 
-**We'd love your help.** thClaws is built in the open by a small team and ~25 contributors so far. Reviews are typically fast, the codebase is approachable, and there's plenty of room to make a real dent.
+**We'd love your help.** thClaws is built in the open by a small team and 30+ contributors so far. Reviews are typically fast, the codebase is approachable, and there's plenty of room to make a real dent.
 
 ### Quick start for contributors
 
@@ -128,7 +159,7 @@ cargo run -- --cli                    # CLI REPL
 cargo run -- -p "explain crates/core" # one-shot
 ```
 
-**Prerequisites:** Rust 1.85+, Node.js 20+, pnpm 9+. The helper enforces frontend-before-cargo order (the GUI build embeds `frontend/dist/index.html` at compile time via `include_str!`). See [CONTRIBUTING.md](CONTRIBUTING.md) for the full PR workflow.
+**Prerequisites:** current stable Rust (what CI builds on — nothing pins an MSRV), Node.js 20+, pnpm 10+ (`frontend/package.json` pins `packageManager: pnpm@10.x`, so corepack refuses 9). The helper enforces frontend-before-cargo order (the GUI build embeds `frontend/dist/index.html` at compile time via `include_str!`). See [CONTRIBUTING.md](CONTRIBUTING.md) for the full PR workflow.
 
 ### Where we need help right now
 
@@ -161,7 +192,11 @@ Everything ships from a single crate, `crates/core/`. The interesting modules:
 | `crates/core/src/permissions.rs` | Filesystem sandbox + tool approval flow |
 | `crates/core/src/compaction.rs` | Context-window management |
 | `crates/core/src/messenger/`, `line/` | Multi-platform adapters (the v1.0 thesis) |
-| `crates/core/src/gui.rs` + `ipc.rs` | Tauri ↔ React bridge |
+| `crates/core/src/confine.rs` | OS-level Bash confinement (Seatbelt / Landlock / bubblewrap) |
+| `crates/core/src/policy/` + `audit/` | Enterprise org policy (Ed25519 verify) and the tool-call audit trail |
+| `crates/core/src/media/` | Image / video generation providers behind the media tools |
+| `crates/core/src/api_v1/` | OpenAI-compatible HTTP API served by `--serve` |
+| `crates/core/src/gui.rs` + `ipc.rs` | wry/tao ↔ React bridge |
 | `frontend/src/` | React + Vite GUI (bundled into a single HTML file via `include_str!`) |
 
 Deeper engineering reference: [`thclaws-technical-manual/`](thclaws-technical-manual/) — agent loop, provider abstraction, KMS internals, side-channel + `/dream` plumbing, schedule daemon, hooks lifecycle, plan-mode driver, and the rest. **Read this before sending non-trivial PRs.**
@@ -224,11 +259,11 @@ thclaws
 
 # Configure a provider (inside the REPL)
 ❯ /provider anthropic
-❯ /model claude-sonnet-4-6
+❯ /model claude-sonnet-5
 
-# Or try OpenRouter for 300+ models via one key
+# Or try OpenRouter for 350+ models via one key
 ❯ /provider openrouter
-❯ /model openrouter/anthropic/claude-sonnet-4-6
+❯ /model openrouter/anthropic/claude-sonnet-5
 
 # Drop an AGENTS.md or CLAUDE.md in your repo — it's read automatically
 
@@ -279,6 +314,37 @@ API keys are **never stored in config files** — only the OS keychain (default)
 
 ---
 
+## Enterprise
+
+The same open-source binary becomes a managed client when it finds a
+**signed organization policy file** — no separate build, no licence
+check, nothing phoning home. The policy is signed with your own Ed25519
+key, verified against a public key compiled into your build, and a
+policy that has been edited stops the program rather than silently
+degrading.
+
+What a policy can set:
+
+| Block | What it does |
+|---|---|
+| `branding` | Your product name, logo and support contact, including in the agent's own system prompt |
+| `plugins` | Which hosts plugins, skills and HTTP MCP servers may be installed from |
+| `gateway` | Force every cloud model call through your own gateway (LiteLLM, Portkey, Azure OpenAI, in-house). Users' personal API keys are ignored |
+| `sso` | OIDC single sign-on against your IdP, so joiner/leaver applies to AI usage too |
+| `audit` | A payload-free record of every tool call — who, what, approved how, files touched — to a file or your SIEM |
+| `runtime` | Force the permission mode, deny named tools, switch off remote access and `--serve` |
+
+Every one of these controls is in this repository. The commercial part
+is the packaging — a build compiled to trust your key, signing
+infrastructure, deployment templates and support.
+
+📖 **[Administrator guide → ENTERPRISE.md](ENTERPRISE.md)** ·
+🇹🇭 **[ฉบับภาษาไทย → ENTERPRISE-th.md](ENTERPRISE-th.md)**
+
+Commercial enquiries: [enterprise@thaigpt.com](mailto:enterprise@thaigpt.com)
+
+---
+
 ## Community
 
 - 💬 **[GitHub Discussions](https://github.com/thClaws/thClaws/discussions)** — questions, ideas, show-and-tell. The best place to start.
@@ -296,13 +362,13 @@ In 2026 a mini fundraiser — selling of the e-book *Building thClaws* — helpe
 ## Documentation
 
 - **Official site** — [thclaws.ai](https://thclaws.ai)
-- **Full user manual** — [thclaws.ai/manual](https://thclaws.ai/manual) or [`user-manual/`](user-manual/) (EN) / [`user-manual-th/`](user-manual-th/) (ภาษาไทย) — 24 chapters + 7 walkthrough case studies (static site deploy, Node.js reservation site, news-aggregation agent, …).
+- **Full user manual** — [thclaws.ai/manual](https://thclaws.ai/manual) or [`user-manual/`](user-manual/) (EN) / [`user-manual-th/`](user-manual-th/) (ภาษาไทย) — 30 chapters plus a providers/models/prices appendix. Applied case-study walkthroughs are in progress and land chapter by chapter.
 - **Technical manual** — [`thclaws-technical-manual/`](thclaws-technical-manual/) — engineering reference.
 - [Contributing](CONTRIBUTING.md) — dev setup, PR flow, commit style
 - [Changelog](CHANGELOG.md) — version history
 - [Code of Conduct](CODE_OF_CONDUCT.md) — Contributor Covenant 2.1
 - [Security](SECURITY.md) — vulnerability disclosure
-- [Enterprise](ENTERPRISE.md) — EE features, private marketplaces, policy overrides
+- [Enterprise](ENTERPRISE.md) ([ภาษาไทย](ENTERPRISE-th.md)) — signed org policy, gateway enforcement, SSO, audit trail, deployment runbook
 
 For books, training, and commercial deployment, see [agentic-press.com](https://agentic-press.com).
 

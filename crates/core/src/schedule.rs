@@ -175,6 +175,22 @@ impl ScheduleStore {
         }
     }
 
+    /// Earliest upcoming fire across every ENABLED schedule, or `None`
+    /// when nothing is pending.
+    ///
+    /// Cloud runners report this to the control plane on their
+    /// keepalive ping. A paused workspace has no process to fire a
+    /// job — `pause()` scales the Deployment to 0 — so the reaper uses
+    /// this to resume it in time. Disabled entries are skipped: a
+    /// schedule the user turned off must not wake a pod.
+    pub fn next_fire_across_all(&self, cursor: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        self.schedules
+            .iter()
+            .filter(|s| s.enabled)
+            .filter_map(|s| next_fire(s, cursor))
+            .min()
+    }
+
     /// Load from a specific path. Used by tests to redirect to a
     /// tempdir, and by callers that want to swap the store location
     /// (e.g. a future per-project overlay).
@@ -1543,6 +1559,7 @@ impl WatchManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     /// Write a `#!/bin/sh` script to `path` and chmod it executable.
     /// Crucially, the write fd is dropped before chmod+spawn — Linux
@@ -1565,6 +1582,64 @@ mod tests {
         let mut perms = std::fs::metadata(path).unwrap().permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(path, perms).unwrap();
+    }
+
+    #[test]
+    fn next_fire_across_all_skips_disabled_and_takes_the_earliest() {
+        // Every assertion compares against `next_fire()` outputs rather
+        // than wall-clock numbers, and no assertion assumes which cron
+        // lands first. Cron is evaluated in LOCAL time, so "which of
+        // these two times comes first" genuinely differs by machine —
+        // an earlier version of this test pinned an hour, and a later
+        // one pinned an ordering, and BOTH passed in Bangkok and failed
+        // on CI in UTC.
+        let mk = |id: &str, cron: &str, enabled: bool| {
+            let mut s = Schedule::default();
+            s.id = id.into();
+            s.cron = cron.into();
+            s.enabled = enabled;
+            s
+        };
+        let cursor = Utc.with_ymd_and_hms(2026, 9, 10, 1, 0, 0).unwrap();
+
+        let mut store = ScheduleStore::default();
+        assert!(
+            store.next_fire_across_all(cursor).is_none(),
+            "an empty store must report nothing pending, not a wake-up"
+        );
+
+        // Disabled only: nothing pending. A schedule the user switched
+        // off must never wake a paused workspace.
+        store.schedules.push(mk("off", "30 0 * * *", false));
+        assert!(
+            store.next_fire_across_all(cursor).is_none(),
+            "a disabled schedule must not count as pending"
+        );
+
+        // Add two enabled ones. The answer is the earlier of their own
+        // computed fires — whichever that turns out to be here.
+        let a = mk("a", "0 2 * * *", true);
+        let b = mk("b", "0 3 * * *", true);
+        let a_at = next_fire(&a, cursor).unwrap();
+        let b_at = next_fire(&b, cursor).unwrap();
+        store.schedules.push(a);
+        store.schedules.push(b);
+        assert_eq!(
+            store.next_fire_across_all(cursor),
+            Some(a_at.min(b_at)),
+            "earliest ENABLED schedule wins"
+        );
+
+        // Enabling the third must move the answer only if it is
+        // genuinely earlier — stated as a min() over all three so it
+        // holds in any zone.
+        let off_at = next_fire(&mk("off", "30 0 * * *", true), cursor).unwrap();
+        store.schedules[0].enabled = true;
+        assert_eq!(
+            store.next_fire_across_all(cursor),
+            Some(a_at.min(b_at).min(off_at)),
+            "enabling a schedule brings it into consideration"
+        );
     }
 
     #[test]

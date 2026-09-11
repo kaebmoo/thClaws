@@ -1,10 +1,32 @@
 //! Manifest schema for GUI Shells.
 //!
 //! Every shell — built-in, user-installed, project-installed — ships a
-//! `manifest.json` with these fields. The picker (Tier 2) reads them
-//! for display; the bridge (Tier 3) reads `permissions` for gating.
+//! manifest with these fields. The picker (Tier 2) reads them for
+//! display; the bridge (Tier 3) reads `permissions` for gating.
+//!
+//! ## Two filenames, one schema
+//!
+//! The runtime registry discovers shells by `manifest.json`; the
+//! authoring CLI (`shell new` / `check` / `pack` / `publish`) writes and
+//! reads `shell.json`. Both parse [`ShellManifest`] — only the name
+//! differed, which meant a folder scaffolded by `shell new` linted clean
+//! and then never appeared in the picker, with nothing erroring
+//! anywhere. [`find_manifest`] is the shared resolver: either name
+//! works on either side.
 
 use serde::{Deserialize, Serialize};
+
+/// Accepted manifest filenames, in preference order.
+pub const MANIFEST_NAMES: [&str; 2] = ["manifest.json", "shell.json"];
+
+/// The manifest inside `dir`, whichever of [`MANIFEST_NAMES`] is
+/// present. `None` when neither is.
+pub fn find_manifest(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    MANIFEST_NAMES
+        .iter()
+        .map(|n| dir.join(n))
+        .find(|p| p.is_file())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShellManifest {
