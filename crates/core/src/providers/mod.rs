@@ -1887,6 +1887,38 @@ pub async fn build_all_models_payload() -> String {
 /// a probed-reachable local runtime — in memory only — after the
 /// configured provider fails to build; this picks the preferred *paid*
 /// default when nothing is configured yet.
+/// Model ids that have left the catalogue, and what to use instead.
+///
+/// A persisted `model` counts as "explicit" at load, so the credential-aware
+/// default never re-runs for an existing workspace — a retired id would sit in
+/// `.thclaws/settings.json` forever. That is not a cosmetic problem: a model
+/// with no priced catalogue entry is not gateway-servable, so
+/// `gateway_overlay_for_model` returns `None`, routing falls through to BYOK,
+/// and a gateway user with no keys of their own gets "No keys" on a workspace
+/// that worked yesterday.
+///
+/// Both the bare id and the `deepseek/`-prefixed spelling are listed. They fail
+/// differently — the bare one matches no catalogue entry at all, while the
+/// prefixed one still resolves to OpenRouter's copy of the same retired model
+/// and would route to a DeepSeek endpoint that no longer serves it — so both
+/// need repointing.
+pub const RETIRED_MODELS: &[(&str, &str)] = &[
+    // DeepSeek retired the V4 flash line from api.deepseek.com (it left the
+    // `deepseek` catalogue block on 2026-09-10); `deepseek-flash` is the
+    // successor and is priced, hence gateway-servable.
+    ("deepseek-v4-flash", "deepseek-flash"),
+    ("deepseek/deepseek-v4-flash", "deepseek-flash"),
+];
+
+/// The successor for a retired model id, or `None` when `model` is still good.
+/// Case-insensitive to match the rest of the model-id handling here.
+pub fn retired_model_successor(model: &str) -> Option<&'static str> {
+    RETIRED_MODELS
+        .iter()
+        .find(|(old, _)| model.eq_ignore_ascii_case(old))
+        .map(|(_, new)| *new)
+}
+
 pub fn preferred_default_model(cfg: &crate::config::AppConfig) -> Option<String> {
     // On a DGX Spark appliance the box *is* the provider: AI Server's
     // gateway is already running on loopback and needs no credentials, so it
@@ -1903,7 +1935,7 @@ pub fn preferred_default_model(cfg: &crate::config::AppConfig) -> Option<String>
     // each provider's standalone default. All four are priced in the
     // catalogue, so they're gateway-servable for proxied sessions.
     const ORDER: &[(ProviderKind, &str)] = &[
-        (ProviderKind::DeepSeek, "deepseek-v4-flash"),
+        (ProviderKind::DeepSeek, "deepseek-flash"),
         (ProviderKind::DashScope, "dashscope/qwen3.7-max"),
         (ProviderKind::OpenAI, "gpt-5.5"),
         (ProviderKind::Anthropic, "claude-sonnet-4-6"),
@@ -2672,6 +2704,63 @@ mod tests {
         assert_eq!(ProviderKind::Anthropic.default_model(), "claude-sonnet-4-6");
     }
 
+    /// Every model `preferred_default_model` can hand back must have a priced
+    /// catalogue entry, because that is exactly what makes it gateway-servable
+    /// (`gateway_overlay_for_model` → `is_priced`). When `deepseek-v4-flash`
+    /// left the `deepseek` catalogue block upstream this invariant broke
+    /// silently: the default still pointed at it, routing found no price, fell
+    /// through to BYOK, and gateway users with no keys of their own were told
+    /// "No keys". Pin the invariant rather than the one id that broke it.
+    #[test]
+    fn every_preferred_default_is_priced_and_therefore_gateway_servable() {
+        let cat = crate::model_catalogue::EffectiveCatalogue::load();
+        for (kind, model) in [
+            (ProviderKind::DeepSeek, "deepseek-flash"),
+            (ProviderKind::DashScope, "dashscope/qwen3.7-max"),
+            (ProviderKind::OpenAI, "gpt-5.5"),
+            (ProviderKind::Anthropic, "claude-sonnet-4-6"),
+        ] {
+            assert!(
+                cat.is_priced(model),
+                "{kind:?} default {model} has no priced catalogue entry, so the \
+                 gateway cannot serve it and a keyless user falls back to BYOK"
+            );
+        }
+    }
+
+    /// A workspace pinned to a retired id must land on the successor, in both
+    /// the bare and the `deepseek/`-prefixed spelling, and the successor must
+    /// itself still be a live id.
+    #[test]
+    fn retired_model_ids_repoint_to_a_live_successor() {
+        assert_eq!(
+            retired_model_successor("deepseek-v4-flash"),
+            Some("deepseek-flash")
+        );
+        assert_eq!(
+            retired_model_successor("deepseek/deepseek-v4-flash"),
+            Some("deepseek-flash")
+        );
+        // Case-insensitive, like the rest of the model-id handling.
+        assert_eq!(
+            retired_model_successor("DeepSeek-V4-Flash"),
+            Some("deepseek-flash")
+        );
+        // A live id is left alone.
+        assert_eq!(retired_model_successor("deepseek-flash"), None);
+        assert_eq!(retired_model_successor("gpt-5.5"), None);
+        // No entry may point at another retired entry, or load would need to
+        // iterate to reach a live id.
+        for (_, successor) in RETIRED_MODELS {
+            assert_eq!(
+                retired_model_successor(successor),
+                None,
+                "{successor} is itself retired — RETIRED_MODELS must map straight \
+                 to a live id"
+            );
+        }
+    }
+
     #[test]
     fn preferred_default_model_follows_deepseek_dashscope_openai_anthropic_order() {
         let _guard = PREF_ENV_LOCK.lock().unwrap();
@@ -2704,7 +2793,7 @@ mod tests {
         cfg.gateway_use_for = vec!["openai".into(), "dashscope".into(), "deepseek".into()];
         assert_eq!(
             preferred_default_model(&cfg).as_deref(),
-            Some("deepseek-v4-flash")
+            Some("deepseek-flash")
         );
 
         // None configured (no gateway route, host keys cleared) → None so

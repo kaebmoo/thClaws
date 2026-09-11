@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.125.0] — 2026-09-11
+
+Two fixes you can feel: a gateway workspace that had started failing with "No keys" now works again and repoints itself, and a failed MCP server finally tells you *why* it failed.
+
+### Fixed
+- **"No keys" on a gateway workspace that worked yesterday.** The default model was `deepseek-v4-flash`, which DeepSeek has since retired. Gateway routing only serves models with a price in the catalogue, so a retired id silently fell back to your own API keys — and if you had none, the session died with "No keys". The default is now `deepseek-flash`.
+- **Existing workspaces repoint themselves.** Changing the default only helps new workspaces: a model saved in `.thclaws/settings.json` counts as an explicit choice, so the default never runs again and the retired id would have stayed forever. Opening a workspace pinned to a retired model now moves it to the successor and says so. Your settings file is not rewritten.
+- **A dead MCP server now reports the cause.** A stdio server that failed before the handshake only ever said "mcp transport closed" — the real reason was thrown away with the child's stderr. The start-up error now carries a stderr tail, and names the fix for the failures we can recognise: a corrupt npx cache (with the path to delete), missing Playwright browsers, an unknown package version, an unwritable cache, an unreachable registry.
+
+### Changed
+- **Model catalogue refreshed.** Current provider listings and prices, including a round of OpenRouter repricing.
+
 ## [0.124.0] — 2026-09-10
 
 `/publish` is announced properly — the command shipped last release but

@@ -2232,7 +2232,7 @@ impl AppConfig {
         // point a proxy user with no BYOK keys would find no reachable
         // provider and fall back to the compiled-in Anthropic placeholder
         // (claude-sonnet-4-6) instead of the intended gateway default
-        // (deepseek-v4-flash).
+        // (deepseek-flash).
         let in_gateway_pod = crate::workdir::is_multiuser()
             || std::env::var("THCLAWS_USES_GATEWAY").ok().as_deref() == Some("1");
         // DERIVE the routed set from a single source of truth: the `gatewayProxy`
@@ -2272,6 +2272,22 @@ impl AppConfig {
             if let Some(m) = crate::providers::preferred_default_model(&config) {
                 config.model = m;
             }
+        }
+
+        // Repoint a workspace pinned to a model that has since left the
+        // catalogue. This runs AFTER — and independently of — the block
+        // above on purpose: a persisted `model` sets `model_explicit`, so
+        // the credential-aware default never re-runs for an existing
+        // workspace and a retired id would survive every restart. An id
+        // with no priced catalogue entry is not gateway-servable, so a
+        // gateway user with no BYOK keys hits "No keys" on a workspace
+        // that worked before the model was retired upstream.
+        if let Some(successor) = crate::providers::retired_model_successor(&config.model) {
+            eprintln!(
+                "[model] '{}' was retired upstream — using '{successor}' instead",
+                config.model
+            );
+            config.model = successor.to_string();
         }
 
         config.apply_runtime_policy();
@@ -3006,6 +3022,59 @@ mod tests {
             "expected explicit false, got: {json}"
         );
         assert!(!json.contains(r#""teamEnabled":null"#));
+    }
+
+    /// A workspace whose `.thclaws/settings.json` still pins a model that
+    /// has since been retired upstream must come back on the successor.
+    ///
+    /// This is the whole point of doing it at load rather than in the
+    /// credential-aware default: a persisted `model` makes `model_explicit`
+    /// true, so that default never re-runs for an existing workspace. The
+    /// retired id has no priced catalogue entry, so the gateway cannot serve
+    /// it, routing falls through to BYOK, and a gateway user with no keys of
+    /// their own is told "No keys" on a workspace that worked yesterday.
+    #[test]
+    fn load_repoints_a_workspace_pinned_to_a_retired_model() {
+        let _guard = crate::kms::test_env_lock();
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".thclaws")).unwrap();
+
+        let prev = std::env::var("THCLAWS_PROJECT_ROOT").ok();
+        std::env::set_var("THCLAWS_PROJECT_ROOT", dir.path());
+
+        let mut loaded = Vec::new();
+        for pinned in ["deepseek-v4-flash", "deepseek/deepseek-v4-flash"] {
+            std::fs::write(
+                dir.path().join(".thclaws/settings.json"),
+                format!(r#"{{"model": "{pinned}"}}"#),
+            )
+            .unwrap();
+            loaded.push(AppConfig::load().unwrap().model);
+        }
+
+        // A live id must survive untouched — the repoint is targeted, not a
+        // blanket rewrite of whatever the user pinned.
+        std::fs::write(
+            dir.path().join(".thclaws/settings.json"),
+            r#"{"model": "claude-opus-4-6"}"#,
+        )
+        .unwrap();
+        let untouched = AppConfig::load().unwrap().model;
+
+        match prev {
+            Some(v) => std::env::set_var("THCLAWS_PROJECT_ROOT", v),
+            None => std::env::remove_var("THCLAWS_PROJECT_ROOT"),
+        }
+
+        assert_eq!(loaded[0], "deepseek-flash", "bare retired id must repoint");
+        assert_eq!(
+            loaded[1], "deepseek-flash",
+            "prefixed retired id must repoint too"
+        );
+        assert_eq!(
+            untouched, "claude-opus-4-6",
+            "a live pin must be left alone"
+        );
     }
 
     #[test]
