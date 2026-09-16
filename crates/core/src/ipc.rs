@@ -3709,9 +3709,11 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
 
         // ── Working directory (M6.36 SERVE9d — migrated from gui.rs) ─
         "get_cwd" => {
-            let cwd = std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| ".".into());
+            // dev-plan/61: the folder the user's files are in, which for an
+            // agent under a workspace host is the workspace, not its own folder.
+            let cwd = crate::workdir::workspace_root()
+                .to_string_lossy()
+                .to_string();
             // Serve mode: cwd is fixed (cloud runner template mounts
             // `/workspace`), so skip the picker modal. Also resolve
             // `guiShell.tabDefault` and pass it through as `initial_tab`
@@ -3996,6 +3998,10 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 let trimmed = token.trim();
                 let result = if trimmed.is_empty() {
                     crate::cloud::clear_token()
+                } else if !crate::cloud::looks_like_cli_token(trimmed) {
+                    Err(crate::error::Error::Config(
+                        "that is not a thClaws.cloud CLI token — they start with thc_. Copy it again from thclaws.cloud → Settings → CLI tokens.".into(),
+                    ))
                 } else {
                     crate::cloud::set_token(trimmed)
                 };
@@ -4433,9 +4439,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
                 .or_else(|| {
-                    std::env::current_dir()
-                        .ok()
-                        .map(|p| p.to_string_lossy().to_string())
+                    Some(crate::workdir::workspace_root()).map(|p| p.to_string_lossy().to_string())
                 });
             let cols = msg.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
             let rows = msg.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
@@ -4628,9 +4632,14 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 .to_string();
             let args = msg.get("args").cloned().unwrap_or(serde_json::json!({}));
             let dispatch = ctx.dispatch.clone();
-            std::thread::spawn(move || {
-                let result = crate::browser_cdp::input(&kind, &args);
+            // One ordered queue, not a thread per event: a drag is a press,
+            // a stream of moves and a release, and they must land in that
+            // order. A move's success is not worth a frame back to the
+            // page — dozens arrive a second — its failure is.
+            let quiet_ok = kind == "move";
+            crate::browser_cdp::input_queued(kind.clone(), args, move |result| {
                 let reply = match result {
+                    Ok(()) if quiet_ok => return,
                     Ok(()) => serde_json::json!({
                         "type": "browser_input_result", "ok": true,
                         "tool": format!("cdp_{kind}"),

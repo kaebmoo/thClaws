@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.129.0] — 2026-09-15
+
+**Your settings work in every agent again.** Global instructions, saved keys and the macOS keychain are the same whichever agent is open.
+
+### Fixed
+- **Inside a workspace with several agents, user-level settings went missing (#207, #208).** Each agent ran with its own home folder, so it never loaded your global `~/.config/thclaws/AGENTS.md`, Settings showed and edited the wrong file, and on macOS saving an API key or CLI token failed with "A default keychain could not be found". Agents now use your real home folder. Anything an earlier version saved into an agent's `.thclaws/bots/<name>/.home/` is no longer read, and the start-up log says so.
+- **Settings → Folder instructions edited the agent's own `AGENTS.md`, not the workspace's.** It now edits `AGENTS.md` at the workspace root, which every agent loads.
+- **Settings accepted any text as a thClaws.cloud CLI token.** A value that does not start with `thc_` is now refused with a message, instead of being saved and breaking cloud calls.
+
+## [0.128.0] — 2026-09-14
+
+**Your files stay in your workspace.** Every agent in a workspace now reads and writes the same files at the workspace root, the files you see in Finder and drag in yourself.
+
+### Changed
+- **All agents in a workspace share its files.** An agent's own folder under `.thclaws/bots/` holds only the agent: its settings, sessions, memory and identity. File tools, the shell, the Files tab and uploads all work on the workspace root.
+- **Upgrading a single-agent workspace moves only the agent.** Its `.thclaws/`, `AGENTS.md`, `CLAUDE.md` and `manifest.json` move into `.thclaws/bots/main/`. Your files and your git repository stay where they are. The workspace is marked layout version 4.
+
+### Fixed
+- **v0.126.0 and v0.127.0 hid your files inside `.thclaws/bots/main/`.** The first time 0.128.0 opens such a workspace, it moves them back to the root and marks it version 4. Nothing is overwritten: a name the root already has stays in the agent folder, and the start-up log names it.
+- **An agent added to a hosted workspace opened without the gateway.** The new agent copies the workspace's gateway choice, but hosted workspaces record it as a provider list, and only the on/off flag was read. The list now counts the same way it does everywhere else.
+
+## [0.127.0] — 2026-09-13
+
+**Workspaces with more than one agent, finished.** Schedules, `/cloud push` and `/cloud pull`, and the OpenAI-compatible API all work again in a workspace that holds several agents, and a workspace that was upgraded can be taken back.
+
+### Added
+- **`thclaws bots unmigrate` takes a workspace back to a single agent.** It undoes the upgrade for a workspace whose one agent is `main`. The agent's files move back to the root, and the host's own `.thclaws/` is kept beside them rather than deleted.
+- **Containers can opt in to the upgrade.** `THCLAWS_AUTO_MIGRATE=1` set explicitly lets a container move a single-agent workspace into the multi-agent layout on open. Without it, containers still never upgrade on their own.
+
+### Changed
+- **Workspace agents are called agents, not bots.** What runs in a workspace is an agent; what is published on thClaws.cloud is an Agent Template. Command names and folder names are unchanged.
+
+### Fixed
+- **Schedules stopped firing in a workspace with more than one agent.** The workspace host skipped the scheduler and left it to its agents, whose home folder is their own, where the schedule list is empty — so none of your schedules ran while such a workspace was open. The host runs the scheduler again; agents under a host don't.
+- **`/cloud push`, `/cloud pull` and the OpenAI-compatible API failed against a workspace with more than one agent.** The workspace host answered them with "not found". It now serves sync over the whole workspace, and carries `/v1` requests to an agent, streaming the response.
+- **A workspace with several agents could send its cloud keepalive more than once, or never report being busy.** Each agent sent its own keepalive. The host now sends the only one, reports busy while any agent is mid-turn, lists its agents, and retries a keepalive that failed.
+
+## [0.126.0] — 2026-09-13
+
+**Many bots in one workspace.** A workspace used to be one agent. It is now a shelf of them: keep a coding agent, a research agent and a writing agent side by side in the same project, and switch between them from a rail on the left.
+
+### Added
+- **Multi-bot workspaces.** Every bot is a whole agent in its own folder under `.thclaws/bots/<name>/` — its own sessions, knowledge bases, settings, and browser profile. A bot's file tools stop at its folder, so one bot cannot read or write another's work.
+  - **Each bot runs as its own process**, supervised by the app. A crash restarts that bot without touching the others; a bot that keeps crashing is parked with the reason instead of looping.
+  - **The bot rail.** Switch bots without losing state — each keeps its conversation, scroll position, terminal buffer and half-typed message, and a bot you switch away from keeps working. In the browser, a bot that finishes in the background shows an unread dot, and one waiting for your approval raises a banner that takes you to it.
+  - **Add a bot from the rail's `+`.** Install any agent from the thClaws.cloud catalogue, or start an empty bot, which behaves exactly like opening a new folder. Up to 8 bots run at once; Restart and Remove are in the same panel. Removing a bot takes it off the rail and leaves its folder on disk.
+  - **Desktop and browser.** The rail works in the desktop app and in `thclaws --serve`. On the desktop, a bot's default GUI shell opens in its UI tab.
+- **Existing workspaces upgrade themselves.** The first time the desktop app or `--serve` opens a single-agent workspace, it moves the project into `.thclaws/bots/main/` — git history included — and says so on start-up. The move is renames only and resumes safely if interrupted.
+  - `thclaws -p` and `--cli` at the workspace root step into the first bot, so scripts keep working. They never trigger the upgrade themselves.
+  - An older thClaws opening an upgraded folder finds an `AGENTS.md` asking you to update, instead of a project that looks empty.
+  - Your home directory is never treated as a workspace. Containers — including hosted workspaces on thClaws.cloud — do not upgrade on their own; `THCLAWS_AUTO_MIGRATE=0` turns it off anywhere.
+  - **Anything holding the old path needs the new one** — an editor window, a script with an absolute path, another clone.
+- **You.com search backend** for `WebSearch`, selected by `YDC_API_KEY` or pinned with `"searchEngine": "youcom"`. Your own key only; not routed through the gateway. Contributed by @mouse-value-add (#205).
+- **Optional bearer token for `--serve`.** Set `THCLAWS_SERVE_TOKEN` and every route except `/healthz` requires it. Unset or blank, `--serve` behaves as before.
+
+### Changed
+- **The browser costs far fewer tokens.** The model now sees 20 browser tools instead of 30 — about 5,400 tokens of tool schema were riding on every request while the browser was on — snapshots are capped, and the prompt teaches the cheap ways to read a page.
+- **The Browser tab shows the page live while the agent works**, not only while you are taking over.
+- **`WebFetch` spends its budget on content.** Scripts, stylesheets, SVG and comments are stripped from HTML before truncation; on the pages measured, that was about three quarters of the bytes.
+- **Model catalogue refreshed.**
+
+### Fixed
+- **Taking over the browser can drag.** Takeover only ever sent clicks, so a slider CAPTCHA you solved by hand never moved. Your press, the path you drag, and the release now reach the page as you make them, in order.
+- **A truncated tool result can be read back.** The full output used to spill to the system temp directory, which the sandbox refuses — so the model saw a sliver of a large page and could report "not found" for something on your screen. It now lands inside the workspace, and the notice says how to read the rest. Old spill files are pruned at start-up.
+- **Publishing never ships another bot.** `.thclaws/bots/` is stripped from published agents, so a bot's sessions and browser logins cannot be uploaded with the agent that contains them.
+- **Frontend dependencies:** 16 Dependabot alerts and both high CodeQL findings cleared.
+
 ## [0.125.0] — 2026-09-11
 
 Two fixes you can feel: a gateway workspace that had started failing with "No keys" now works again and repoints itself, and a failed MCP server finally tells you *why* it failed.
