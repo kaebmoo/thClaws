@@ -7,6 +7,9 @@
 ไว้ดูการทำงาน แทรกเข้าไป login เองได้ แล้วส่งคุมกลับให้ agent ต่อ
 (พัฒนาในช่วง v0.48–v0.52)
 
+![แท็บ Browser — สถานะของ Chromium ที่ engine ดูแล ภาพหน้าเว็บ บันทึกกิจกรรม และแผง Agent ที่ใช้บทสนทนาเดียวกับแท็บ Chat](../user-manual-img/ch-04/browser-tab.png)
+
+
 นี่คือสิ่งตรงข้ามกับเครื่องมือแบบ "computer use" ที่ใช้ภาพหน้าจอ: agent
 ทำงานจาก **accessibility tree** ของหน้า (เร็ว แม่น ประหยัด token) และ
 ยัง *มองเห็น* พิกเซลที่ render ได้ด้วยเวลาเจอหน้าที่เป็นภาพล้วน
@@ -67,6 +70,13 @@ hosted workspace จึงไม่มี browser tool จนกว่าคุ�
 ค่านี้เป็น setting จริงที่วางทับค่าเริ่มต้น มันจึงชนะ ส่วน env var แค่ขยับ
 ค่าเริ่มต้น ไม่สามารถ override workspace ที่ขอเบราว์เซอร์ไว้แล้วได้
 
+**ยกเว้น workspace แบบใช้ร่วมกัน (multiuser) ที่มันปิดอยู่และเปิดไม่ได้**
+*ไฟล์* ของคุณแยกกันอยู่แล้วที่นั่น — สมาชิกแต่ละคนมีโฟลเดอร์ของตัวเอง — แต่
+เบราว์เซอร์ไม่ใช่ไฟล์ มันคือ Chromium ตัวเดียว cookie jar เดียวของทั้ง
+workspace ถ้าสมาชิกคนหนึ่ง login เว็บไหน agent ของทุกคนก็ login เป็นคนนั้น
+และใครก็อ่านย้อนกลับได้ thClaws เลยปฏิเสธแทนที่จะปล่อยให้เกิดเงียบ ๆ และ
+บอกเหตุผลหนึ่งครั้งในแชท ถ้าต้องใช้เบราว์เซอร์ให้ใช้ workspace ส่วนตัว
+
 ### ปุ่มปรับอื่น ๆ
 
 พวกนี้เป็น environment variable สำหรับคนที่แพ็กเกจ thClaws มากกว่าคนใช้งาน
@@ -76,7 +86,8 @@ hosted workspace จึงไม่มี browser tool จนกว่าคุ�
 |---|---|
 | `THCLAWS_BROWSER_ENABLED=0` | ปิดค่าเริ่มต้นทั้ง fleet (ตามข้างบน) |
 | `THCLAWS_BROWSER_MCP_CMD` | แทนที่คำสั่ง launch ทั้งบรรทัด image ของ cloud runner ตั้งเป็น `mcp-server-playwright --no-sandbox` ซึ่งเป็น server ที่ติดตั้งมาแล้ว pod cold start จึงไม่ต้องแตะ npm registry ส่วนค่าเริ่มต้นบน desktop คือ `npx -y @playwright/mcp@latest` |
-| `THCLAWS_BROWSER_VIEWPORT="W,H"` | ขนาด viewport thClaws ตั้งค่าเริ่มต้นเป็น viewport desktop แบบกว้าง เพราะค่า 1280×720 ของ Playwright เองทำให้หลายเว็บ render ออกมาเหมือนมือถือ |
+| `THCLAWS_BROWSER_VIEWPORT="W,H"` | ขนาดหน้า **ค่าเริ่มต้น 1920×1080** เพราะค่า 1280×720 ของ Playwright เองทำให้หลายเว็บ render ออกมาเหมือนมือถือ `/doctor` พิมพ์ขนาดที่ใช้อยู่จริงให้ดู |
+| `THCLAWS_BROWSER_FRAME_MS` | live view ส่งเฟรมถี่แค่ไหน หน่วยมิลลิวินาที (ค่าเริ่มต้น `80` ≈ 12 fps) เน็ตช้าให้เพิ่มค่า |
 
 > **ไม่มี Node?** บนเครื่องที่ไม่มี `npx` แท็บ Browser จะแสดงคำแนะนำ
 > การติดตั้งแทนที่จะ error และ agent ก็แค่รันโดยไม่มี browser tool
@@ -98,6 +109,18 @@ hosted workspace จึงไม่มี browser tool จนกว่าคุ�
   พร้อมปุ่ม **📷 capture** เนื้อหาที่เป็นภาพล้วน (canvas, chart) จะเห็น
   ที่นี่แม้ accessibility tree จะอธิบายไม่ได้
 
+**ถ้า status card ขึ้นว่า "No Playwright Chromium found"** — แท็บยังใช้ได้
+แต่จะได้ภาพราว 1 เฟรมต่อวินาทีแทน live stream จริง เพราะ live view ต้องใช้
+Chromium ของ Playwright เอง และ engine จะไม่ไปขับ Chrome ที่คุณใช้อยู่
+(ทำแล้วการเบราว์พังทั้งหมด) ติดตั้งครั้งเดียวจบ:
+
+```
+npx playwright install chromium
+```
+
+แล้ว restart thClaws — workspace บน cloud มีให้อยู่แล้ว ส่วน `/doctor` จะพิมพ์
+บรรทัด `browser:` บอกว่าเจออะไร viewport เท่าไร และ Chromium รันอยู่หรือไม่
+
 **Activity feed** — ทุก `browser_*` tool call และผลลัพธ์ไหลเข้ามาพร้อม
 เวลา รวมถึง **console error และการ navigate** ของหน้าแบบสด
 
@@ -111,11 +134,30 @@ export รายงานด้วย" รับ slash command ได้ด้�
 บางเว็บคุณต้อง login ด้วยตัวเอง (ธนาคาร, LinkedIn) กด **🖱 Take over**
 แล้ว live view จะกลายเป็น remote control:
 
-- **คลิก** ที่ไหนก็ได้บนหน้า,
+- **คลิก** ที่ไหนก็ได้บนหน้า รวมถึง **shift-click** และ **⌘/Ctrl-click**,
 - **scroll** ด้วยลูกล้อเมาส์,
-- **พิมพ์** ลงช่องที่ focus อยู่ (พร้อมปุ่มด่วน **Enter / Tab / Esc /
-  ⌫**), และ
+- **พิมพ์ด้วยคีย์บอร์ดจริง**: คลิกที่หน้าเว็บหนึ่งครั้งเพื่อให้มัน focus
+  (กรอบจะเปลี่ยนเป็นเส้นทึบ) จากนั้นทุกปุ่มวิ่งตรงเข้าเว็บ รวม modifier
+  ทั้งหมด — ⌘A, Ctrl-L, กดลูกศรค้าง **กด Esc เพื่อคืนคีย์บอร์ด** ให้
+  thClaws
+- **การวาง**: ใช้ปุ่ม **Paste** หรือ **Ctrl-V** — ทั้งคู่ขอ clipboard จากระบบ
+  หนึ่งครั้ง (macOS จะขึ้นปุ่มยืนยัน "Paste" เล็ก ๆ ให้กด) แล้ววางทั้งก้อน
+  ทีเดียว ไม่ใช่ทีละตัวอักษร **⌘V ไม่ถึงหน้าเว็บ** ในโหมดนี้ ถึงแม้มันจะใช้
+  ได้ปกติในที่อื่นของ thClaws — macOS ส่ง ⌘V เป็นคำสั่ง paste ของระบบไปยัง
+  element ที่ focus อยู่ และเฟรม takeover ไม่ใช่ element ที่ระบบยอมวางให้
+  ส่วน Ctrl-V กับปุ่ม Paste ไปคนละเส้นทาง
+- ช่องพิมพ์ข้อความด้านล่างยังอยู่สำหรับข้อความยาว ๆ — เน็ตช้าอันนี้ดีกว่า,
+- ปุ่มด่วน **Enter / Tab / Esc / ⌫**, และ
 - **ช่อง URL + ปุ่ม back** ไว้ navigate
+
+**ถ้า agent เปิดแท็บใหม่ view จะตามไปเอง** และจะมีแถบแท็บโผล่เหนือหน้าเว็บ
+คลิกแท็บไหนเพื่อ pin view ไว้ที่นั่น — มีประโยชน์ตอนคุณกำลังอ่านอยู่และไม่
+อยากให้กระชากไปที่อื่น — คลิกซ้ำ (หรือกด **follow agent**) เพื่อให้มันตาม
+agent ต่อ
+
+ถ้าหน้าที่ view เกาะอยู่ถูกปิด คุณจะเห็น **"view detached — reattaching…"**
+แทนที่จะค้างอยู่ที่เฟรมสุดท้าย และดูพร้อมกันหลายคนได้ — หน้าต่าง desktop
+กับมือถือบน thClaws Remote เห็นสตรีมเดียวกัน คนหนึ่งปิดไม่ทำอีกคนจอดำ
 
 login ให้เสร็จ แล้วบอก agent ใน sidebar ให้ทำต่อ บน desktop จะใช้
 หน้าต่าง Chromium headed ตรงๆ ก็ได้ — agent ใช้ browser ตัวเดียวกัน
@@ -152,6 +194,11 @@ profile อยู่ **นอกโฟลเดอร์ workspace** และ�
 | agent "มองไม่เห็น" chart / canvas | บอกให้มันถ่าย screenshot — มันอ่านพิกเซลด้วย vision ไม่ใช่แค่ accessibility tree |
 | อยากให้ไม่มีหน้าต่างบน desktop | ตั้ง `"browserHeadless": true` |
 | หลุด login หลัง pod restart บน cloud | แก้แล้วใน v0.52.0 — อัปเดตถ้ายังเก่ากว่านี้ |
+| live view จาง ๆ / "หนึ่งเฟรมต่อวินาที" | เครื่องนี้ไม่มี Playwright Chromium รัน `npx playwright install chromium` แล้ว restart thClaws · `/doctor` บอกว่าเป็นกรณีไหน |
+| live view เป็นจอดำ | view เกาะแท็บที่ไม่ได้อยู่หน้าสุด คลิกแท็บนั้นในแถบแท็บ thClaws จะดึงมันขึ้นมาหน้า |
+| พิมพ์ใน takeover แล้วไม่มีอะไรเกิดขึ้น | คลิกที่หน้าเว็บก่อน frame ต้อง focus (กรอบเส้นทึบ ไม่ใช่เส้นประ) |
+| ⌘V ไม่ทำงานใน takeover (macOS) | ปกติ — ใช้ปุ่ม **Paste** หรือ **Ctrl-V** แทน ส่วน ⌘V ยังใช้ได้ปกติในที่อื่นของ thClaws |
+| ไม่มี browser tool ใน workspace ที่ใช้ร่วมกัน | ปกติ — ดูด้านบน ให้ใช้ workspace ส่วนตัว |
 
 ## เบื้องหลัง
 

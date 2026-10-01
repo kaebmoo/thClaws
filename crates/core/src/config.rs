@@ -90,7 +90,7 @@ pub struct AppConfig {
     #[serde(default = "default_stream_chunk_timeout_secs")]
     pub stream_chunk_timeout_secs: u64,
 
-    /// Search engine for WebSearch tool: "auto" (default), "tavily", "brave", "serpapi", "youcom", "duckduckgo".
+    /// Search engine for WebSearch tool: "auto" (default), "tavily", "brave", "serpapi", "youcom", "serply", "duckduckgo".
     pub search_engine: String,
 
     /// Allowed tool names (None = all). CLI: --allowed-tools
@@ -296,6 +296,16 @@ pub struct AppConfig {
     #[serde(default, alias = "browserHeadless")]
     pub browser_headless: Option<bool>,
 
+    /// May `PdfRead` fall back to the public `pdf.thclaws.cloud` service
+    /// when `pdftotext` is not installed locally (dev-plan/66)? ON by
+    /// default, because the alternative for a user without poppler is
+    /// that reading a PDF simply does not work — but the file leaves
+    /// their machine, so the fallback is approval-gated and says so, and
+    /// this flag (or `THCLAWS_PDF_CLOUD=0`) turns it off outright.
+    /// Enterprise / on-prem should set it false in the policy default.
+    #[serde(default = "default_pdf_cloud_fallback", alias = "pdfCloudFallback")]
+    pub pdf_cloud_fallback: bool,
+
     /// Per-provider gateway routing. Each entry is a provider name
     /// (lowercase, matches the gateway path segment): `openai`,
     /// `anthropic`, `google`, `openrouter`. When the active model's
@@ -349,6 +359,17 @@ pub struct AppConfig {
     /// their own rather than a generic map.
     #[serde(default)]
     pub translator_subagent_model: Option<String>,
+    /// dev-plan/64 D6: the language `/research` and "Add to KMS" write in
+    /// when no `--lang` is given. `None` — the default — follows the
+    /// document or the query. `"th"`, `"en"`, or any language code pins it.
+    #[serde(default)]
+    pub research_language: Option<String>,
+    /// Which `/research` and `/kms verify` calls think before answering:
+    /// `"judgement"` (default) — planning, auditing and grounding; `"all"` —
+    /// note writing too; `"off"` — none. Digests never do: extraction is
+    /// mechanical and thinking made it ten times slower.
+    #[serde(default)]
+    pub research_thinking: Option<String>,
 
     /// Default target URL for the `/deploy` slash command (dev-plan/28).
     /// Paired with the `remote-agent-token` keychain entry. Both can be
@@ -559,6 +580,19 @@ fn default_browser_enabled() -> bool {
     )
 }
 
+/// `PdfRead`'s cloud fallback default — ON, with `THCLAWS_PDF_CLOUD=0` as
+/// the fleet-wide off switch (see [`AppConfig::pdf_cloud_fallback`]).
+fn default_pdf_cloud_fallback() -> bool {
+    !matches!(
+        std::env::var("THCLAWS_PDF_CLOUD")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "0" | "false" | "off" | "no"
+    )
+}
+
 /// Resolve a launch command on PATH (or as an absolute path). Shared
 /// by the browser-MCP injection guard and the `browser_status_get`
 /// IPC arm so both agree on whether the managed browser can start.
@@ -627,11 +661,14 @@ impl Default for AppConfig {
             sensitive_enabled: false,
             browser_enabled: default_browser_enabled(),
             browser_headless: None,
+            pdf_cloud_fallback: default_pdf_cloud_fallback(),
             gateway_use_for: Vec::new(),
             gateway_proxy: false,
             extract_save_skill_models: None,
             skill_model_fallback: Some(DEFAULT_SKILL_MODEL_FALLBACK.to_string()),
             translator_subagent_model: None,
+            research_language: None,
+            research_thinking: None,
             remote_agent_url: None,
             gui_shell: None,
             openrouter_fusion: FusionConfig::default(),
@@ -764,6 +801,12 @@ pub struct ProjectConfig {
         alias = "translatorSubagentModel"
     )]
     pub translator_subagent_model: Option<String>,
+    /// See `AppConfig::research_language`.
+    #[serde(rename = "research_language", alias = "researchLanguage")]
+    pub research_language: Option<String>,
+    /// See `AppConfig::research_thinking`.
+    #[serde(rename = "research_thinking", alias = "researchThinking")]
+    pub research_thinking: Option<String>,
     #[serde(rename = "thinkingBudget")]
     pub thinking_budget: Option<u32>,
     #[serde(rename = "searchEngine")]
@@ -845,6 +888,10 @@ pub struct ProjectConfig {
     /// [`AppConfig::browser_headless`].
     #[serde(rename = "browserHeadless")]
     pub browser_headless: Option<bool>,
+    /// Opt out of `PdfRead`'s public-service fallback. See
+    /// [`AppConfig::pdf_cloud_fallback`].
+    #[serde(rename = "pdfCloudFallback")]
+    pub pdf_cloud_fallback: Option<bool>,
     /// Show the desktop SSO sign-in button (Google / enterprise IdP). Off by
     /// default — the sign-in flow isn't wired to a usable feature yet, so the
     /// button stays hidden until this is set true in `.thclaws/settings.json`.
@@ -989,6 +1036,8 @@ impl Default for ProjectConfig {
             extract_save_skill_models: None,
             skill_model_fallback: None,
             translator_subagent_model: None,
+            research_language: None,
+            research_thinking: None,
             thinking_budget: None,
             search_engine: None,
             allowed_tools: None,
@@ -1004,6 +1053,7 @@ impl Default for ProjectConfig {
             sensitive: None,
             browser_enabled: None,
             browser_headless: None,
+            pdf_cloud_fallback: None,
             sso_sign_in_enabled: None,
             show_raw_response: None,
             kms: None,
@@ -1213,17 +1263,11 @@ impl ProjectConfig {
         }
     }
 
-    /// [`ensure_default_exists`] for a project folder other than the cwd —
-    /// a bot created empty on a workspace shelf gets the same first-run file a
-    /// new folder opened in the app does.
-    pub fn ensure_default_exists_in(dir: &std::path::Path) -> bool {
-        let path = dir.join(".thclaws").join("settings.json");
-        if path.exists() {
-            return false;
-        }
-        if dir.join(".claude/settings.json").exists() {
-            return false;
-        }
+    /// The body of the first-run settings file: the documented template, with
+    /// the gateway default applied when a credential is present. One source
+    /// for both the create path and [`Self::backfill_defaults_in`], so an
+    /// agent that arrived by migration cannot drift from one created new.
+    fn default_settings_body() -> String {
         // Hand-rolled JSON enumerating every ProjectConfig field at
         // its default value so users discover available knobs by
         // opening the file rather than consulting the manual. Unknown
@@ -1249,6 +1293,7 @@ impl ProjectConfig {
   "skillsListingStrategy": "full",
   "teamEnabled": false,
   "shellTabEnabled": false,
+  "imageToolsEnabled": false,
   "browserEnabled": false,
   "halEnabled": false,
   "showRawResponse": false,
@@ -1260,6 +1305,10 @@ impl ProjectConfig {
   "extract_save_skill_models": null,
   "skill_model_fallback": "gpt-4.1-mini",
   "translator_subagent_model": null,
+  "_doc_research_language": "null = /research and 'Add to KMS' write in the language of the document or the query. Set \"th\", \"en\" or another code to pin it; --lang on the command still wins.",
+  "research_language": null,
+  "_doc_research_thinking": "Which /research and /kms verify calls think before answering. null or \"judgement\" = planning, auditing and grounding (default). \"all\" = note writing too (slower, costs more). \"off\" = none. Source digests never think.",
+  "research_thinking": null,
   "claude_md_compat": false,
   "openrouterFreeOnly": false,
   "kms": { "active": [] }
@@ -1275,11 +1324,25 @@ impl ProjectConfig {
         // same gate the GUI uses to enable the proxy checkbox (cloud token /
         // gateway key — not network-validated here). Skipped under tests
         // (keychain/env-dependent → would be nondeterministic).
-        let body = if !cfg!(test) && crate::providers::thclaws_gateway::has_access_key() {
+        if !cfg!(test) && crate::providers::thclaws_gateway::has_access_key() {
             Self::inject_default_gateway_proxy(template)
         } else {
             template.to_string()
-        };
+        }
+    }
+
+    /// [`ensure_default_exists`] for a project folder other than the cwd —
+    /// a bot created empty on a workspace shelf gets the same first-run file a
+    /// new folder opened in the app does.
+    pub fn ensure_default_exists_in(dir: &std::path::Path) -> bool {
+        let path = dir.join(".thclaws").join("settings.json");
+        if path.exists() {
+            return false;
+        }
+        if dir.join(".claude/settings.json").exists() {
+            return false;
+        }
+        let body = Self::default_settings_body();
         if let Some(parent) = path.parent() {
             if std::fs::create_dir_all(parent).is_err() {
                 return false;
@@ -1287,6 +1350,54 @@ impl ProjectConfig {
             Self::ensure_state_scaffold(parent);
         }
         std::fs::write(&path, body).is_ok()
+    }
+
+    /// Add the template's missing keys to a settings file that already exists,
+    /// and return the names added.
+    ///
+    /// A workspace migrated into an agent keeps whatever `settings.json` it
+    /// had — often two keys — while an agent created new gets the full
+    /// documented template. `ensure_default_exists_in` cannot close that gap:
+    /// it returns early precisely because the file exists. So this fills the
+    /// holes instead, and only the holes — a key the file already carries is
+    /// left alone, an explicit `null` included, so a deliberate choice is
+    /// never overwritten by a default.
+    pub fn backfill_defaults_in(dir: &std::path::Path) -> Vec<String> {
+        let none = Vec::new();
+        let path = dir.join(".thclaws").join("settings.json");
+        let Ok(raw) = std::fs::read(&path) else {
+            return none;
+        };
+        let Ok(mut current) = serde_json::from_slice::<serde_json::Value>(&raw) else {
+            // Unparseable: leave it alone rather than rewrite over whatever
+            // the user has in there. `parse_or_warn` already reports it.
+            return none;
+        };
+        let Ok(defaults) =
+            serde_json::from_str::<serde_json::Value>(&Self::default_settings_body())
+        else {
+            return none;
+        };
+        let (Some(obj), Some(defaults)) = (current.as_object_mut(), defaults.as_object()) else {
+            return none;
+        };
+        let mut added = Vec::new();
+        for (k, v) in defaults {
+            if !obj.contains_key(k) {
+                obj.insert(k.clone(), v.clone());
+                added.push(k.clone());
+            }
+        }
+        if added.is_empty() {
+            return added;
+        }
+        let Ok(body) = serde_json::to_string_pretty(obj) else {
+            return none;
+        };
+        if std::fs::write(&path, body).is_err() {
+            return none;
+        }
+        added
     }
 
     /// Insert `"gatewayProxy": true` into the first-run settings template.
@@ -1685,6 +1796,12 @@ impl ProjectConfig {
         if let Some(ref m) = self.translator_subagent_model {
             config.translator_subagent_model = Some(m.clone());
         }
+        if let Some(ref l) = self.research_language {
+            config.research_language = (!l.trim().is_empty()).then(|| l.trim().to_lowercase());
+        }
+        if let Some(ref t) = self.research_thinking {
+            config.research_thinking = (!t.trim().is_empty()).then(|| t.trim().to_lowercase());
+        }
         if let Some(b) = self.openrouter_free_only {
             config.openrouter_free_only = b;
         }
@@ -1704,6 +1821,9 @@ impl ProjectConfig {
         }
         if let Some(b) = self.browser_headless {
             config.browser_headless = Some(b);
+        }
+        if let Some(b) = self.pdf_cloud_fallback {
+            config.pdf_cloud_fallback = b;
         }
         // Proxy toggle. Explicit `gatewayProxy` wins; otherwise migrate a
         // legacy non-empty `gatewayUseFor` list to "proxy on". The effective
@@ -2192,6 +2312,14 @@ impl AppConfig {
         //   the Browser tab's setup hint, not a spawn error per session)
         // - never under `cfg(test)` (the unit-test suite must not spawn
         //   npx / hit the npm registry)
+        // dev-plan/65 P5: one Chromium, one cookie jar, every member — the
+        // managed browser is refused in a shared workspace. Cleared on the
+        // RESOLVED config, not just at the injection site below, so the
+        // Settings toggle and `/doctor` cannot read ON while the engine has
+        // it off. `server::run` says why, once, in chat.
+        if crate::workdir::is_multiuser() {
+            config.browser_enabled = false;
+        }
         if config.browser_enabled
             && !cfg!(test)
             && !crate::policy::external_mcp_disallowed()
@@ -2360,6 +2488,14 @@ impl AppConfig {
             .collect();
 
         // Engine-managed browser MCP — same conditions as the normal path.
+        // dev-plan/65 P5: one Chromium, one cookie jar, every member — the
+        // managed browser is refused in a shared workspace. Cleared on the
+        // RESOLVED config, not just at the injection site below, so the
+        // Settings toggle and `/doctor` cannot read ON while the engine has
+        // it off. `server::run` says why, once, in chat.
+        if crate::workdir::is_multiuser() {
+            config.browser_enabled = false;
+        }
         if config.browser_enabled
             && !cfg!(test)
             && !crate::policy::external_mcp_disallowed()
@@ -2384,6 +2520,24 @@ impl AppConfig {
     }
 
     /// The synthetic engine-managed Playwright MCP server config that
+    /// Managed-browser viewport in CSS pixels, from
+    /// `THCLAWS_BROWSER_VIEWPORT="W,H"` (default 1920×1080). One source for
+    /// two consumers that must not drift: playwright-mcp's
+    /// `--viewport-size` (self-launch path) and the engine's own
+    /// `--window-size` (CDP path, where the former is ignored).
+    pub fn browser_viewport() -> (u32, u32) {
+        let parsed = std::env::var("THCLAWS_BROWSER_VIEWPORT")
+            .ok()
+            .and_then(|s| {
+                let (w, h) = s.trim().split_once(',')?;
+                let w: u32 = w.trim().parse().ok()?;
+                let h: u32 = h.trim().parse().ok()?;
+                // A zero or absurd dimension is a typo, not a request.
+                (w >= 320 && h >= 240 && w <= 7680 && h <= 4320).then_some((w, h))
+            });
+        parsed.unwrap_or((1920, 1080))
+    }
+
     /// `browserEnabled` injects. Headed/headless: explicit override
     /// wins; otherwise auto — headless on cloud runners
     /// (`THCLAWS_USES_GATEWAY=1`) and displayless Linux, headed
@@ -2396,6 +2550,11 @@ impl AppConfig {
     /// desktop default is `npx -y @playwright/mcp@latest`.
     /// `--headless` is appended when resolved headless and not
     /// already present.
+    /// Ceiling on playwright-mcp's automatic output directory. It evicts the
+    /// oldest files past this. 64 MiB is ~3000 of the page snapshots measured
+    /// in a real session — days of browsing, and nothing on a 1Gi runner.
+    pub const BROWSER_OUTPUT_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
     pub fn browser_mcp_config(headless_override: Option<bool>) -> crate::mcp::McpServerConfig {
         let headless = headless_override.unwrap_or_else(|| {
             std::env::var("THCLAWS_USES_GATEWAY").ok().as_deref() == Some("1")
@@ -2434,17 +2593,42 @@ impl AppConfig {
         // default is a narrow 1280×720, which renders pages mobile-ish.
         // Override with THCLAWS_BROWSER_VIEWPORT="W,H" (or pin
         // --viewport-size / --device via THCLAWS_BROWSER_MCP_CMD).
+        //
+        // NOTE this only takes effect when playwright-mcp launches the
+        // browser ITSELF. Handed `--cdp-endpoint`, it adopts the engine's
+        // existing page and ignores the flag — measured 756×469 against a
+        // requested 1920×1080 (dev-plan/65 #1). The engine therefore sizes
+        // its own Chromium window from the same value; see
+        // `browser_cdp::ensure_up`.
         if !args
             .iter()
             .any(|a| a.starts_with("--viewport-size") || a == "--device")
         {
-            let viewport = std::env::var("THCLAWS_BROWSER_VIEWPORT")
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "1920,1080".to_string());
+            let (w, h) = Self::browser_viewport();
             args.push("--viewport-size".into());
-            args.push(viewport);
+            args.push(format!("{w},{h}"));
+        }
+        // playwright-mcp writes an accessibility snapshot and a console log
+        // for every navigation into `<cwd>/.playwright-mcp/` — nobody asks for
+        // them and nothing cleans them up. One 12-minute shopping session
+        // produced 36 files / 704 KB, and a `page-*.yml` is the full text of a
+        // page the user was on, logged in or not. Point them at the runtime
+        // state dir, which `cloud/pack.rs` strips from a published agent and
+        // `seed_def_into` keeps out of a member's workspace, and cap the
+        // directory so it cannot grow without bound on a runner's PVC.
+        //
+        // This does NOT affect `filename:` — playwright-mcp resolves an
+        // EXPLICIT name against the workspace root, so the snapshot-to-a-file
+        // trick the system prompt teaches still lands where `Grep` can read
+        // it. Relative on purpose: it resolves against whatever cwd the MCP
+        // server is given, which is where `.playwright-mcp/` was landing.
+        if !args.iter().any(|a| a.starts_with("--output-dir")) {
+            args.push("--output-dir".into());
+            args.push(".thclaws/state/browser-output".into());
+        }
+        if !args.iter().any(|a| a.starts_with("--output-max-size")) {
+            args.push("--output-max-size".into());
+            args.push(Self::BROWSER_OUTPUT_MAX_BYTES.to_string());
         }
         crate::mcp::McpServerConfig {
             name: "browser".into(),
@@ -2629,6 +2813,93 @@ where
 
 #[cfg(test)]
 mod tests {
+    /// dev-plan/65 P5. Multiuser isolates each user's FILES into their own
+    /// folder — but the managed browser is one Chromium with one cookie jar
+    /// for the whole pod, so a login by any member is a login for every
+    /// member, and any of them can read it back. Refused rather than
+    /// partitioned: partitioning means one Chromium per active member, which
+    /// a 2 Gi runner cannot pay for.
+    ///
+    /// Asserted on the RESOLVED config, because the Settings toggle and
+    /// `/doctor` read that — not the injection site — and a toggle that reads
+    /// ON while the engine has it off is the exact bug P0 closed.
+    #[test]
+    fn a_shared_workspace_refuses_the_browser() {
+        let _g = crate::kms::test_env_lock();
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"browserEnabled": true}"#).expect("write settings");
+        std::env::set_var("THCLAWS_CONFIG", &path);
+
+        let was = crate::workdir::is_multiuser();
+        crate::workdir::set_multiuser(false);
+        let personal = AppConfig::load().expect("load");
+        assert!(
+            personal.browser_enabled,
+            "a personal workspace keeps the browser the user asked for"
+        );
+
+        crate::workdir::set_multiuser(true);
+        let shared = AppConfig::load().expect("load");
+        assert!(
+            !shared.browser_enabled,
+            "the SAME settings.json must resolve to OFF in a shared workspace"
+        );
+
+        crate::workdir::set_multiuser(was);
+        std::env::remove_var("THCLAWS_CONFIG");
+    }
+
+    /// playwright-mcp's automatic per-navigation output landed in
+    /// `<cwd>/.playwright-mcp/`, which nothing strips and nothing prunes: a
+    /// real 12-minute session left 36 files / 704 KB, each `page-*.yml` the
+    /// full text of a page the user was on. Redirected into the runtime
+    /// state dir (stripped on publish, kept out of a seeded member
+    /// workspace) and capped.
+    #[test]
+    fn browser_mcp_output_goes_to_state_and_is_capped() {
+        let cfg = AppConfig::browser_mcp_config(Some(true));
+        let at = |flag: &str| {
+            cfg.args
+                .iter()
+                .position(|a| a == flag)
+                .map(|i| cfg.args[i + 1].clone())
+                .unwrap_or_else(|| panic!("{flag} must be passed: {:?}", cfg.args))
+        };
+        let dir = at("--output-dir");
+        assert!(
+            dir.starts_with(".thclaws/state/"),
+            "output must land under the stripped state dir, got {dir}"
+        );
+        assert!(crate::cloud::pack::is_strippable(std::path::Path::new(
+            &format!("{dir}/page-x.yml")
+        )));
+        assert_eq!(
+            at("--output-max-size"),
+            AppConfig::BROWSER_OUTPUT_MAX_BYTES.to_string()
+        );
+    }
+
+    /// A `THCLAWS_BROWSER_MCP_CMD` that pins its own output directory is the
+    /// operator's choice — the default must not be appended on top of it,
+    /// which would leave two `--output-dir` flags on the command line.
+    #[test]
+    fn a_pinned_output_dir_is_left_alone() {
+        let _g = crate::kms::test_env_lock();
+        std::env::set_var(
+            "THCLAWS_BROWSER_MCP_CMD",
+            "playwright-mcp --output-dir /var/tmp/pw",
+        );
+        let cfg = AppConfig::browser_mcp_config(Some(true));
+        std::env::remove_var("THCLAWS_BROWSER_MCP_CMD");
+        assert_eq!(
+            cfg.args.iter().filter(|a| *a == "--output-dir").count(),
+            1,
+            "exactly one --output-dir: {:?}",
+            cfg.args
+        );
+        assert!(cfg.args.contains(&"/var/tmp/pw".to_string()));
+    }
 
     #[test]
     fn apply_runtime_policy_is_a_noop_without_a_policy() {

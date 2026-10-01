@@ -71,8 +71,8 @@ pub use grep::GrepTool;
 pub use hal::{WebScrapeTool, YouTubeTranscriptTool};
 pub use image_gen::{ImageToImageTool, TextToImageTool};
 pub use kms::{
-    KmsAppendTool, KmsCreateTool, KmsDeleteTool, KmsReadTool, KmsSearchTool, KmsWriteSourceTool,
-    KmsWriteTool,
+    KmsAppendTool, KmsCreateTool, KmsDeleteTool, KmsEditTool, KmsReadTool, KmsSearchTool,
+    KmsWriteSourceTool, KmsWriteTool,
 };
 pub use ls::LsTool;
 pub use memory::{MemoryAppendTool, MemoryReadTool, MemoryWriteTool};
@@ -143,6 +143,15 @@ pub trait Tool: Send + Sync {
     /// tools that mutate filesystem or system state.
     fn requires_approval(&self, _input: &Value) -> bool {
         false
+    }
+
+    /// One short line the approval prompt shows alongside the tool name, for
+    /// the case where the tool name alone does not tell the user what they
+    /// are agreeing to. `PdfRead` uses it to say that the file is about to
+    /// leave the machine (dev-plan/66) — "PdfRead: contract.pdf" reads like a
+    /// local read, which is exactly what it usually is.
+    fn approval_summary(&self, _input: &Value) -> Option<String> {
+        None
     }
 
     /// Audit classification (RFC 0001). Builtins are the default; MCP
@@ -253,8 +262,22 @@ pub fn activate_gate(name: &str) {
         .insert(name.to_string());
 }
 
+/// dev-plan/64 P2.5: the tools that read and maintain a knowledge base
+/// are offered once there is one. Their definitions are ~6 KB of every
+/// request, and a user who has never made a KMS was paying it for tools
+/// that could only answer "no KMS named …". The gate is "one exists", not
+/// "one is attached": `/dream`, `/kms reconcile <name>`, scheduled presets
+/// and workflows all work on a base the conversation never attached.
+/// `KmsCreate` and `KmsWrite` stay ungated — they are how the first one
+/// gets made — and the rest appear on the very next request after that.
+pub const KMS_EXISTS_GATE: &str = "kms-exists";
+
 /// Whether a named gate is currently open.
 pub fn gate_is_active(name: &str) -> bool {
+    // Not a gate anything opens: it follows the disk. See [`KMS_EXISTS_GATE`].
+    if name == KMS_EXISTS_GATE {
+        return crate::kms::any_exists();
+    }
     open_gates()
         .lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -434,6 +457,45 @@ impl ToolRegistry {
         self.tools.get(name).cloned()
     }
 
+    /// Apply `allowedTools` / `disallowedTools` to this registry.
+    ///
+    /// Idempotent, because it has to run TWICE on the surfaces that register
+    /// `Task` and `WorkflowRun` late: once before the Task factory snapshots
+    /// the registry — a parent forbidden `Bash` must not be able to spawn a
+    /// subagent that has it — and once after those two are added. Running it
+    /// only at the first point is what let them escape both lists entirely:
+    /// an allowlist of `["Read"]` still yielded `Read, Task, WorkflowRun`, and
+    /// naming either in `disallowedTools` was a silent no-op (issue #221).
+    ///
+    /// `keep` names tools that survive both lists — the REPL passes the
+    /// team-essential set, so `--allowed-tools Read` cannot quietly break
+    /// coordination.
+    pub fn apply_filter(
+        &mut self,
+        allowed: Option<&[String]>,
+        disallowed: Option<&[String]>,
+        keep: &std::collections::HashSet<&str>,
+    ) {
+        if let Some(allowed) = allowed {
+            let mut keepers: std::collections::HashSet<&str> =
+                allowed.iter().map(|s| s.as_str()).collect();
+            keepers.extend(keep.iter().copied());
+            let all: Vec<String> = self.names().iter().map(|s| s.to_string()).collect();
+            for name in all {
+                if !keepers.contains(name.as_str()) {
+                    self.remove(&name);
+                }
+            }
+        }
+        if let Some(disallowed) = disallowed {
+            for name in disallowed {
+                if !keep.contains(name.as_str()) {
+                    self.remove(name);
+                }
+            }
+        }
+    }
+
     pub fn remove(&mut self, name: &str) {
         self.tools.remove(name);
     }
@@ -473,6 +535,11 @@ impl ToolRegistry {
             .get(name)
             .ok_or_else(|| Error::Tool(format!("unknown tool: {name}")))?;
         if !tool_is_available(tool.as_ref()) {
+            if tool.requires_gate() == Some(KMS_EXISTS_GATE) {
+                return Err(Error::Tool(format!(
+                    "tool '{name}' needs a knowledge base and there is none yet — make one with KmsCreate"
+                )));
+            }
             if let Some(gate) = tool.requires_gate().filter(|g| !gate_is_active(g)) {
                 return Err(Error::Tool(format!(
                     "tool '{name}' is gated behind '{gate}' — invoke the matching skill to enable it"
@@ -573,6 +640,61 @@ pub fn extract_tool_source(body: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Issue #221: `Task` and `WorkflowRun` register after the filter runs, so
+    /// an allowlist that does not name them still yielded them and naming them
+    /// in the denylist was a silent no-op. The filter is idempotent so the
+    /// caller can run it again once they exist.
+    #[test]
+    fn a_second_filter_pass_catches_late_registrations() {
+        use std::collections::HashSet;
+        let no_keep: HashSet<&str> = HashSet::new();
+        let allow = vec!["Read".to_string()];
+
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(crate::tools::ReadTool));
+        reg.register(Arc::new(crate::tools::LsTool));
+        // First pass — before the late tools exist.
+        reg.apply_filter(Some(&allow), None, &no_keep);
+        assert_eq!(reg.names(), vec!["Read"]);
+
+        // The late registration, as every surface does it.
+        reg.register(Arc::new(crate::tools::GrepTool));
+        assert_eq!(reg.names().len(), 2, "late tool is in the registry");
+
+        // Second pass removes it. Re-running must not disturb the survivor.
+        reg.apply_filter(Some(&allow), None, &no_keep);
+        assert_eq!(reg.names(), vec!["Read"], "an allowlist means what it says");
+
+        // And a denylist naming a late tool is honoured rather than ignored.
+        let mut reg2 = ToolRegistry::new();
+        reg2.register(Arc::new(crate::tools::ReadTool));
+        reg2.register(Arc::new(crate::tools::GrepTool));
+        reg2.apply_filter(None, Some(&["Grep".to_string()]), &no_keep);
+        assert_eq!(reg2.names(), vec!["Read"]);
+    }
+
+    /// `keep` outranks both lists — the REPL passes the team-essential set so
+    /// `--allowed-tools Read` cannot quietly break coordination.
+    #[test]
+    fn kept_tools_survive_both_lists() {
+        use std::collections::HashSet;
+        let keep: HashSet<&str> = ["Grep"].into_iter().collect();
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(crate::tools::ReadTool));
+        reg.register(Arc::new(crate::tools::GrepTool));
+
+        reg.apply_filter(Some(&["Read".to_string()]), None, &keep);
+        let mut names = reg.names();
+        names.sort();
+        assert_eq!(names, vec!["Grep", "Read"], "keep survives an allowlist");
+
+        reg.apply_filter(None, Some(&["Grep".to_string()]), &keep);
+        let mut names = reg.names();
+        names.sort();
+        assert_eq!(names, vec!["Grep", "Read"], "keep survives a denylist");
+    }
+
     use super::*;
 
     /// Process-wide lock to serialize env-var manipulation across the

@@ -7,6 +7,209 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.138.0] — 2026-09-25
+
+**A release about an agent being able to reach its own files.** A workspace with
+a host keeps the user's files at its root and the agent in a folder of its own.
+An agent installed before this release did not know that, so it looked for the
+scripts and state it ships where the user's files are, found nothing, and
+reported an empty project — no error anywhere. A GUI shell drew its chrome
+around no data, which looked like the shell was broken and the work was gone.
+It was not: opening such a workspace now repairs it.
+
+### Added
+- **`$THCLAWS_AGENT_DIR`.** A shell an agent runs gets its own folder as an
+  environment variable, because one working directory cannot mean two places at
+  once. File tools need no variable: a `.thclaws/…` path an agent gives them
+  resolves in its folder, while `.thclaws/state/kms` and `.thclaws/state/logs`
+  stay shared at the workspace root.
+- **`thclaws bots fix-paths`.** Points an agent's own paths back at its folder,
+  with `--dry-run`. Migration now does the same in the pass that moves the
+  files, so a workspace is never left in the broken state, and a host repairs a
+  stale agent on open without being asked — keeping the originals under
+  `.thclaws/state/pre-agent-dir/`.
+- **`thclaws bots unnest`.** An older engine could migrate a workspace twice,
+  leaving the real agent a level too deep. This flattens it and keeps the bare
+  outer host aside. Nothing is lost either way; it is tidying, not a repair.
+
+### Fixed
+- **A GUI shell no longer opens onto nothing.** The desktop served a shell's
+  assets from the wrong folder when a workspace had been migrated twice, so
+  every asset 404'd and the panel came up blank — while the same workspace
+  worked over `--serve`.
+- **Images embedded in a document render again.** They were being served from
+  the agent's folder rather than the workspace the agent runs in, which are two
+  different places.
+- **The folder picker picks a workspace.** It offered an agent's folder inside
+  the workspace instead, and rewrote what you had typed each time a page
+  mounted. The folder button in the status bar now opens the picker it asks
+  for, rather than swapping the screen out and straight back in.
+- **The agent is told which folder is which.** Its prompt named one working
+  directory while its shell used another, so it would list `.thclaws/`, see the
+  host's, and report the layout as wrong.
+
+### Changed
+- **A workspace says what it needs, on screen.** Both of these used to be
+  announced only on stderr, which a desktop opened from its icon never shows
+  and a browser has none of. They now reach the page, each carrying the command
+  that fixes it.
+- **Migration will not run twice.** It refuses a tree that already has an agent
+  shelf, and the notice about one that was migrated before that guard existed
+  no longer claims the workspace is broken, because it is not.
+
+## [0.137.0] — 2026-09-24
+
+**A release about the takeover browser, and about the workspace actually being the boundary.** The takeover grows a keyboard and a live view that follows the agent, and a symlink swapped in mid-flight can no longer carry a write out of the workspace.
+
+### Added
+- **The takeover browser has a real keyboard.** Typed input now reaches the takeover session as real key events instead of being lost on the way in.
+- **The live view follows the agent, and more than one person can watch.** The browser's live view now tracks whatever the agent is doing, and more than one viewer can watch the same session at once.
+
+### Fixed
+- **Paste reaches the takeover browser — with Ctrl-V or the new Paste button.** Paste needs an editable, visibly-rendered target, and the takeover frame was neither, so it evaporated. **On macOS ⌘V still does not arrive**, although it pastes normally elsewhere in thClaws; the manuals say which to use.
+- **The browser is refused in a shared workspace.** A shared workspace can no longer hand the browser over to a second user.
+- **The browser's page dumps are contained.** playwright-mcp saved an accessibility snapshot and a console log on every navigation, unasked — the full text of pages you had open, growing without bound and with nothing pruning it. They now go to the runtime-state directory, which is stripped from a published agent and capped in size. Nothing had escaped; this closes the path before it could.
+- **A symlink swapped in after the sandbox check no longer carries a write out of the workspace.** The link was checked, then its target could be swapped before the write landed; the write now refuses the swapped link.
+
+### Changed
+- **The cheap browser parameters are named, and the expensive tool is capped.** The browser tool's inexpensive reads now have named arguments, and the expensive read is limited.
+
+## [0.136.0] — 2026-09-23
+
+**A release about reading Thai, and about limits meaning what they say.** Thai PDFs come out as words instead of fragments, two settings that were quietly ignored are enforced, and a symlink can no longer carry a write out of the workspace.
+
+### Added
+- **Unifically: a new BYOK provider with an OpenAI-compatible API.** Models use the `unifically/<id>` prefix and the key is read from `UNIFICALLY_API_KEY`. Contributed by @unifically-dev ([#217](https://github.com/thClaws/thClaws/pull/217)).
+
+### Fixed
+- **Thai PDFs come out as words, not fragments.** Layout mode pads every glyph gap, and Thai does not space its words, so the padding landed inside them — one employment handbook yielded `บริษัท` 6 times where the document has it 209 times. A document whose Thai is being cut up is now re-read in a mode that does not do that, which also lets the existing sara-am repair work again (`ทำงาน`: 0 → 152 in the same file). English and tables are untouched.
+- **A PDF whose text layer holds no words goes to the vision path.** Some PDFs extract one isolated character at a time; no spacing rule can reassemble that, so those pages are read as images instead.
+- **`allowedTools` and `disallowedTools` reach every tool.** `Task` and `WorkflowRun` were registered after the lists were applied, so an allowlist that did not name them still handed them over and naming them in the denylist did nothing ([#221](https://github.com/thClaws/thClaws/issues/221)). The desktop app and `--serve` never applied `allowedTools` at all, and the HTTP API applied neither list; all four now agree.
+- **A symlink cannot carry a write out of the workspace.** A link whose target did not exist yet was treated as an ordinary new file, so a write through it landed wherever the link pointed — outside the workspace, or outside a subagent's `writePaths` ([#219](https://github.com/thClaws/thClaws/issues/219)).
+- **Reading a PDF without poppler gives the same Thai quality as reading one with it.** The no-install extraction service follows the same rule as the engine.
+
+## [0.135.0] — 2026-09-22
+
+**A reading release.** A PDF is read whether or not poppler is installed and whether or not there is an account, the live browser view is the size of a real screen and notices when its browser dies, and a model is asked what thinking it takes instead of guessed at.
+
+### Added
+- **A PDF is read without installing anything.** With poppler installed the file never leaves the machine, as before. Without it, the text is extracted through a public thClaws service that needs no account and no key — after you approve it, naming the file and where it is going. Install poppler and the question stops being asked; `"pdfCloudFallback": false` switches the offer off for good.
+- **A PDF becomes a markdown sibling from the Files tab.** Right-click a PDF, get the text beside it as `.md` — no model, no cost, no waiting on a turn. This never uploads: without poppler it says what to install instead.
+- **Hosted workspaces read PDFs.** poppler ships in the engine image, so a hosted workspace reads PDFs — including scanned ones, through the page-rendering path — where before it answered every PDF with an install instruction it could not act on.
+- **`/doctor` reports the browser.** Whether it is on, what will launch it, whether the Chromium the live view needs is installed and where, the resolved viewport, and whether the browser is up.
+- **Four ways in sit behind one row.** The four ways a document comes in sit behind one row in Files.
+
+### Fixed
+- **The live view is the size of a real screen.** Turning it on used to shrink every page to roughly 800×600, because the flag that set the viewport is ignored in exactly that mode. The engine now sizes its own window, and takeover clicks land where you click them.
+- **A browser that dies comes back.** Closing the browser window, or an out-of-memory kill, used to break every browser tool and the live view until the app was restarted.
+- **The browser finds the Chromium that `playwright install` installs.** On macOS the live view stayed off even after running the command we tell you to run.
+- **A logout stays logged out.** Signing out of a site is no longer undone the next time the browser starts.
+- **Sessions survive a hosted pause.** Cookies are flushed when a hosted workspace stops, not left to a timer that a stop can beat.
+- **The Browser switch says what the engine is doing.** It could read ON while the browser was off.
+- **A shared workspace no longer seeds one member's browser profile to another.** The owner's cookies, sessions and knowledge base were copied into each member's workspace.
+- **A model is asked what thinking it takes.** Each model is asked what thinking it takes instead of guessed from its id.
+- **A `*-realtime` model is not a chat row.** They speak a protocol the engine has no path for, so they no longer appear as chat models.
+
+## [0.134.0] — 2026-09-21
+
+**A knowledge-management release.** The knowledge base now takes a document in four ways, a citation can be hovered and clicked, and an audit removes only what nothing supports — plus a long tail of research-run and GUI fixes.
+
+### Added
+- **Documents come in four ways.** A document can be taken in four ways, matching what a researcher actually has.
+- **Citations you can hover and click.** Hovering a citation shows what it stands on, clicking it lands on the passage, and a citation points where a reader can actually go.
+- **An audit that removes only what nothing supports.** `/kms verify --ground` looks in the source for what supports a sentence, and `/kms verify --llm --fix` removes what no claim supports and keeps its report.
+- **Titles, runs, cost, and trash in the sidebar.** A page's title appears in the sidebar with what it stands on beneath it, the runs show what each one cost, a click's cost is shown before the click, and the trash is visible.
+- **Thai is found.** Search finds Thai, and the search box actually searches.
+- **KmsEdit changes part of a page.** Change part of a page without resending the rest.
+- **A knowledge base by slug, in the workspace.** A knowledge base can be named by its slug, and a project knowledge base belongs to the workspace.
+- **Removal never destroys what a base held.** Nothing a knowledge base held is destroyed by the command that removes it.
+- **A research run reports itself.** A running job says what it has spent, Retry re-runs what ran, and a run that dies stops claiming the page.
+- **A refresh keeps the page and adds references.** A refresh only refreshes, and a judgement is allowed to think.
+- **A note writes in the language it was given.** A note is as long as its citations and written in the language of what it was given.
+- **The planner sees the notes that matter.** What a note does not cite is measured, and the planner sees the notes that matter.
+- **The slash popup knows the subcommands.**
+- **Drag the KMS sidebar wider.**
+- **The desktop window keeps its stderr.**
+- **A page says what it is about.**
+
+### Fixed
+- **A URL that serves a paper is a paper.**
+- **The web fetchers send a User-Agent.** They previously sent none at all.
+- **An ingest consolidates, never rewrites.** An ingest consolidates into an existing page instead of rewriting it.
+- **Frontmatter the parser doesn't understand is carried.** Frontmatter the parser does not understand is carried, not dropped.
+- **A rename reaches `related:`.** A rename reaches `related:`, and a re-ingest reaches the pages that cite it.
+- **A write replaces the file whole, under a lock.** Shared JSON is changed under a lock.
+- **The dates are the user's dates.** The dates a knowledge base writes are the user's dates.
+- **A title with nothing under it.**
+- **A knowledge base is never changed silently.**
+- **Grounding finds the passage with the rare words.** Grounding finds the passage with the rare words, and says why it found none.
+- **A bare number no longer kills the run.** A bare number in search results no longer kills the run.
+- **A Thai document can be ingested as atomic notes.**
+- **An archived source is in the catalogue.**
+- **A quoted name works on the subcommands.** A quoted name works on the subcommands that never needed quoting.
+- **A knowledge base with a space in its name can be deleted.**
+- **Thai links open; a truncated page can't save over itself.**
+- **/dream describes the header the engine writes.**
+- **Sessions are found in every agent's folder.**
+- **The picker's model list agrees with itself.**
+- **A turn_usage record is not a corrupt line.**
+- **/logs has something to show from a terminal.**
+- **A settings watcher that hangs doesn't hang the session.**
+- **A confirmation dialog is the window's job.**
+- **Cache reads are shown, priced once, and recorded.** Cache reads are shown, priced once, and a research run's cost is recorded.
+
+### Changed
+- **A page is read only when it changes.** A page is read and parsed only when it has changed.
+- **Every call of a batch shares one opening.**
+- **An attached knowledge base stops re-billing.** An attached knowledge base stops re-billing the conversation.
+- **The search index lives beside the vault, not in it.**
+- **Plans do not think by default.**
+
+## [0.133.0] — 2026-09-18
+
+**A bugfix release.** The provider list now shows only providers that can actually be reached, xAI's thinking is no longer dropped, and GUI shells resolve their agent from their own files.
+
+### Fixed
+- **Only reachable providers are listed.** The provider list now shows only providers that can actually be reached, instead of every known one.
+- **xAI's thinking is no longer dropped.** The thinking output from xAI models now survives instead of being discarded.
+- **A GUI shell resolves its agent from disk.** A shell's own assets say which agent it belongs to, rather than trusting a request header.
+
+## [0.132.0] — 2026-09-17
+
+**The app now tells you when a newer release is out.** Web search gains an optional Serply backend, cloud adds a first-time trial and a name-first workspace flow, GUI shells get a working reload button, and a page can be reported through a form.
+
+### Added
+- **An optional Serply backend for web search.** Web search can now run through Serply as an alternative provider ([#211](https://github.com/thClaws/thClaws/issues/211)).
+- **A notice when a newer release is out.** The app checks for a newer version and delivers the notice where the page can hear it.
+- **A first-time cloud trial.** New users get one workspace for three days, plus $3.
+- **A name-first cloud workspace flow.** You are asked for a workspace name, and its slug is derived from it.
+- **A reload button in the shell tab, and a `/reload` that restarts.** GUI shells get a reload button, and the `/reload` command now restarts the host instead of doing nothing.
+- **`/publish` answers in the conversation.** Publishing now replies in the conversation, naming the file it wrote.
+- **Report a page with a form.** A page is reported through a form in the app rather than a published address, and the reporter's own text stays out of the mail subject.
+
+### Changed
+- **The model catalogue was refreshed.** Models and prices were updated to their current values.
+
+### Fixed
+- **Resuming a workspace never showed its status.** Resuming has always returned a status, but the interface never said so. It does now.
+
+## [0.131.0] — 2026-09-16
+
+**Nothing is written into a folder you did not choose.** Opening the app from its icon no longer leaves a workspace behind in whatever folder the system started it in, the start-up folder picker stops asking again on Windows, and an agent created by upgrading a workspace gets the same complete settings file as one you add by hand.
+
+### Fixed
+- **An agent created by upgrading a workspace was missing most of its settings.** When a workspace became multi-agent, its agent kept whatever `.thclaws/settings.json` the workspace had — often only a line or two — while an agent you add yourself gets the full file with every option listed at its default. Upgrading now fills in whatever that file is missing, and leaves everything you had already set exactly as it was. The options list itself was also missing `imageToolsEnabled`, so nothing mentioned the media tools.
+- **Opening the app from its icon left a `.thclaws/` folder wherever it started.** The desktop wrote a workspace's settings the moment it opened, and an app opened from the Start menu or from Finder starts in whatever folder the system gives it — your Documents folder on Windows. That folder then looked like a workspace, so a later launch would offer to upgrade it and move your files into it. Nothing is written now until you pick a folder, and the folder you pick is the one that gets the settings. The window size is no longer saved when no folder has been chosen either, since saving it created the folder too.
+- **A schedule whose folder no longer exists failed over and over.** The run was rejected because the folder was missing, but that happened before the attempt was recorded — so the schedule still looked like it had not run since the last time it succeeded. Every start-up then replayed every missed run, one failure per tick, and the backlog grew by one a day. Such a schedule is now skipped with a single message naming the folder, until you point it somewhere that exists or remove it.
+- **On Windows, picking a workspace folder at start-up asked again, forever.** Choosing a folder outside the one the app launched in restarts the app there, and the restarted app had no memory that you had already answered, so it showed the picker again. The answer now survives the restart. Windows hit this every time because the Start-menu shortcut launches the app in your Documents folder, so every pick is outside it; launching the app from Finder on macOS could loop the same way. Also fixed: a folder inside the workspace could be misread as outside on Windows, because the two paths were compared in different forms.
+
+## [0.130.0] — 2026-09-16
+
+**Quitting is clean again.** Closing the app in a workspace with several agents no longer leaves a crash report behind.
+
+### Fixed
+- **Quitting the desktop app left a crash report behind (#209, #210).** In a workspace with several agents, closing the window tore down the pipes the agents log into while they were still running. Their next log line then killed them, and macOS recorded a crash every time. The app now stops its agents and waits for them before it exits, a failed log write can no longer take an agent down, and a panic is written to `.thclaws/state/logs/panic.log` so one that happens while the logs are gone is still visible.
+
 ## [0.129.0] — 2026-09-15
 
 **Your settings work in every agent again.** Global instructions, saved keys and the macOS keychain are the same whichever agent is open.

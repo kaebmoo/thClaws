@@ -144,27 +144,31 @@ fn store(kref: &KmsRef, cat: &Catalog) -> Result<()> {
     let path = catalog_path(kref);
     let json = serde_json::to_string_pretty(cat)
         .map_err(|e| Error::Tool(format!("serialize source catalog: {e}")))?;
-    std::fs::write(&path, json.as_bytes())
+    crate::kms::write_file(&path, json.as_bytes())
         .map_err(|e| Error::Tool(format!("write {}: {e}", path.display())))?;
     Ok(())
 }
 
 /// Insert or replace one record.
 pub fn upsert(kref: &KmsRef, rec: SourceRecord) -> Result<()> {
-    let mut cat = load(kref);
-    cat.version = CATALOG_VERSION;
-    cat.entries.insert(rec.file.clone(), rec);
-    store(kref, &cat)
+    crate::kms::with_kms_lock(kref, || {
+        let mut cat = load(kref);
+        cat.version = CATALOG_VERSION;
+        cat.entries.insert(rec.file.clone(), rec);
+        store(kref, &cat)
+    })
 }
 
 /// Drop a record (the file was deleted).
 pub fn forget(kref: &KmsRef, file: &str) -> Result<()> {
-    let mut cat = load(kref);
-    if cat.entries.remove(file).is_some() {
-        cat.version = CATALOG_VERSION;
-        store(kref, &cat)?;
-    }
-    Ok(())
+    crate::kms::with_kms_lock(kref, || {
+        let mut cat = load(kref);
+        if cat.entries.remove(file).is_some() {
+            cat.version = CATALOG_VERSION;
+            store(kref, &cat)?;
+        }
+        Ok(())
+    })
 }
 
 /// Look up by content hash — the "have I already archived this exact
@@ -343,11 +347,7 @@ pub fn citation_map(kref: &KmsRef) -> BTreeMap<String, Vec<String>> {
         // Declared provenance (`sources:` frontmatter, the ingest
         // convention).
         if let Some(v) = fm.get("sources") {
-            for token in v
-                .split(|c: char| c == ',' || c.is_whitespace())
-                .map(|s| s.trim().trim_matches('"'))
-                .filter(|s| !s.is_empty())
-            {
+            for token in crate::kms::sources_entries(v) {
                 if by_file.contains(token) {
                     hit(token, &mut out);
                 } else if let Some(file) = by_stem.get(token) {
@@ -464,6 +464,36 @@ pub fn human_bytes(n: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// dev-plan/64 P3.2: since D1 every agent in a workspace writes one
+    /// catalogue. Unlocked, two upserts that overlap each read the file,
+    /// add one row and write — and the later write drops the earlier row.
+    #[test]
+    fn concurrent_upserts_lose_no_record() {
+        let _h = crate::research::test_helpers::scoped_home();
+        let k = crate::kms::create("cat-race", crate::kms::KmsScope::Project).unwrap();
+        std::fs::create_dir_all(k.sources_dir()).unwrap();
+        const N: usize = 24;
+        std::thread::scope(|s| {
+            for i in 0..N {
+                let k = k.clone();
+                s.spawn(move || {
+                    let file = format!("s{i}.md");
+                    let mut rec = load(&k).entries.get(&file).cloned().unwrap_or_else(|| {
+                        serde_json::from_value(serde_json::json!({
+                            "file": file, "title": format!("T{i}"), "bytes": 1,
+                            "sha256": format!("{i:064}"), "added": "2026-09-20"
+                        }))
+                        .unwrap()
+                    });
+                    rec.file = file;
+                    upsert(&k, rec).unwrap();
+                });
+            }
+        });
+        assert_eq!(load(&k).entries.len(), N);
+        assert!(!k.root.join(".lock").exists(), "the lock is released");
+    }
+
     use super::*;
     use crate::kms::{self, KmsScope};
 

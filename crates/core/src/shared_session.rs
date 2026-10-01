@@ -116,6 +116,30 @@ pub enum ShellInput {
     /// to teammate notifications in GUI mode (the CLI REPL has its
     /// own poller loop; this is GUI parity).
     TeamMessages(Vec<crate::team::TeamMessage>),
+    /// A `/publish` upload finished — put the link in the agent's
+    /// history as a real assistant message.
+    ///
+    /// Slash commands answer with `SlashOutput`, which is deliberately
+    /// not persisted (see the `!bang` note further down) and renders as
+    /// a `system` bubble. That costs the two things users hit first with
+    /// `/publish`: only assistant bubbles go through react-markdown, so
+    /// the URL is unclickable text; and `serialize_shell_history` drops
+    /// every role but User/Assistant, so the link is simply gone after a
+    /// reload — the one message people come back for.
+    ///
+    /// The upload runs on a spawned task that cannot hold
+    /// `&mut WorkerState` across an await, so it hands the result back
+    /// through this channel instead.
+    PublishedApp {
+        url: String,
+        detail: String,
+        /// The path as the user typed it. Carried because the slash
+        /// command itself is not persisted, so a reader scrolling back
+        /// would otherwise see a link with nothing saying what it was
+        /// made from — and `detail`'s title comes from the file's
+        /// `<title>`, which need not resemble its filename.
+        file: String,
+    },
     /// A background task finished spawning an MCP server — register
     /// its tools into the live tool registry and rebuild the agent so
     /// the next turn sees them. This lets the worker start accepting
@@ -1213,7 +1237,36 @@ pub fn spawn_with_roots(
 /// Re-firing ReloadConfig when a write was triggered by our own code
 /// (e.g. sidebar model picker → `ProjectConfig::set_model`) is
 /// harmless: the handler is idempotent.
+/// Watch `.thclaws/settings.json` and reload on change.
+///
+/// The setup runs on its own thread, and that is load-bearing rather
+/// than tidiness. `notify`'s macOS backend starts a CFRunLoop thread
+/// and `watch()` blocks on a channel until that thread reports itself
+/// ready; when the run loop never gets going, `watch()` never returns
+/// and never errors. Called inline — as it was — that parks whichever
+/// thread is building the session, so the engine hangs at startup with
+/// no message, and the careful `eprintln!` + `return` below never gets
+/// the chance to run.
+///
+/// Observed on the owner's machine 2026-09-21: every test that builds a
+/// session parked here forever, one thread at a time, on either volume,
+/// sandboxed or not. It took the whole `--lib` suite with it, which is
+/// a release gate.
+///
+/// Nothing waits on this watcher — it already leaks its debouncer on
+/// purpose — so moving it off the caller's thread costs nothing and
+/// turns a startup hang into a watcher that quietly never arms.
 fn spawn_settings_watcher(input_tx: mpsc::Sender<ShellInput>) {
+    std::thread::Builder::new()
+        .name("settings-watch".into())
+        .spawn(move || settings_watcher_thread(input_tx))
+        .map(|_| ())
+        .unwrap_or_else(|e| {
+            eprintln!("\x1b[33m[settings-watch] could not start thread: {e}\x1b[0m");
+        });
+}
+
+fn settings_watcher_thread(input_tx: mpsc::Sender<ShellInput>) {
     use notify_debouncer_mini::new_debouncer;
     use notify_debouncer_mini::notify::RecursiveMode;
 
@@ -1504,6 +1557,7 @@ async fn run_worker(
     tools.register(std::sync::Arc::new(crate::tools::KmsWriteTool));
     tools.register(std::sync::Arc::new(crate::tools::KmsWriteSourceTool));
     tools.register(std::sync::Arc::new(crate::tools::KmsAppendTool));
+    tools.register(std::sync::Arc::new(crate::tools::KmsEditTool));
     tools.register(std::sync::Arc::new(crate::tools::KmsDeleteTool));
     // KmsCreate bootstraps the dedicated `dreams` KMS used by
     // /dream's Pass 4 audit page — defense-in-depth so a stale
@@ -1844,14 +1898,29 @@ async fn run_worker(
     // but ignored — only `subagent.rs` honored it. The user's
     // `disallowedTools: ["AskUserQuestion"]` setting now actually
     // takes effect on the main loop too.
+    // Runs AFTER Task + WorkflowRun are registered above, so both are in
+    // scope here. `allowed_tools` was never applied on this surface at all —
+    // the GUI and `--serve` honoured only the denylist, so an allowlist in
+    // settings.json did nothing (found while fixing issue #221).
+    let no_keep: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    tools.apply_filter(
+        config.allowed_tools.as_deref(),
+        config.disallowed_tools.as_deref(),
+        &no_keep,
+    );
     if let Some(denied) = &config.disallowed_tools {
-        for name in denied {
-            tools.remove(name);
-        }
         if !denied.is_empty() {
             eprintln!(
                 "[config] main agent disallowed_tools applied: {}",
                 denied.join(", ")
+            );
+        }
+    }
+    if let Some(allowed) = &config.allowed_tools {
+        if !allowed.is_empty() {
+            eprintln!(
+                "[config] main agent allowed_tools applied: {}",
+                allowed.join(", ")
             );
         }
     }
@@ -2411,6 +2480,39 @@ async fn run_worker(
             ShellInput::TeamMessages(msgs) => {
                 cancel.reset();
                 handle_team_messages(msgs, &mut state, &events_tx, &cancel).await;
+            }
+            ShellInput::PublishedApp { url, detail, file } => {
+                // Markdown, because this renders as an assistant bubble
+                // and that is the only bubble react-markdown touches.
+                //
+                // The filename goes in a code span, so a backtick in a
+                // path would break out of it. react-markdown here runs
+                // without raw-HTML pass-through, so the worst case is
+                // mangled formatting rather than injection — strip them
+                // anyway rather than rely on that staying true.
+                let shown = file.replace('`', "");
+                let text = format!("Published `{shown}`\n\n[{url}]({url})\n\n{detail}");
+                state
+                    .agent
+                    .append_message(crate::types::Message::assistant(text));
+                // Into the JSONL by the same path as a turn, so it is
+                // still there on reload.
+                save_history(&state.agent, &mut state.session, &state.session_store);
+                // Re-render from canonical history rather than streaming
+                // a delta: `AssistantTextDelta` appends to whatever
+                // assistant bubble is currently open, so a publish that
+                // lands mid-turn would splice this link into the middle
+                // of the model's sentence.
+                //
+                // `from_session`, not `from_messages`: the per-turn usage
+                // footers live on the session, not in the agent's history,
+                // so rebuilding from messages alone would silently strip
+                // every token/cost line from the whole conversation each
+                // time someone publishes. Runs after `save_history` above,
+                // which has already synced the session from the agent.
+                let _ = events_tx.send(ViewEvent::HistoryReplaced(DisplayMessage::from_session(
+                    &state.session,
+                )));
             }
             ShellInput::McpReady {
                 server_name,
@@ -5126,13 +5228,7 @@ async fn drive_turn_stream_inner(
                         state.session_cost_usd = 0.0;
                     }
                 }
-                let token_usage = crate::model_catalogue::TokenUsage {
-                    prompt_tokens: usage.input_tokens,
-                    completion_tokens: usage.output_tokens,
-                    cached_input_tokens: usage.cache_read_input_tokens.unwrap_or(0),
-                    cache_creation_tokens: usage.cache_creation_input_tokens.unwrap_or(0),
-                    reasoning_tokens: usage.reasoning_output_tokens.unwrap_or(0),
-                };
+                let token_usage = crate::model_catalogue::TokenUsage::from_usage(&usage);
                 let catalogue = crate::model_catalogue::EffectiveCatalogue::load();
                 if let Some(c) = catalogue.compute_cost_usd(&state.config.model, &token_usage) {
                     state.session_cost_usd += c;
@@ -5162,13 +5258,7 @@ async fn drive_turn_stream_inner(
                 )));
 
                 // Per-turn usage footer (GUI parity with the CLI REPL).
-                let cache_info = match (
-                    usage.cache_creation_input_tokens,
-                    usage.cache_read_input_tokens,
-                ) {
-                    (Some(c), Some(r)) if c > 0 || r > 0 => format!(" · cache: +{c}w/{r}r"),
-                    _ => String::new(),
-                };
+                let cache_info = usage.cache_note();
                 let cost_str = if state.session_cost_usd > 0.0 {
                     format!(" · ${:.4} session", state.session_cost_usd)
                 } else {

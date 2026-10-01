@@ -60,6 +60,7 @@ pub mod thclaws_gateway;
 pub enum ProviderKind {
     Anthropic,
     AtlasCloud,
+    Unifically,
     MetaAi,
     NineRouter,
     AgentSdk,
@@ -270,6 +271,7 @@ impl ProviderKind {
     pub const ALL: &'static [Self] = &[
         Self::Anthropic,
         Self::AtlasCloud,
+        Self::Unifically,
         Self::MetaAi,
         Self::NineRouter,
         Self::AgentSdk,
@@ -306,6 +308,7 @@ impl ProviderKind {
         match self {
             Self::Anthropic => "anthropic",
             Self::AtlasCloud => "atlascloud",
+            Self::Unifically => "unifically",
             Self::MetaAi => "meta",
             Self::NineRouter => "9router",
             Self::AgentSdk => "anthropic-agent",
@@ -343,6 +346,7 @@ impl ProviderKind {
         match self {
             Self::Anthropic => "claude-sonnet-4-6",
             Self::AtlasCloud => "atlascloud/qwen/qwen3.5-flash",
+            Self::Unifically => "unifically/google/gemini-3.5-flash",
             // muse-spark reasons before it answers, so it needs a large
             // output budget — see the catalogue's max_output note.
             Self::MetaAi => "meta/muse-spark-1.2",
@@ -468,6 +472,7 @@ impl ProviderKind {
         match self {
             Self::TokenRouter => Some("TOKENROUTER_BASE_URL"),
             Self::AtlasCloud => Some("ATLASCLOUD_BASE_URL"),
+            Self::Unifically => Some("UNIFICALLY_BASE_URL"),
             Self::MetaAi => Some("META_BASE_URL"),
             Self::NineRouter => Some("NINEROUTER_BASE_URL"),
             Self::DashScope => Some("DASHSCOPE_BASE_URL"),
@@ -548,6 +553,7 @@ impl ProviderKind {
         match self {
             Self::TokenRouter => Some("https://api.tokenrouter.com/v1"),
             Self::AtlasCloud => Some("https://api.atlascloud.ai/v1"),
+            Self::Unifically => Some("https://api.unifically.com/v1"),
             Self::MetaAi => Some("https://api.meta.ai/v1"),
             // Self-hosted router; localhost default. Override per user via
             // NINEROUTER_BASE_URL for a remote / non-default-port instance.
@@ -658,6 +664,7 @@ impl ProviderKind {
             Self::OpenRouter => Some("OPENROUTER_API_KEY"),
             Self::TokenRouter => Some("TOKENROUTER_API_KEY"),
             Self::AtlasCloud => Some("ATLASCLOUD_API_KEY"),
+            Self::Unifically => Some("UNIFICALLY_API_KEY"),
             Self::MetaAi => Some("META_API_KEY"),
             Self::NineRouter => Some("NINEROUTER_API_KEY"),
             Self::Gemini => Some("GEMINI_API_KEY"),
@@ -765,6 +772,7 @@ impl ProviderKind {
             Self::OpenAI
             | Self::OpenAIResponses
             | Self::AtlasCloud
+            | Self::Unifically
             | Self::MetaAi
             // 9router uses full `9router/<alias>/<model>` ids; no short-alias
             // table (the alias segment is 9router's own, typed explicitly).
@@ -807,6 +815,8 @@ impl ProviderKind {
             Some(Self::OpenRouter)
         } else if model.starts_with("atlascloud/") {
             Some(Self::AtlasCloud)
+        } else if model.starts_with("unifically/") {
+            Some(Self::Unifically)
         } else if model.starts_with("meta/") {
             // Meta AI (api.meta.ai) — BYOK only, no gateway route. Ids look
             // like meta/muse-spark-1.2; the prefix is stripped before the
@@ -1215,7 +1225,14 @@ impl ThinkingLevel {
             "0" | "off" | "none" => Some(Some(0)),
             "1" | "low" | "min" | "minimal" => Some(Some(Self::LOW_BUDGET)),
             "2" | "medium" | "med" | "mid" => Some(Some(Self::MEDIUM_BUDGET)),
-            "3" | "high" | "max" => Some(Some(Self::HIGH_BUDGET)),
+            // No `"max"` alias. It used to land here, on HIGH_BUDGET, which is
+            // not a maximum of anything: the arm below accepts any budget from
+            // 100 up, so `/thinking 200000` is both legal and larger, and
+            // anything over 16_000 already reports itself as "high". A word
+            // that promises a ceiling while quietly picking 32_000 is worse
+            // than no word — the usage line offers `<tokens>` for people who
+            // want more, and never advertised `max` in the first place.
+            "3" | "high" => Some(Some(Self::HIGH_BUDGET)),
             _ => t.parse::<u32>().ok().filter(|n| *n >= 100).map(|n| Some(n)),
         }
     }
@@ -1329,6 +1346,26 @@ pub struct Usage {
     /// as `None`. `Some(0)` ⇒ provider explicitly reported zero
     /// reasoning tokens (distinct from "didn't report").
     pub reasoning_output_tokens: Option<u32>,
+}
+
+impl Usage {
+    /// The cache part of a `[tokens: …]` line, or nothing.
+    ///
+    /// It used to be printed only when a provider reported BOTH cache writes
+    /// and cache reads, which is Anthropic alone. OpenAI-compatible
+    /// providers (DeepSeek, OpenAI, Qwen) report reads only — and since
+    /// `input_tokens` is what was NOT served from cache, a long conversation
+    /// on one of them showed a falling `in` count and no sign of why.
+    pub fn cache_note(&self) -> String {
+        let w = self.cache_creation_input_tokens.unwrap_or(0);
+        let r = self.cache_read_input_tokens.unwrap_or(0);
+        match (w, r) {
+            (0, 0) => String::new(),
+            (0, r) => format!(" · cache: {r}r"),
+            (w, 0) => format!(" · cache: +{w}w"),
+            (w, r) => format!(" · cache: +{w}w/{r}r"),
+        }
+    }
 }
 
 impl Usage {
@@ -1508,6 +1545,17 @@ pub fn kind_has_credentials(kind: Option<ProviderKind>) -> bool {
             .map(|val| !val.trim().is_empty())
             .unwrap_or(false),
     }
+}
+
+/// Whether `kind` is something this user could actually send a request to —
+/// by its own credentials, or with the gateway supplying them.
+///
+/// The model picker lists only reachable providers (issue #215). Kept as its
+/// own function rather than inlined in the loop so the rule can be tested: it
+/// decides what a user sees, and getting it wrong in the strict direction
+/// makes working providers vanish, which is worse than the noise it removes.
+fn kind_is_reachable(cfg: &crate::config::AppConfig, kind: ProviderKind) -> bool {
+    kind_has_credentials(Some(kind)) || thclaws_gateway::for_kind(cfg, kind).is_some()
 }
 
 /// The `<provider>/` prefix a listing from `kind`'s endpoint must carry so
@@ -1765,6 +1813,22 @@ pub async fn build_all_models_payload() -> String {
         if pod && kind.tier() != ProviderTier::Featured {
             continue;
         }
+        // Issue #215: a provider the user cannot actually reach has no
+        // business in the picker. This listed all ~30 kinds fully populated
+        // from the shipped catalogue, so someone holding a single key scrolled
+        // past hundreds of models they would get a 401 from — the one they
+        // could use was the hard one to find.
+        //
+        // `kind_has_credentials` is the same predicate the GUI's auto-fallback
+        // already trusts, and it is not merely "is there an API key": keyless
+        // local runtimes (Ollama, vLLM, llama.cpp, LM Studio, OpenAI-compatible)
+        // and the file-OAuth Codex path all answer true on their own terms.
+        // The gateway arm matters just as much — a gateway-routed provider is
+        // reachable with no local key at all, and dropping it here would take
+        // away the models hosted users have.
+        if !kind_is_reachable(&app_cfg, *kind) {
+            continue;
+        }
         let provider_featured = kind.tier() == ProviderTier::Featured;
         // (id) -> (context, featured, context_unverified). `featured` =
         // gateway-servable: a Featured-tier provider with a priced catalogue
@@ -1861,6 +1925,65 @@ pub async fn build_all_models_payload() -> String {
     .to_string()
 }
 
+/// How long a built picker payload stays good. Long enough that opening the
+/// dropdown twice in a row cannot disagree with itself; short enough that a
+/// backend started a minute ago shows up without a restart.
+const PICKER_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+static PICKER_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(std::time::Instant, String)>>> =
+    std::sync::OnceLock::new();
+
+/// The picker payload, rebuilt at most once per [`PICKER_CACHE_TTL`].
+///
+/// Issue #215: every open re-parsed the catalogue, re-read settings **and**
+/// live-probed each endpoint-owned backend with an 800 ms / 1500 ms timeout.
+/// A probe that timed out dropped that provider's whole group, so two opens
+/// a second apart could disagree — which is what "very unreliable" meant.
+/// Caching does not make a slow endpoint fast, but it stops the same question
+/// getting two different answers while nothing has changed.
+pub async fn all_models_payload_cached() -> String {
+    if let Some(hit) = picker_cache_hit(PICKER_CACHE_TTL) {
+        return hit;
+    }
+    let body = build_all_models_payload().await;
+    picker_cache_store(&body);
+    body
+}
+
+/// The cached payload if it is still younger than `ttl`. Takes the TTL as an
+/// argument so a test can ask for the expired answer without sleeping out the
+/// real minute.
+fn picker_cache_hit(ttl: std::time::Duration) -> Option<String> {
+    PICKER_CACHE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|c| match &*c {
+            Some((at, body)) if at.elapsed() < ttl => Some(body.clone()),
+            _ => None,
+        })
+}
+
+fn picker_cache_store(body: &str) {
+    if let Ok(mut c) = PICKER_CACHE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+    {
+        *c = Some((std::time::Instant::now(), body.to_string()));
+    }
+}
+
+/// Drop the cached picker payload — for when something that changes the
+/// answer happened, rather than waiting out the TTL.
+pub fn invalidate_picker_cache() {
+    if let Ok(mut c) = PICKER_CACHE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+    {
+        *c = None;
+    }
+}
+
 /// Pick the default model for the highest-priority provider the user
 /// actually has usable credentials for — their own API key (env or
 /// keychain) **or** a gateway route — scanning in the order
@@ -1940,6 +2063,98 @@ pub fn preferred_default_model(cfg: &crate::config::AppConfig) -> Option<String>
 
 #[cfg(test)]
 mod tests {
+
+    /// Issue #215: the picker listed every provider kind fully populated from
+    /// the shipped catalogue, so a user with one key scrolled past hundreds of
+    /// models that would 401. It now lists only what the user can reach.
+    ///
+    /// The strict direction is the dangerous one — a predicate that is too
+    /// harsh makes working providers disappear — so this pins both sides:
+    /// a keyed provider without its key is out, and a keyless local runtime
+    /// stays in.
+    #[test]
+    fn the_picker_lists_only_providers_the_user_can_reach() {
+        let _g = crate::kms::test_env_lock();
+        let cfg = crate::config::AppConfig::default();
+
+        let key_var = ProviderKind::Anthropic
+            .api_key_env()
+            .expect("anthropic is key-authenticated");
+        let prev = std::env::var(key_var).ok();
+
+        std::env::remove_var(key_var);
+        assert!(
+            !super::kind_is_reachable(&cfg, ProviderKind::Anthropic),
+            "a key-authenticated provider with no key must not be listed"
+        );
+
+        std::env::set_var(key_var, "sk-test");
+        assert!(
+            super::kind_is_reachable(&cfg, ProviderKind::Anthropic),
+            "and must come back the moment the key is set"
+        );
+        std::env::remove_var(key_var);
+
+        // Keyless by nature: reachability is the gate, not a credential.
+        // These are the ones a naive "has an API key?" check would wrongly
+        // hide, leaving local-model users with an empty picker.
+        for kind in [
+            ProviderKind::Ollama,
+            ProviderKind::LMStudio,
+            ProviderKind::VLlm,
+            ProviderKind::LlamaCpp,
+            ProviderKind::OpenAICompat,
+            ProviderKind::LiteLlm,
+        ] {
+            assert!(
+                super::kind_is_reachable(&cfg, kind),
+                "{} needs no key and must stay listed",
+                kind.name()
+            );
+        }
+
+        match prev {
+            Some(v) => std::env::set_var(key_var, v),
+            None => std::env::remove_var(key_var),
+        }
+    }
+    /// Issue #215, the other half: the payload is cached so two opens a second
+    /// apart cannot disagree. Three things have to hold, and each one of them
+    /// failing looks like the bug the cache was meant to fix — a stale list, a
+    /// list that never refreshes, or a list that ignores a key the user just
+    /// added.
+    #[test]
+    fn the_picker_cache_expires_and_can_be_dropped() {
+        let _g = crate::kms::test_env_lock();
+        super::invalidate_picker_cache();
+
+        assert!(
+            super::picker_cache_hit(super::PICKER_CACHE_TTL).is_none(),
+            "an empty cache must miss, not serve an empty list"
+        );
+
+        super::picker_cache_store("{\"type\":\"all_models_list\"}");
+        assert_eq!(
+            super::picker_cache_hit(super::PICKER_CACHE_TTL).as_deref(),
+            Some("{\"type\":\"all_models_list\"}"),
+            "a fresh entry is served as-is"
+        );
+
+        // The expiry path, without sleeping out the real TTL: nothing is old
+        // enough to survive a zero-length one.
+        assert!(
+            super::picker_cache_hit(std::time::Duration::ZERO).is_none(),
+            "an entry past its TTL must miss so the list can refresh"
+        );
+
+        // What `store_provider_key` relies on — a new key must not wait 60s.
+        super::invalidate_picker_cache();
+        assert!(
+            super::picker_cache_hit(super::PICKER_CACHE_TTL).is_none(),
+            "invalidation must drop the entry immediately"
+        );
+    }
+
     /// `/models` on a user-pointed provider says which endpoint it asked,
     /// because "no models for openai-compat" tells the user nothing about
     /// the box they actually configured.
@@ -2629,6 +2844,7 @@ mod tests {
             ProviderKind::ChatGptCodex,
             ProviderKind::AgentSdk,
             ProviderKind::AtlasCloud,
+            ProviderKind::Unifically,
             ProviderKind::NineRouter,
             ProviderKind::QwenCloud,
             ProviderKind::ThaiLLM,
@@ -2841,6 +3057,35 @@ mod tests {
         );
         assert_eq!(ProviderKind::Minimax.name(), "minimax");
         assert_eq!(ProviderKind::Minimax.default_model(), "minimax/MiniMax-M3");
+    }
+
+    #[test]
+    fn detect_unifically_prefix_routes_to_unifically_provider() {
+        assert_eq!(
+            ProviderKind::detect("unifically/google/gemini-3.5-flash"),
+            Some(ProviderKind::Unifically)
+        );
+        assert_eq!(
+            ProviderKind::detect("unifically/anthropic/claude-sonnet-5"),
+            Some(ProviderKind::Unifically)
+        );
+        assert_eq!(
+            ProviderKind::Unifically.api_key_env(),
+            Some("UNIFICALLY_API_KEY")
+        );
+        assert_eq!(
+            ProviderKind::Unifically.endpoint_env(),
+            Some("UNIFICALLY_BASE_URL")
+        );
+        assert_eq!(
+            ProviderKind::Unifically.default_endpoint(),
+            Some("https://api.unifically.com/v1")
+        );
+        assert_eq!(ProviderKind::Unifically.name(), "unifically");
+        assert_eq!(
+            ProviderKind::Unifically.default_model(),
+            "unifically/google/gemini-3.5-flash"
+        );
     }
 
     #[test]
@@ -3096,6 +3341,21 @@ mod tests {
 mod thinking_level_tests {
     use super::ThinkingLevel as L;
 
+    /// `max` used to be an alias for `high`, i.e. 32_000 — while the raw-token
+    /// arm accepts anything from 100 up, so a plain `/thinking 200000` was both
+    /// accepted and larger. A word that promises a ceiling and silently picks a
+    /// middling number is worse than no word; the usage line never offered it.
+    #[test]
+    fn max_is_not_an_alias_for_high_because_it_is_not_a_maximum() {
+        assert_eq!(L::parse("max"), None, "`max` must be rejected, not aliased");
+        // The honest route to more is still open, and really is larger.
+        assert_eq!(L::parse("200000"), Some(Some(200_000)));
+        assert!(200_000 > L::HIGH_BUDGET);
+        // The documented words are untouched.
+        assert_eq!(L::parse("high"), Some(Some(L::HIGH_BUDGET)));
+        assert_eq!(L::parse("3"), Some(Some(L::HIGH_BUDGET)));
+    }
+
     #[test]
     fn parse_levels_names_and_raw() {
         assert_eq!(L::parse("0"), Some(Some(0)));
@@ -3154,6 +3414,25 @@ pub(crate) fn http_client() -> reqwest::Client {
 
 #[cfg(test)]
 mod http_client_tests {
+    #[test]
+    fn the_usage_line_shows_cache_reads_on_their_own() {
+        use super::Usage;
+        let u = |w: Option<u32>, r: Option<u32>| Usage {
+            cache_creation_input_tokens: w,
+            cache_read_input_tokens: r,
+            ..Usage::default()
+        };
+        assert_eq!(u(None, None).cache_note(), "");
+        assert_eq!(u(Some(0), Some(0)).cache_note(), "");
+        // DeepSeek / OpenAI: reads only. This printed nothing.
+        assert_eq!(u(None, Some(48_000)).cache_note(), " · cache: 48000r");
+        assert_eq!(u(Some(900), None).cache_note(), " · cache: +900w");
+        assert_eq!(
+            u(Some(900), Some(48_000)).cache_note(),
+            " · cache: +900w/48000r"
+        );
+    }
+
     /// Pins the settings, not the behaviour — reqwest exposes no getters,
     /// so the guard this test gives is that the builder still accepts the
     /// configuration and produces a client. The regression it exists for

@@ -394,6 +394,13 @@ pub async fn run_with_engine(
     // the task-local working dir, not process-global state.
     let mut permission_notice: Option<String> = None;
     if config.multi_tenant.is_some() {
+        // Read BEFORE the flag flips: `AppConfig::load` resolves
+        // `browser_enabled` to false once the process is multiuser, so
+        // afterwards there is no way to tell "the user asked for it and we
+        // refused" from "nobody asked".
+        let browser_was_asked_for = crate::config::AppConfig::load()
+            .map(|c| c.browser_enabled)
+            .unwrap_or(false);
         crate::workdir::set_multiuser(true);
         // MULTIUSER approval safety net. One shared worker processes every
         // user's turns and ShellInput carries no user_id, so an approval
@@ -420,6 +427,33 @@ pub async fn run_with_engine(
         } else {
             eprintln!(
                 "\x1b[36m[serve] multiuser: auto-approve (folder-isolated; approvals aren't per-user routable)\x1b[0m"
+            );
+        }
+
+        // dev-plan/65 P5 — the managed browser is REFUSED in a shared
+        // workspace. Multiuser isolates each user's FILES into their own
+        // folder, but the browser is not a file: one Chromium, one profile,
+        // one cookie jar for the whole pod. Whoever logs into a site there
+        // has logged the pod in — every other member's agent inherits that
+        // session, and any of them can read it back. Partitioning means one
+        // Chromium per active member, which a 2 Gi runner cannot pay for, so
+        // this is refuse-now / partition-if-asked (docs/enterprise).
+        //
+        // `AppConfig::load` is what actually clears the flag — on the
+        // RESOLVED config, so the Settings toggle and `/doctor` agree with
+        // the engine. This is only the explanation.
+        if browser_was_asked_for {
+            let msg = "Browser tools are off in shared (multiuser) workspaces. The managed \
+                       browser is one Chromium with one cookie jar for the whole workspace, \
+                       so a login by any member would be a login for everyone — unlike your \
+                       files, it cannot be isolated per user. Run a personal workspace if you \
+                       need the browser.";
+            permission_notice = Some(match permission_notice {
+                Some(prev) => format!("{prev}\n\n{msg}"),
+                None => msg.to_string(),
+            });
+            eprintln!(
+                "\x1b[33m[serve] multiuser: browserEnabled overridden to false (one shared cookie jar; not per-user isolatable)\x1b[0m"
             );
         }
     }
@@ -545,18 +579,77 @@ pub async fn run_with_engine(
     // function returns, the runtime unwinds, and the bot's own MCP children
     // — held with `kill_on_drop` — are reaped instead of orphaned.
     let supervised = std::env::var("THCLAWS_SUPERVISED").ok().as_deref() == Some("1");
-    let stdin_closed = async move {
-        if supervised {
-            crate::bots::supervisor::stdin_closed().await;
-        } else {
-            std::future::pending::<()>().await;
+    let shutdown = async move {
+        let stdin_closed = async move {
+            if supervised {
+                crate::bots::supervisor::stdin_closed().await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        // Flush the managed browser's cookies and close Chromium on the way
+        // out. `browser_cdp::shutdown()` was called from `gui.rs` only, and
+        // `--serve` had no signal handler at all — so a cloud pause (SIGTERM,
+        // then SIGKILL) lost every login newer than the 20 s snapshot timer,
+        // on the one path the cookie feature was written for, and orphaned
+        // Chromium (dev-plan/65 #4). Bounded so a wedged DevTools endpoint
+        // cannot eat the pod's grace period.
+        async fn close_browser() {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                tokio::task::spawn_blocking(crate::browser_cdp::shutdown),
+            )
+            .await;
+        }
+        tokio::select! {
+            // dev-plan/59: the supervised path deliberately returns so the
+            // runtime unwinds and this child's own MCP children are reaped.
+            _ = stdin_closed => close_browser().await,
+            _ = terminate_signal() => {
+                eprintln!("\x1b[36m[serve] shutting down\x1b[0m");
+                close_browser().await;
+                // Exit rather than fall into axum's graceful shutdown, which
+                // waits for in-flight connections — and the Browser tab holds
+                // a WebSocket open, so Ctrl-C would look wedged and a pod
+                // would burn its whole grace period. A signal killed this
+                // process outright before; it still does, minus the lost
+                // cookies.
+                std::process::exit(0);
+            }
         }
     };
     axum::serve(listener, app)
-        .with_graceful_shutdown(stdin_closed)
+        .with_graceful_shutdown(shutdown)
         .await
         .map_err(|e| crate::error::Error::Tool(format!("serve: {e}")))?;
     Ok(())
+}
+
+/// Resolves on SIGTERM or SIGINT (Ctrl-C on Windows). `--serve` previously
+/// took the default disposition for both: the process died on the spot, with
+/// no chance to flush anything.
+async fn terminate_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let (mut term, mut int) = match (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+        ) {
+            (Ok(t), Ok(i)) => (t, i),
+            // Registration can only fail on a broken platform; falling back
+            // to "never" keeps today's behaviour rather than exiting early.
+            _ => return std::future::pending().await,
+        };
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = int.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 // ---- Workspace sync handlers (dev-plan/51) ----
@@ -1038,6 +1131,7 @@ pub async fn run_supervisor_on(listener: tokio::net::TcpListener) -> crate::erro
     }
     let cfg = crate::bots::BotsConfig::load(&workspace)?;
     let sup = crate::bots::supervisor::BotSupervisor::new(&workspace)?;
+    let _ = HOST_SUPERVISOR.set(sup.clone());
     spawn_host_heartbeat(sup.clone());
     let cap = crate::bots::supervisor::MAX_LIVE_BOTS;
     if cfg.bots.len() > cap {
@@ -1045,6 +1139,33 @@ pub async fn run_supervisor_on(listener: tokio::net::TcpListener) -> crate::erro
             "\x1b[33m[bots] {} agents listed; starting the first {cap}. An idle policy that tears \
              children down is what lifts this, not a bigger number.\x1b[0m",
             cfg.bots.len()
+        );
+    }
+    // finding 11: an agent installed before agents learned $THCLAWS_AGENT_DIR
+    // looks for its own scripts and state at the workspace root and finds
+    // nothing. It does not error — it reports an empty project, so a GUI shell
+    // draws its chrome around no data. Repairing it here, before anything
+    // starts, is the difference between opening an old project and losing it.
+    // The originals are copied aside first, since this is done unasked.
+    for (slug, r) in crate::bots::agent_paths::repair_stale(&workspace) {
+        eprintln!(
+            "\x1b[36m[bots] repaired '{}' so it can find the files it ships — {} file(s), \
+             {} command(s), {} path(s). The originals are in \
+             .thclaws/bots/{}/.thclaws/state/pre-agent-dir/\x1b[0m",
+            slug, r.files, r.commands, r.literals, slug
+        );
+    }
+    // finding 12: a workspace an older engine migrated twice supervises a
+    // folder that is not an agent. It starts and then does nothing, which is
+    // the worst way to fail — say so here, where the user is looking.
+    if let Some((slug, dir)) = crate::bots::migrate::nested_bot(&workspace) {
+        eprintln!(
+            "\x1b[33m[bots] '{slug}' sits deeper than it needs to — {} holds its own {}, so an \
+             older migration ran twice and the agent runs a level below it. That is followed, \
+             and nothing is missing; `thclaws bots unnest` flattens it and drops the extra \
+             engine process.\x1b[0m",
+            dir.display(),
+            crate::bots::CONFIG_REL
         );
     }
     // The first entry is the default a browser reaches — `bots.json` order,
@@ -1183,6 +1304,49 @@ async fn supervisor_ws(
 /// `app.js` or a previewed page's stylesheet is fetched relative to its
 /// document, which drops the query the page put there, but the Referer still
 /// carries it.
+/// `(slug, dir)` for every agent this host supervises.
+fn bot_dirs(sup: &crate::bots::supervisor::BotSupervisor) -> Vec<(String, std::path::PathBuf)> {
+    sup.list()
+        .into_iter()
+        .map(|b| (b.slug.clone(), b.dir.clone()))
+        .collect()
+}
+
+/// The shell id in a `/gui-shell/<id>/…` path, if this is one.
+fn shell_id_from_path(path: &str) -> Option<&str> {
+    let id = path.strip_prefix("/gui-shell/")?.split('/').next()?;
+    // A traversal here would let a crafted URL probe directories outside the
+    // shelf; an empty id matches nothing and would only waste the walk.
+    if id.is_empty() || id.contains("..") || id.contains('\\') {
+        return None;
+    }
+    Some(id)
+}
+
+/// Which agent ships shell `id`, read off disk.
+///
+/// The host already knows this: a shell id is a folder inside one agent's
+/// tree. Asking the browser instead — `?bot=` on the index, the Referer on
+/// everything relative under it — puts the answer in a header the shell's own
+/// `Referrer-Policy` suppresses, and every sub-asset then goes to whichever
+/// agent happens to be first.
+///
+/// `None` when no agent has it (a user-level or built-in shell belongs to no
+/// single agent) and also when more than one does — both are for the caller's
+/// remaining layers to settle rather than for this one to guess at.
+fn owner_of_shell(bots: &[(String, std::path::PathBuf)], id: &str) -> Option<String> {
+    let mut owner: Option<&str> = None;
+    for (slug, dir) in bots {
+        if dir.join(".thclaws").join("gui-shell").join(id).is_dir() {
+            if owner.is_some() {
+                return None;
+            }
+            owner = Some(slug);
+        }
+    }
+    owner.map(str::to_string)
+}
+
 fn bot_from_referer(req: &Request) -> Option<String> {
     let referer = req
         .headers()
@@ -1230,7 +1394,18 @@ async fn supervisor_forward(
     Query(q): Query<BotQuery>,
     req: Request,
 ) -> Response {
-    let want = q.bot.clone().or_else(|| bot_from_referer(&req));
+    // Layered, most explicit first: what the caller asked for, then what the
+    // filesystem says owns this shell, then the Referer, then the default.
+    // The disk lookup sits above the Referer because it cannot be stripped by
+    // a browser, an extension or a proxy — the header is the fragile one, and
+    // relying on it alone is what shipped shells that rendered unstyled.
+    let want = q
+        .bot
+        .clone()
+        .or_else(|| {
+            shell_id_from_path(req.uri().path()).and_then(|id| owner_of_shell(&bot_dirs(&sup), id))
+        })
+        .or_else(|| bot_from_referer(&req));
     let bot = match pick_bot(&sup, want.as_deref()) {
         Ok(b) => b,
         Err(resp) => return resp,
@@ -1983,6 +2158,44 @@ async fn sync_bearer_gate(
 /// probe for detached background jobs. Set once in `run_with_engine`.
 static SERVE_WORKSPACE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
+/// The running host, for the desktop's quit path (#209).
+static HOST_SUPERVISOR: std::sync::OnceLock<Arc<crate::bots::supervisor::BotSupervisor>> =
+    std::sync::OnceLock::new();
+
+/// #209/#210: stop every agent and wait for it, from a plain thread.
+///
+/// The desktop window closes on the GUI thread, which is the async runtime's
+/// own thread — it cannot await. It also must not simply leave: an agent's
+/// stderr is a pipe into this process, so exiting first kills the pipe under
+/// the agent and its next log line aborts it. Signalling is async-free, and
+/// the wait is a poll, so the supervisor's tasks keep running while this
+/// blocks. `true` when every agent stopped inside `timeout`.
+pub fn stop_host_agents(timeout: Duration) -> bool {
+    match HOST_SUPERVISOR.get() {
+        Some(sup) => stop_and_wait(sup, timeout),
+        None => true,
+    }
+}
+
+fn stop_and_wait(sup: &crate::bots::supervisor::BotSupervisor, timeout: Duration) -> bool {
+    use crate::bots::supervisor::BotState;
+    sup.shutdown();
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let settled = sup
+            .list()
+            .iter()
+            .all(|b| matches!(b.state(), BotState::Stopped | BotState::CrashLooped { .. }));
+        if settled {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// True if a detached background job is still running in the workspace. Any
 /// agent that spawns one drops a `<dir>/.jobs/<id>.json` carrying a live `pid`
 /// (course.py's `job start` does this); while any such pid is alive the cloud
@@ -2547,6 +2760,9 @@ async fn handle_socket(socket: WebSocket, state: ServeState, shared: Arc<SharedS
     // initial-state snapshot closure below.
     let initial_session_roots = shared.session_roots.clone();
     let ctx = IpcContext {
+        // One id per socket: this connection is one viewer of the live
+        // browser view, and closing the socket releases exactly it.
+        viewer_id: crate::ipc::next_viewer_id(),
         is_serve_mode: true,
         // dev-plan/35 Tier 1: `shared` here is the RESOLVED handle
         // (per-user in multi-tenant mode; the default in single-
@@ -2579,6 +2795,37 @@ async fn handle_socket(socket: WebSocket, state: ServeState, shared: Arc<SharedS
             // THIS client; no broadcast, no worker involvement.
             if let Some(hist) = build_gui_shell_history_payload(sessions_dir) {
                 let _ = initial_dispatch(hist);
+            }
+            // A newer release, when the last check found one. Same shape as
+            // the desktop's: the cached answer is a file read, so nothing on
+            // the path to a usable page waits on github.com, and the refresh
+            // behind it only has to land before the next connect.
+            //
+            // `update_check::enabled()` is false inside our container images,
+            // so a hosted workspace — whose engine is ours and not the user's
+            // to upgrade — stays quiet without a check here.
+            if let Some(up) = crate::update_check::cached() {
+                let _ = initial_dispatch(
+                    serde_json::json!({
+                        "type": "update_available",
+                        "version": up.version,
+                        "url": up.url,
+                    })
+                    .to_string(),
+                );
+            }
+            tokio::spawn(async { crate::update_check::refresh().await });
+            // finding 11/12: the same notices the desktop shows. A browser
+            // user — a hosted workspace especially — has no stderr at all, and
+            // an agent that cannot reach its own files draws an empty panel
+            // rather than an error. Only under a host: off one, an agent's
+            // folder IS the workspace and neither problem exists.
+            if crate::workdir::agent_dir().is_some() {
+                for frame in
+                    crate::bots::migrate::workspace_notice_frames(&crate::workdir::workspace_root())
+                {
+                    let _ = initial_dispatch(frame);
+                }
             }
         }),
         on_zoom: Arc::new(|_scale| {
@@ -2734,6 +2981,12 @@ async fn handle_socket(socket: WebSocket, state: ServeState, shared: Arc<SharedS
     event_forwarder.abort();
     ask_forwarder.abort();
     writer.abort();
+    // A browser that closed its tab never sent `browser_screencast_stop`, and
+    // the live view is ref-counted now — an un-released viewer would keep
+    // Chromium screencasting into a channel nobody drains. Cheap no-op when
+    // this connection was not watching.
+    let viewer = ctx.viewer_id;
+    tokio::task::spawn_blocking(move || crate::browser_cdp::screencast_stop(viewer));
 }
 
 /// Build the `initial_state` JSON envelope ported from gui.rs's
@@ -2878,6 +3131,70 @@ fn build_kms_initial_payload(config: &AppConfig) -> Vec<serde_json::Value> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The host can name a shell's agent without asking the browser, which is
+    /// the point: the Referer it used to rely on is suppressed by the shell's
+    /// own `Referrer-Policy`, and every sub-asset went to the wrong agent.
+    #[test]
+    fn a_shell_is_traced_back_to_the_agent_that_ships_it() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mk = |slug: &str, shell: &str| {
+            let dir = tmp.path().join(slug);
+            std::fs::create_dir_all(dir.join(".thclaws").join("gui-shell").join(shell)).unwrap();
+            (slug.to_string(), dir)
+        };
+        let main = mk("main", "session-explorer");
+        let writer = mk("writer", "book-studio");
+        let bots = vec![main, writer];
+
+        assert_eq!(
+            owner_of_shell(&bots, "book-studio").as_deref(),
+            Some("writer"),
+            "the second agent's shell must not resolve to the first"
+        );
+        assert_eq!(
+            owner_of_shell(&bots, "session-explorer").as_deref(),
+            Some("main")
+        );
+        // A built-in or user-level shell belongs to no one agent: leave it to
+        // the caller's remaining layers rather than guess.
+        assert_eq!(owner_of_shell(&bots, "not-installed"), None);
+    }
+
+    #[test]
+    fn a_shell_id_two_agents_both_ship_is_left_unresolved() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut bots = Vec::new();
+        for slug in ["main", "writer"] {
+            let dir = tmp.path().join(slug);
+            std::fs::create_dir_all(dir.join(".thclaws").join("gui-shell").join("desk")).unwrap();
+            bots.push((slug.to_string(), dir));
+        }
+        // Ambiguous — picking either would be a coin flip presented as a fact.
+        assert_eq!(owner_of_shell(&bots, "desk"), None);
+    }
+
+    #[test]
+    fn only_a_gui_shell_path_yields_an_id_and_never_a_traversal() {
+        assert_eq!(
+            shell_id_from_path("/gui-shell/book-studio/style.css"),
+            Some("book-studio")
+        );
+        assert_eq!(
+            shell_id_from_path("/gui-shell/book-studio/"),
+            Some("book-studio")
+        );
+        assert_eq!(
+            shell_id_from_path("/gui-shell/book-studio"),
+            Some("book-studio")
+        );
+        // Not a shell path at all.
+        assert_eq!(shell_id_from_path("/file-asset/out/a.png"), None);
+        assert_eq!(shell_id_from_path("/ws"), None);
+        // A crafted id must not send the walk outside the shelf.
+        assert_eq!(shell_id_from_path("/gui-shell/../../etc/passwd"), None);
+        assert_eq!(shell_id_from_path("/gui-shell//style.css"), None);
+    }
     use super::*;
 
     /// ServeConfig defaults bind to localhost — security-relevant
@@ -3398,6 +3715,38 @@ mod tests {
     /// `/healthz` open for a parent probe, everything else behind the bearer.
     /// `/file-asset` is forwarded to a bot; `/workspace/sync/*` is the host's
     /// own, over the whole workspace.
+    /// #209/#210: the desktop's quit path stops agents from the GUI thread,
+    /// which cannot await. Signal, then wait by polling, so the host's pipes
+    /// outlive the children that log into them.
+    #[tokio::test]
+    async fn stopping_the_host_waits_for_its_agents() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(crate::bots::bot_dir(dir.path(), "main")).unwrap();
+        let program = dir.path().join("stub-engine");
+        std::fs::write(&program, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let sup = crate::bots::supervisor::BotSupervisor::with_program(dir.path(), &program);
+        let bot = sup
+            .start(&crate::bots::BotDef {
+                slug: "main".into(),
+                name: None,
+            })
+            .unwrap();
+
+        let sup2 = sup.clone();
+        let stopped =
+            tokio::task::spawn_blocking(move || stop_and_wait(&sup2, Duration::from_secs(10)))
+                .await
+                .unwrap();
+        assert!(stopped, "every agent should stop inside the timeout");
+        assert!(matches!(
+            bot.state(),
+            crate::bots::supervisor::BotState::Stopped
+        ));
+    }
+
     #[tokio::test]
     async fn supervisor_router_gates_everything_but_healthz() {
         use tower::ServiceExt as _;

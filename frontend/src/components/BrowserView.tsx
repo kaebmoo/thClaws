@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { send, subscribe } from "../hooks/useIPC";
+import { send, subscribe, type IPCMessage } from "../hooks/useIPC";
 import { ChatMarkdown } from "./ChatMarkdown";
 
 // docs/browser Phase 1 — the Browser tab for the engine-managed
@@ -26,6 +26,9 @@ type BrowserStatus = {
   command: string;
   command_found: boolean;
   cdp: boolean;
+  chromium: string;
+  chromium_found: boolean;
+  viewport: string;
 };
 
 type ActivityEntry = {
@@ -72,6 +75,16 @@ export function BrowserView({ active }: { active: boolean }) {
   // slice 3: live CDP screencast — frames stream in while takeover is
   // on and the engine owns the browser; falls back to screenshots.
   const [live, setLive] = useState(false);
+  // dev-plan/65 P3: the agent's open tabs, and which one the live view is on.
+  // `pinned` is the human steering — null means "follow whatever tab the
+  // agent just opened", which is what the view does by itself.
+  const [tabs, setTabs] = useState<{ id: string; url: string; title: string }[]>([]);
+  const [activeTab, setActiveTab] = useState<string | null>(null);
+  const [pinned, setPinned] = useState<string | null>(null);
+  // "live" | "attaching" | "detached" | "error" — the state of the VIEW, as
+  // distinct from the page. A dead target used to leave the last frame up
+  // forever, which reads as a frozen page rather than a lost connection.
+  const [viewState, setViewState] = useState<string>("live");
   const [pageUrl, setPageUrl] = useState("");
   const [urlInput, setUrlInput] = useState("");
   const [typeInput, setTypeInput] = useState("");
@@ -83,6 +96,8 @@ export function BrowserView({ active }: { active: boolean }) {
   const activeRef = useRef(active);
   const shotTimer = useRef<number | null>(null);
   const lastFrameAt = useRef(0);
+  // Page size in CSS pixels, reported with each screencast frame.
+  const frameSize = useRef<{ w: number; h: number } | null>(null);
   // Proof that Chromium is already running, so the screencast can attach
   // without being the thing that launches it.
   const [browserUp, setBrowserUp] = useState(false);
@@ -109,8 +124,16 @@ export function BrowserView({ active }: { active: boolean }) {
   function imgClickCoords(e: React.MouseEvent<HTMLImageElement>) {
     const img = e.currentTarget;
     const rect = img.getBoundingClientRect();
-    const natW = img.naturalWidth || 1;
-    const natH = img.naturalHeight || 1;
+    // In live mode the frame is a SCALED picture of the page (Chromium fits it
+    // to the engine's startScreencast cap), so the image's natural size is not
+    // the coordinate space CDP input wants — the page's CSS-pixel size that
+    // arrives with each frame is. The two agreed only while the viewport was
+    // smaller than the cap, which is why this looked correct before the
+    // viewport was fixed (dev-plan/65 #1). Screenshot mode still maps through
+    // the image: playwright-mcp returns it at viewport size, unscaled.
+    const page = live ? frameSize.current : null;
+    const natW = page?.w || img.naturalWidth || 1;
+    const natH = page?.h || img.naturalHeight || 1;
     const scale = Math.min(rect.width / natW, rect.height / natH);
     const drawnW = natW * scale;
     const drawnH = natH * scale;
@@ -183,6 +206,10 @@ export function BrowserView({ active }: { active: boolean }) {
       /* a pointer that is already gone — the gesture still relays */
     }
     dragging.current = true;
+    // `preventDefault` above suppresses the focus a mousedown would normally
+    // give the focusable wrapper, so take it explicitly — otherwise clicking
+    // the page and then typing sends the keystrokes nowhere.
+    frameBoxRef.current?.focus();
     if (!liveRef.current) {
       mcpMove(pt);
       enqueueMcp("browser_mouse_down", {});
@@ -217,6 +244,79 @@ export function BrowserView({ active }: { active: boolean }) {
       flushMove();
     }
     send({ type: "browser_cdp_input", kind: "up", args: { x: pt.x, y: pt.y } });
+  }
+
+  // dev-plan/65 P4 — real keyboard passthrough. The frame takes focus and
+  // forwards the human's own keydown/keyup, modifiers included, so a chord
+  // (Cmd-A, Ctrl-L), a held arrow and autorepeat all behave. The text box
+  // below stays: over a 200 ms link, typing a long string one key at a time
+  // is genuinely worse than sending it whole.
+  const [frameFocused, setFrameFocused] = useState(false);
+  const frameBoxRef = useRef<HTMLTextAreaElement | null>(null);
+  // When ⌘/Ctrl-V was last struck, cleared by the native paste event. Non-zero
+  // after the timeout means the event never came and the backstop should run.
+  const pasteKeyAt = useRef(0);
+
+  function keyArgs(e: React.KeyboardEvent): Record<string, unknown> {
+    return {
+      key: e.key,
+      ctrl: e.ctrlKey,
+      meta: e.metaKey,
+      shift: e.shiftKey,
+      alt: e.altKey,
+    };
+  }
+
+  function onFrameKey(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (!takeoverRef.current || !liveRef.current) return;
+    // Let the user out: Escape with nothing held blurs the frame instead of
+    // reaching the page, so the keyboard cannot be captured with no way back.
+    if (e.type === "keydown" && e.key === "Escape" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      e.currentTarget.blur();
+      return;
+    }
+    // Paste is handled by onPaste — letting the chord through as well would
+    // send the key AND the clipboard. A textarea is editable, so the native
+    // paste event does fire there; the async clipboard read below is a
+    // BACKSTOP for a webview that still refuses it, and `pastedAt` keeps the
+    // two from both firing.
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "v") {
+      if (e.type !== "keydown") return;
+      const struckAt = Date.now();
+      pasteKeyAt.current = struckAt;
+      window.setTimeout(() => {
+        if (pasteKeyAt.current !== struckAt) return; // onPaste already took it
+        pasteKeyAt.current = 0;
+        navigator.clipboard
+          ?.readText()
+          .then((text) => {
+            if (text) send({ type: "browser_cdp_input", kind: "text", args: { text } });
+          })
+          .catch(() => {
+            /* no clipboard permission in this webview — nothing more to try */
+          });
+      }, 150);
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    send({
+      type: "browser_cdp_input",
+      kind: e.type === "keyup" ? "keyup" : "keydown",
+      args: keyArgs(e),
+    });
+  }
+
+  function onFramePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    if (!takeoverRef.current || !liveRef.current) return;
+    pasteKeyAt.current = 0; // the native event came; the backstop stands down
+    const text = e.clipboardData.getData("text");
+    if (!text) return;
+    e.preventDefault();
+    // `Input.insertText` puts the whole string in at once — the page sees it
+    // as typed, and it costs one round trip rather than one per character.
+    send({ type: "browser_cdp_input", kind: "text", args: { text } });
   }
 
   function onShotMouseMove(e: React.PointerEvent<HTMLImageElement>) {
@@ -279,7 +379,7 @@ export function BrowserView({ active }: { active: boolean }) {
   }
 
   useEffect(() => {
-    const unsub = subscribe((msg: any) => {
+    const unsub = subscribe((msg: IPCMessage) => {
       if (msg.type === "browser_status") {
         setStatus({
           enabled: Boolean(msg.enabled),
@@ -287,6 +387,9 @@ export function BrowserView({ active }: { active: boolean }) {
           command: typeof msg.command === "string" ? msg.command : "",
           command_found: Boolean(msg.command_found),
           cdp: Boolean(msg.cdp),
+          chromium: typeof msg.chromium === "string" ? msg.chromium : "",
+          chromium_found: Boolean(msg.chromium_found),
+          viewport: typeof msg.viewport === "string" ? msg.viewport : "",
         });
         return;
       }
@@ -306,6 +409,13 @@ export function BrowserView({ active }: { active: boolean }) {
         return;
       }
       if (msg.type === "browser_frame" && typeof msg.data === "string") {
+        // The page's own size in CSS pixels, which is the space CDP input
+        // works in. Chromium scales the JPEG down to the engine's frame cap,
+        // so the image's pixels are a different space — recorded on every
+        // frame (not just the first) because the page can be resized.
+        if (typeof msg.w === "number" && typeof msg.h === "number" && msg.w > 0 && msg.h > 0) {
+          frameSize.current = { w: msg.w, h: msg.h };
+        }
         // Drop frames that arrive inside the interval rather than queueing
         // them — a stale frame has no value once a newer one exists.
         const now = Date.now();
@@ -320,6 +430,22 @@ export function BrowserView({ active }: { active: boolean }) {
       if (msg.type === "browser_screencast") {
         setLive(Boolean(msg.active));
         if (!msg.ok && typeof msg.error === "string") setInputErr(msg.error);
+        return;
+      }
+      if (msg.type === "browser_tabs" && Array.isArray(msg.tabs)) {
+        setTabs(msg.tabs as { id: string; url: string; title: string }[]);
+        setActiveTab(typeof msg.active === "string" ? msg.active : null);
+        // A pinned tab the agent closed: drop the pin rather than leave the
+        // strip showing a selection that no longer exists.
+        setPinned((p) =>
+          p && !(msg.tabs as { id: string }[]).some((t) => t.id === p) ? null : p,
+        );
+        return;
+      }
+      if (msg.type === "browser_view" && typeof msg.state === "string") {
+        setViewState(msg.state);
+        if (typeof msg.url === "string" && msg.url) setPageUrl(msg.url);
+        if (msg.state === "error" && typeof msg.error === "string") setInputErr(msg.error);
         return;
       }
       if (msg.type === "browser_console" && typeof msg.text === "string") {
@@ -483,7 +609,6 @@ export function BrowserView({ active }: { active: boolean }) {
   // Catch up on a screenshot missed while the tab was hidden.
   useEffect(() => {
     if (active && staleShot.current) requestShot();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
 
   // Screencast lifecycle. It used to require takeover, which reserved the
@@ -603,6 +728,33 @@ export function BrowserView({ active }: { active: boolean }) {
                   restart thClaws.
                 </p>
               )}
+              {/* Why the live view is missing, rather than leaving the user to
+                  conclude it doesn't exist: with no Playwright Chromium the
+                  engine can't own the browser, so takeover falls back to ~1 fps
+                  screenshots and nothing said so. */}
+              {status.command_found && !status.cdp && (
+                <p className="text-xs mt-1 leading-relaxed" style={{ color: "var(--text-secondary)" }}>
+                  {status.chromium_found ? (
+                    <>
+                      ⓘ Live view off — the engine isn&apos;t driving this browser.
+                      Screenshots and takeover still work, at about one frame a second.
+                    </>
+                  ) : (
+                    <>
+                      ⓘ No Playwright Chromium found, so the <strong>live view and
+                      takeover run on ~1 fps screenshots</strong>. Install it once for a
+                      real live stream: <code>npx playwright install chromium</code>,
+                      then restart thClaws.
+                    </>
+                  )}
+                </p>
+              )}
+              {status.cdp && status.viewport && (
+                <p className="text-[10px] mt-1" style={{ color: "var(--text-secondary)" }}>
+                  live view ready · viewport {status.viewport}
+                  {status.chromium ? ` · ${status.chromium}` : ""}
+                </p>
+              )}
             </>
           )}
         </div>
@@ -613,8 +765,111 @@ export function BrowserView({ active }: { active: boolean }) {
             className="rounded-lg border shrink-0 overflow-hidden"
             style={{ borderColor: "var(--border)", background: "var(--bg-primary)" }}
           >
+            {/* Tab strip (dev-plan/65 P3). The view follows the tab the agent
+                just opened; clicking one pins it there until the pin is
+                cleared, so a human reading a page is not yanked away. */}
+            {live && tabs.length > 1 && (
+              <div
+                className="flex gap-1 items-center px-1.5 py-1 overflow-x-auto"
+                style={{ borderBottom: "1px solid var(--border)" }}
+              >
+                {tabs.map((t) => {
+                  const on = t.id === activeTab;
+                  return (
+                    <button
+                      key={t.id}
+                      onClick={() => {
+                        const next = pinned === t.id ? null : t.id;
+                        setPinned(next);
+                        send({ type: "browser_tab_select", target: next });
+                      }}
+                      title={`${t.url}${pinned === t.id ? " — pinned (click to follow the agent again)" : ""}`}
+                      className="text-[10px] px-2 py-0.5 rounded border shrink-0 max-w-[14rem] truncate"
+                      style={{
+                        borderColor: on ? "var(--accent)" : "var(--border)",
+                        color: on ? "var(--text-primary)" : "var(--text-secondary)",
+                        background: on ? "var(--bg-secondary)" : "transparent",
+                      }}
+                    >
+                      {pinned === t.id ? "📌 " : ""}
+                      {shorten(t.title || t.url || "tab", 34)}
+                    </button>
+                  );
+                })}
+                {pinned && (
+                  <button
+                    onClick={() => {
+                      setPinned(null);
+                      send({ type: "browser_tab_select", target: null });
+                    }}
+                    className="text-[10px] px-2 py-0.5 rounded border shrink-0"
+                    style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
+                    title="Follow whichever tab the agent is on"
+                  >
+                    follow agent
+                  </button>
+                )}
+              </div>
+            )}
+            {/* The view's own state, not the page's. Without this a dead
+                target just froze on its last frame and read as a hung page. */}
+            {live && viewState !== "live" && (
+              <div
+                className="text-[10px] px-2 py-1"
+                style={{
+                  borderBottom: "1px solid var(--border)",
+                  color: "var(--text-secondary)",
+                  background: "var(--bg-secondary)",
+                }}
+              >
+                {viewState === "attaching"
+                  ? "◌ view detached — reattaching…"
+                  : viewState === "detached"
+                    ? "◌ no page open — the view will attach when one is"
+                    : "⚠ view error — the frame below is the last one received"}
+              </div>
+            )}
             {shot ? (
               <div>
+                {/* The keyboard target is an invisible TEXTAREA laid over the
+                    frame, not the frame itself. `paste` only fires on an
+                    editable element — WebKit (which is what the desktop app
+                    runs) never fires it on a focusable <div>, so ⌘V arrived
+                    as a keydown, was skipped in favour of a paste event that
+                    could not come, and nothing happened. A textarea is
+                    editable, so the native paste lands here and we forward
+                    the text. `pointer-events: none` keeps clicks, drags and
+                    the wheel going to the image below; focus is given
+                    programmatically on pointerdown. Every keydown is
+                    preventDefault'd, so nothing ever accumulates in it. */}
+                <div className="relative">
+                <textarea
+                  ref={frameBoxRef}
+                  tabIndex={takeover && live ? 0 : -1}
+                  onKeyDown={onFrameKey}
+                  onKeyUp={onFrameKey}
+                  onPaste={onFramePaste}
+                  onFocus={() => setFrameFocused(true)}
+                  onBlur={() => setFrameFocused(false)}
+                  aria-label="Browser takeover keyboard"
+                  spellCheck={false}
+                  autoComplete="off"
+                  className="absolute inset-0 w-full h-full resize-none outline-none border-0 p-0 pointer-events-none"
+                  // Transparent, NOT `opacity: 0`. ⌘V pastes into the chat
+                  // input of this same app, so WebKit does handle the key
+                  // equivalent without a native Edit menu — it just would not
+                  // do it for a zero-opacity element, which it treats as
+                  // nothing to paste into. Fully transparent ink on a
+                  // transparent background is invisible to the eye and a
+                  // normal visible editable element to the engine. Nothing is
+                  // ever legible in it anyway: every keydown is
+                  // preventDefault'd, so it stays empty.
+                  style={{
+                    caretColor: "transparent",
+                    color: "transparent",
+                    background: "transparent",
+                  }}
+                />
                 <img
                   ref={shotImgRef}
                   src={shot.src}
@@ -623,7 +878,11 @@ export function BrowserView({ active }: { active: boolean }) {
                   style={{
                     background: "#fff",
                     cursor: takeover ? "crosshair" : "default",
-                    outline: takeover ? "2px solid var(--accent)" : "none",
+                    outline: takeover
+                      ? frameFocused
+                        ? "2px solid var(--accent)"
+                        : "2px dashed var(--accent)"
+                      : "none",
                     outlineOffset: -2,
                   }}
                   onPointerMove={onShotMouseMove}
@@ -632,6 +891,7 @@ export function BrowserView({ active }: { active: boolean }) {
                   onPointerCancel={onShotPointerUp}
                   draggable={false}
                 />
+                </div>
                 <div
                   className="text-[10px] px-2 py-1 flex justify-between"
                   style={{ color: "var(--text-secondary)", borderTop: "1px solid var(--border)" }}
@@ -639,7 +899,9 @@ export function BrowserView({ active }: { active: boolean }) {
                   <span>
                     {takeover
                       ? live
-                        ? `● LIVE — click / scroll / type${pageUrl ? ` · ${shorten(pageUrl, 60)}` : ""}`
+                        ? frameFocused
+                          ? `● LIVE — keyboard goes to the page · Esc to release${pageUrl ? ` · ${shorten(pageUrl, 60)}` : ""}`
+                          : `● LIVE — click the page to type into it${pageUrl ? ` · ${shorten(pageUrl, 60)}` : ""}`
                         : "takeover: click / scroll on the page, type below"
                       : "auto-captured after browser actions"}
                   </span>
@@ -728,6 +990,36 @@ export function BrowserView({ active }: { active: boolean }) {
                       {k === "Escape" ? "Esc" : k === "Backspace" ? "⌫" : k}
                     </button>
                   ))}
+                  {/* macOS eats ⌘V before the web content sees it — the app
+                      has no native Edit menu, so the key equivalent never
+                      becomes a DOM keydown. This button takes the same path
+                      the Ctrl-V backstop does and works today, whatever the
+                      platform does with the chord. */}
+                  {live && (
+                    <button
+                      onClick={() => {
+                        navigator.clipboard
+                          ?.readText()
+                          .then((text) => {
+                            if (text) {
+                              send({
+                                type: "browser_cdp_input",
+                                kind: "text",
+                                args: { text },
+                              });
+                            }
+                          })
+                          .catch(() =>
+                            setInputErr("clipboard unavailable — paste into the box above instead"),
+                          );
+                      }}
+                      className="text-[10px] px-1.5 py-1 rounded border"
+                      style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
+                      title="Paste the clipboard into the page"
+                    >
+                      Paste
+                    </button>
+                  )}
                 </div>
                 {inputErr && (
                   <div className="text-[10px]" style={{ color: "#dc2626" }}>

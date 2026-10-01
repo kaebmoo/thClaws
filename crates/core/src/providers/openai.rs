@@ -1406,7 +1406,9 @@ mod thinking_off_tests {
         assert_eq!(b["reasoning_effort"], "high");
         let mut b = json!({});
         apply_thinking(&mut b, "gpt-5.4-mini", "https://api.openai.com/v1", Some(0));
-        assert_eq!(b["reasoning_effort"], "minimal");
+        // `none`, not `minimal`: measured 2026-09-21, gpt-5.1 and later
+        // answer `minimal` with a 400. This assertion pinned the bug.
+        assert_eq!(b["reasoning_effort"], "none");
         let mut b = json!({});
         apply_thinking(
             &mut b,
@@ -1455,7 +1457,9 @@ mod thinking_off_tests {
         assert_eq!(b["enable_thinking"], false);
         let mut b = json!({});
         apply_thinking(&mut b, "gpt-5.4-mini", "https://api.openai.com/v1", Some(0));
-        assert_eq!(b["reasoning_effort"], "minimal");
+        // `none`, not `minimal`: measured 2026-09-21, gpt-5.1 and later
+        // answer `minimal` with a 400. This assertion pinned the bug.
+        assert_eq!(b["reasoning_effort"], "none");
         let mut b = json!({});
         apply_thinking(&mut b, "gpt-4o", "https://api.openai.com/v1", Some(0));
         assert!(
@@ -1496,25 +1500,140 @@ pub(crate) fn apply_thinking(body: &mut Value, model: &str, base_url: &str, budg
                 body["thinking_budget"] = json!(level.to_budget());
             }
         }
-    } else if m.starts_with("o1")
-        || m.starts_with("o3")
-        || m.starts_with("o4")
-        || m.starts_with("gpt-5")
-    {
-        let effort = match level {
-            L::Off => {
-                if m.starts_with("gpt-5") {
-                    "minimal"
-                } else {
-                    "low"
-                }
-            }
-            L::Low => "low",
-            L::Medium => "medium",
-            L::High => "high",
-        };
-        body["reasoning_effort"] = json!(effort);
+    } else if let Some(accepted) = accepted_efforts(&m) {
+        body["reasoning_effort"] = json!(nearest_effort(level, accepted));
+    } else if takes_no_reasoning_effort(&m) {
+        // Measured to refuse the parameter outright. Saying nothing is
+        // right here — sending it is a 400 — but say it once, because a
+        // preference that silently does nothing is worse than one that
+        // explains itself.
+        warn_thinking_unsupported(model);
+    } else {
+        // No knob we know of for this family — xAI/Grok is the live example.
+        // Staying silent is deliberate (an unrecognised field is a 400 here,
+        // see the doc comment), but saying nothing at all meant the user set a
+        // thinking level, nothing happened, and there was no way to find out
+        // why. Guessing a mapping instead would break every request to the
+        // provider, which is worse than not applying a preference.
+        //
+        // Once per model per process: this runs on every request.
+        warn_thinking_unsupported(model);
     }
+}
+
+/// The `reasoning_effort` values a model accepts, or `None` when the
+/// answer is "we have not measured this one".
+///
+/// Measured against the live APIs on 2026-09-21, not read off a docs
+/// page, because the names are no guide in either direction:
+/// `grok-4.20-0309-reasoning` refuses the parameter outright, and
+/// `gpt-5-search-api` does not know it at all. Per model rather than per
+/// family for the same reason — `gpt-5` takes `minimal` and not `none`,
+/// `gpt-5.1` takes `none` and not `minimal`, and they are one prefix
+/// apart. Prefix matching is what sent `minimal` to every `gpt-5*`,
+/// which the 5.1-and-later models answer with a 400.
+///
+/// The probe and its output are kept: `scripts/probe/reasoning-effort-probe.py`
+/// and `docs/reasoning-effort-measured.json`. One request per model,
+/// carrying a value nothing accepts, so the rejection names the set and
+/// nothing is generated — re-running it costs nothing and is how this
+/// table should be refreshed rather than edited by hand.
+fn accepted_efforts(model_lower: &str) -> Option<&'static [&'static str]> {
+    const MINIMAL_4: &[&str] = &["minimal", "low", "medium", "high"];
+    const NONE_4: &[&str] = &["none", "low", "medium", "high"];
+    const NONE_5: &[&str] = &["none", "low", "medium", "high", "xhigh"];
+    const O_SERIES: &[&str] = &["low", "medium", "high", "xhigh"];
+    const GROK_MINIMAL: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
+    const GROK_43: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh"];
+
+    let base = model_lower.rsplit('/').next().unwrap_or(model_lower);
+    // A dated alias behaves as its base (`gpt-5.4-2026-03-17`).
+    let stem = undated(base);
+    Some(match stem {
+        "gpt-5" | "gpt-5-mini" | "gpt-5-nano" => MINIMAL_4,
+        "gpt-5.1" => NONE_4,
+        "gpt-5.2" | "gpt-5.4" | "gpt-5.4-mini" | "gpt-5.4-nano" | "gpt-5.5" | "gpt-5.6-luna"
+        | "gpt-5.6-sol" | "gpt-5.6-terra" => NONE_5,
+        "o1" | "o3" | "o3-mini" | "o4-mini" => O_SERIES,
+        "grok-4.3" => GROK_43,
+        "grok-4.5" | "grok-4.6" => GROK_MINIMAL,
+        _ => return None,
+    })
+}
+
+/// Models measured to refuse `reasoning_effort` outright.
+///
+/// Separate from "not measured": these answer 400 when it is sent, so
+/// the preference has to be dropped and said out loud, not guessed at.
+fn takes_no_reasoning_effort(model_lower: &str) -> bool {
+    let base = model_lower.rsplit('/').next().unwrap_or(model_lower);
+    let stem = undated(base);
+    matches!(
+        stem,
+        "gpt-5-search-api"
+            | "grok-4.20-0309-non-reasoning"
+            | "grok-4.20-0309-reasoning"
+            | "grok-4.20-multi-agent-0309"
+            | "grok-build-0.1"
+    )
+}
+
+/// `gpt-5.4-2026-03-17` -> `gpt-5.4`. A dated alias is the same model.
+fn undated(id: &str) -> &str {
+    let b = id.as_bytes();
+    if b.len() > 11 {
+        let tail = &id[id.len() - 11..];
+        if tail.starts_with('-')
+            && tail[1..5].bytes().all(|c| c.is_ascii_digit())
+            && tail.as_bytes()[5] == b'-'
+            && tail[6..8].bytes().all(|c| c.is_ascii_digit())
+            && tail.as_bytes()[8] == b'-'
+            && tail[9..11].bytes().all(|c| c.is_ascii_digit())
+        {
+            return &id[..id.len() - 11];
+        }
+    }
+    id
+}
+
+/// The value closest to what the user asked for that this model takes.
+///
+/// Our four levels do not line up with any provider's scale and we are
+/// not inventing one that does — `xhigh` on one backend and `high` on
+/// another are not comparable. Each level names the values it would
+/// accept in order of preference and takes the first the model offers.
+fn nearest_effort(level: super::ThinkingLevel, accepted: &[&'static str]) -> &'static str {
+    use super::ThinkingLevel as L;
+    let wanted: &[&str] = match level {
+        L::Off => &["none", "minimal", "low"],
+        L::Low => &["low", "minimal", "medium"],
+        L::Medium => &["medium", "high", "low"],
+        L::High => &["high", "xhigh", "medium"],
+    };
+    for w in wanted {
+        if let Some(found) = accepted.iter().find(|a| *a == w) {
+            return found;
+        }
+    }
+    // Every set measured contains at least one of the above; this is
+    // here so a future set cannot make the function panic.
+    accepted.first().copied().unwrap_or("medium")
+}
+
+/// Tell the user once that their thinking preference does not reach `model`.
+fn warn_thinking_unsupported(model: &str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
+    let Ok(mut set) = seen.lock() else { return };
+    if !set.insert(model.to_string()) {
+        return;
+    }
+    eprintln!(
+        "\x1b[33m[thinking] '{model}' has no reasoning control thClaws knows about — \
+         the level you set is not being sent. Ask for support for this family if you need it.\x1b[0m"
+    );
 }
 
 /// is what the upstream provider sees, so e.g. `deepseek/deepseek-v4-flash`
@@ -1544,6 +1663,118 @@ pub fn model_uses_reasoning_content(model: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    /// Pins what the live xAI API actually answered on 2026-09-18, because the
+    /// split is not guessable from the ids: `grok-4.3/4.5/4.6` take
+    /// `reasoning_effort`, while every `grok-4.20-*` and `grok-build-0.1`
+    /// replies 400 "does not support parameter reasoningEffort".
+    ///
+    /// Before this, no branch matched xAI at all and the user's thinking level
+    /// was dropped in silence.
+    #[test]
+    fn the_effort_sent_is_one_the_model_measured_as_accepting() {
+        // Measured 2026-09-21 against the live APIs; see
+        // docs/reasoning-effort-measured.json. Two of these were live
+        // 400s before the table replaced prefix matching.
+        let effort = |model: &str, budget: Option<u32>| {
+            let mut body = serde_json::json!({});
+            super::apply_thinking(&mut body, model, "https://api.openai.com/v1", budget);
+            body.get("reasoning_effort")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        };
+
+        // The bug: `gpt-5*` all got `minimal` for "off", and 5.1 and
+        // later answer that with
+        //   Unsupported value: 'reasoning_effort' does not support 'minimal'
+        assert_eq!(effort("gpt-5", Some(0)).as_deref(), Some("minimal"));
+        assert_eq!(effort("gpt-5.1", Some(0)).as_deref(), Some("none"));
+        assert_eq!(effort("gpt-5.2", Some(0)).as_deref(), Some("none"));
+        assert_eq!(effort("gpt-5.6-luna", Some(0)).as_deref(), Some("none"));
+        // The o-series takes neither `none` nor `minimal`, so "off" is
+        // as far down as `low`.
+        assert_eq!(effort("o3", Some(0)).as_deref(), Some("low"));
+
+        // The other bug: this one does not know the parameter at all —
+        //   Unrecognized request argument supplied: reasoning_effort
+        assert_eq!(effort("gpt-5-search-api", Some(32_000)), None);
+
+        // A dated alias is the same model.
+        assert_eq!(
+            effort("gpt-5.4-2026-03-17", Some(0)).as_deref(),
+            Some("none")
+        );
+
+        // The levels above "off" land where they always did.
+        for (model, low, med, high) in [
+            ("gpt-5", "low", "medium", "high"),
+            ("gpt-5.2", "low", "medium", "high"),
+            ("o4-mini", "low", "medium", "high"),
+        ] {
+            assert_eq!(effort(model, Some(1_000)).as_deref(), Some(low), "{model}");
+            assert_eq!(effort(model, Some(8_000)).as_deref(), Some(med), "{model}");
+            assert_eq!(
+                effort(model, Some(32_000)).as_deref(),
+                Some(high),
+                "{model}"
+            );
+        }
+
+        // A model we have never measured gets nothing, and says so.
+        assert_eq!(effort("some-new-model-9", Some(32_000)), None);
+    }
+
+    #[test]
+    fn only_the_grok_models_that_accept_reasoning_effort_are_sent_it() {
+        for ok in ["xai/grok-4.3", "xai/grok-4.5", "xai/grok-4.6"] {
+            let mut body = serde_json::json!({});
+            super::apply_thinking(&mut body, ok, "https://api.x.ai/v1", Some(32_000));
+            assert_eq!(
+                body["reasoning_effort"], "high",
+                "{ok} accepts the parameter and must receive it"
+            );
+        }
+
+        // These 400 on the real API — sending the field would break the call,
+        // which is worse than the preference going unapplied.
+        for refused in [
+            "xai/grok-4.20-0309-reasoning",
+            "xai/grok-4.20-0309-non-reasoning",
+            "xai/grok-4.20-multi-agent-0309",
+            "xai/grok-build-0.1",
+        ] {
+            let mut body = serde_json::json!({});
+            super::apply_thinking(&mut body, refused, "https://api.x.ai/v1", Some(32_000));
+            assert!(
+                body.get("reasoning_effort").is_none(),
+                "{refused} refuses the parameter and must not be sent it"
+            );
+        }
+
+        // A version that merely starts with an accepted one is not
+        // accepted: `grok-4.30` is a different model from `grok-4.3`,
+        // and the table matches the id, not a prefix of it.
+        let mut body = serde_json::json!({});
+        super::apply_thinking(
+            &mut body,
+            "xai/grok-4.30",
+            "https://api.x.ai/v1",
+            Some(32_000),
+        );
+        assert!(body.get("reasoning_effort").is_none());
+
+        // Every level maps to a value the API took.
+        for (budget, want) in [(0u32, "minimal"), (2_048, "low"), (10_000, "medium")] {
+            let mut body = serde_json::json!({});
+            super::apply_thinking(
+                &mut body,
+                "xai/grok-4.6",
+                "https://api.x.ai/v1",
+                Some(budget),
+            );
+            assert_eq!(body["reasoning_effort"], want, "budget {budget}");
+        }
+    }
     /// `/model` onto a user-hosted backend has to learn the real context
     /// somewhere — the shipped catalogue can't know a private vLLM box.
     /// Both published shapes are parsed off the same JSON the servers send.

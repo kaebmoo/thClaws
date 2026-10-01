@@ -4,6 +4,9 @@ thClaws ships with around thirty built-in tools. The agent picks them
 autonomously; you see each call as a `[tool: Name: …]` line, then a
 ✓ (success) or ✗ (error). This chapter is the reference.
 
+![Tool calls as the Chat tab renders them — one collapsible row per call, with the result underneath and the turn's token and cost footer](../user-manual-img/ch-04/chat-tab.png)
+
+
 ## File tools
 
 | Tool | Approval | Summary |
@@ -45,12 +48,12 @@ Defaults:
 | Tool | Approval | Summary |
 |---|---|---|
 | `WebFetch` | prompt | HTTP GET (100 KB body cap, per section). When `HAL_API_KEY` is set, runs **both** a HAL headless-browser scrape **and** a plain HTTP GET in parallel and returns a single combined response with each section labelled (see below). |
-| `WebSearch` | prompt | Web search via Tavily / Brave / SerpAPI (Google) / You.com / DuckDuckGo |
+| `WebSearch` | prompt | Web search via Tavily / Brave / SerpAPI (Google) / You.com / Serply (Google) / DuckDuckGo |
 | `WebScrape` | prompt | Direct HAL scrape with advanced parameters (`wait_for` CSS selector, `scroll_to_bottom`, `remove_selectors`, `output_format`) — appears only when `HAL_API_KEY` is set |
 | `YouTubeTranscript` | prompt | Fetch YouTube captions via HAL (multi-language fallback, optional timestamps) — appears only when `HAL_API_KEY` is set |
 
 Search provider is picked via `TAVILY_API_KEY`, `BRAVE_SEARCH_API_KEY`,
-`SERPAPI_API_KEY` or `YDC_API_KEY` if set, else DuckDuckGo (no key,
+`SERPAPI_API_KEY`, `YDC_API_KEY` or `SERPLY_API_KEY` if set, else DuckDuckGo (no key,
 lower quality). Override with
 `searchEngine: "tavily"` in settings.
 
@@ -104,7 +107,7 @@ so Thai content renders correctly without a system-font dependency.
 | Tool | Approval | Summary |
 |---|---|---|
 | `PdfCreate` | prompt | Markdown → PDF (printpdf + embedded Thai font, A4/Letter/Legal) |
-| `PdfRead` | auto | Extract text via `pdftotext` (poppler-utils — `brew install poppler` / `apt install poppler-utils`) |
+| `PdfRead` | auto¹ | Extract text via `pdftotext` (poppler-utils — `brew install poppler` / `apt install poppler-utils`) |
 | `DocxCreate` | prompt | Markdown → Word (.docx) via `docx-rs` — headings, lists, code blocks |
 | `DocxRead` | auto | Extract text from a Word doc (pure Rust XML walk) |
 | `DocxEdit` | prompt | `find_replace` / `append_paragraph` in place |
@@ -114,6 +117,27 @@ so Thai content renders correctly without a system-font dependency.
 | `PptxCreate` | prompt | Markdown outline → PowerPoint (.pptx); `# Heading` = new slide |
 | `PptxRead` | auto | Extract text per slide (numeric ordering — slide10 doesn't sort before slide2) |
 | `PptxEdit` | prompt | `find_replace` across all slides — designed for `{{placeholder}}` template fill |
+
+**¹ Reading a PDF without installing poppler.** `PdfRead` prefers
+`pdftotext` on your machine: it is the best extractor there is for Thai and
+the file never leaves your computer. If poppler is not installed, rather than
+failing, thClaws offers to extract the text through a public thClaws
+service — **no account and no key needed** — and asks you first, naming the
+file and where it is going. The text comes back marked so you can see which
+path produced it.
+
+Three things worth knowing:
+
+- Install poppler and the question stops being asked
+  (`brew install poppler`, `apt install poppler-utils`,
+  `winget install oschwartz10612.Poppler` or `scoop install poppler`).
+- Set `"pdfCloudFallback": false` in `.thclaws/settings.json` and nothing is
+  ever uploaded — you get the install instructions instead. Do this if your
+  PDFs are confidential by default.
+- **Scanned PDFs still need poppler.** When a PDF has no text layer, thClaws
+  reads it by rendering the pages as images for the model to look at, and that
+  rendering is `pdftoppm` — from the same package. The public service returns
+  text only.
 
 **Thai rendering across formats:**
 
@@ -305,7 +329,7 @@ them to report progress and decide when to stop.
 |---|---|---|
 | `KmsRead` | auto | Read a single page from an attached knowledge base (prepends a `[note: …]` staleness banner when `verified:` is missing or > 90 days old) |
 | `KmsSearch` | auto | Grep across all pages in one knowledge base |
-| `KmsWrite` | prompt | Create or replace a page; auto-injects `# {title}\nDescription: {topic}\n---` header; warns when `sources:` frontmatter is missing |
+| `KmsWrite` | prompt | Create or replace a page; auto-injects a `# {title}` heading; warns when `sources:` frontmatter is missing |
 | `KmsAppend` | prompt | Append content to an existing page |
 | `KmsDelete` | prompt | Remove a page (last resort; prefer KmsWrite to merge or supersede) |
 | `KmsCreate` | auto | Ensure a KMS exists (idempotent). Used by `/dream` to bootstrap the `dreams` audit KMS. |

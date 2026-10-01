@@ -460,6 +460,9 @@ fn research_job_to_json(j: &crate::research::JobView) -> serde_json::Value {
         "kms_target": j.kms_target,
         "result_page": j.result_page,
         "error": j.error,
+        "retry_command": j.retry_command,
+        "cost_usd": j.cost_usd,
+        "pages_written": j.pages_written,
         "started_at": j.started_at
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -628,6 +631,13 @@ fn is_macos_close_shortcut(event: &tao::event::KeyEvent, modifiers: ModifiersSta
 // no-op rewrite that would touch the file's mtime. Shared by the normal
 // close path and `/reload` (which re-execs and must save first).
 fn persist_window_size(latest_window_size: Option<(f64, f64)>) {
+    // No folder has been chosen yet — an icon launch whose picker is still
+    // unanswered. `save()` creates `.thclaws/` before it writes, so saving a
+    // window size here would leave a workspace in whatever folder the OS
+    // started us in. A size is not worth that; drop it.
+    if !crate::util::picker_answered() {
+        return;
+    }
     if let Some((w, h)) = latest_window_size {
         let mut project = crate::config::ProjectConfig::load().unwrap_or_default();
         if project.window_width != Some(w) || project.window_height != Some(h) {
@@ -657,6 +667,15 @@ fn request_gui_shutdown(
     // playwright-mcp CDP attach ("Browser context management is not
     // supported").
     crate::browser_cdp::shutdown();
+    // #209/#210: agents are child processes logging into this process's pipes.
+    // Leaving first kills those pipes under them, and their next log line takes
+    // them down with an abort. Stop them and wait; a host that is not running
+    // any is a no-op.
+    if !crate::server::stop_host_agents(std::time::Duration::from_secs(5)) {
+        crate::util::log_line(
+            "\x1b[33m[host] agents did not stop within 5s — leaving anyway\x1b[0m",
+        );
+    }
     *control_flow = ControlFlow::Exit;
 }
 /// Window size and zoom: the user's stored values, else a default picked from
@@ -742,6 +761,75 @@ fn pin_webview2_data_folder() {
     }
 }
 
+/// The frame that tells the page a newer release exists.
+fn update_frame(up: &crate::update_check::Update) -> String {
+    serde_json::json!({
+        "type": "update_available",
+        "version": up.version,
+        "url": up.url,
+    })
+    .to_string()
+}
+
+/// Tell the page about a newer release.
+///
+/// Called from BOTH modes' "the page is listening now" signal, because they
+/// are not the same signal. In the classic window that is
+/// `UserEvent::SendInitialState`; in host mode it never fires at all, since
+/// the frame that would trigger it is forwarded straight to the bot — so the
+/// host watches for the page's own `frontend_ready` instead.
+///
+/// **Sent on every ready, not once per launch.** `BotShell` renders one
+/// `<App/>` while the bot list is still loading and then a different set —
+/// one per bot — when it arrives, so React unmounts the first App and mounts
+/// others in its place. A notice delivered once goes to the App that is about
+/// to be thrown away, and the replacements never learn about it. Firing per
+/// ready is also what `ipc.rs` already does with the initial-state snapshot,
+/// for exactly this reason.
+///
+/// The cached read is a file read, so the window is never waiting on the
+/// network to appear; the refresh behind it has its own once-a-day gate.
+fn dispatch_update_notice(proxy: &EventLoopProxy<UserEvent>) {
+    // Whether this fired, and what it decided, is otherwise invisible: a
+    // notice that never reaches the page looks exactly like no new release.
+    // Three launches were spent guessing between those two.
+    let debug = std::env::var("THCLAWS_UPDATE_DEBUG").ok().as_deref() == Some("1");
+    match crate::update_check::cached() {
+        Some(up) => {
+            if debug {
+                eprintln!("[update] dispatching notice for {}", up.version);
+            }
+            let _ = proxy.send_event(UserEvent::Dispatch(update_frame(&up)));
+        }
+        None if debug => eprintln!(
+            "[update] nothing cached to announce (enabled={})",
+            crate::update_check::enabled()
+        ),
+        None => {}
+    }
+    let proxy_update = proxy.clone();
+    tokio::spawn(async move {
+        if let Some(up) = crate::update_check::refresh().await {
+            let _ = proxy_update.send_event(UserEvent::Dispatch(update_frame(&up)));
+        }
+    });
+}
+
+/// Whether a bridge frame's top-level `type` is exactly `want`.
+///
+/// Structural on purpose. The frames arriving from a bot have been through
+/// `desktop::tag`, which stamps `_bot` in front of every key, so their text is
+/// `{"_bot":"main","type":…}` and no fixed string compares equal to them. A
+/// `contains` test would compare equal to a chat envelope quoting the type in
+/// the user's own text, which on this path means "anyone who types the right
+/// words restarts the host".
+fn frame_type_is(frame: &str, want: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(frame)
+        .ok()
+        .and_then(|v| v.get("type")?.as_str().map(|t| t == want))
+        .unwrap_or(false)
+}
+
 fn run_gui_inner(
     serve: Option<crate::server::ServeConfig>,
     // dev-plan/59: `Some((host addr, token, bot slug))` points the IPC bridge
@@ -761,6 +849,10 @@ fn run_gui_inner(
         .expect("window build");
 
     let proxy_for_ipc = proxy.clone();
+    // The desktop window is one client for the life of the process — the
+    // `dispatch` closure below is rebuilt per message, so it cannot stand in
+    // for one. The live browser view is ref-counted per viewer.
+    let gui_viewer_id = crate::ipc::next_viewer_id();
 
     // Single shared session backing both Terminal + Chat tabs. The
     // worker owns one Agent + Session + AppConfig and broadcasts every
@@ -790,6 +882,25 @@ fn run_gui_inner(
             token.clone(),
             slug,
             move |frame| {
+                // A bot cannot restart the host. `/reload` typed in chat is
+                // dispatched in the bot process, which has no event loop, so
+                // its ReloadRequested went nowhere. The bot marks it on the
+                // bridge and the host — the only process that can re-exec —
+                // does the work.
+                //
+                // Decided on the parsed `type`, never on a substring: every
+                // other frame is a chat envelope carrying user text, and a
+                // `contains` test would let anyone restart the host by typing
+                // the magic word. The substring is only a cheap gate so the
+                // parse stays off the hot path — `desktop::tag` has already
+                // stamped `_bot` into every frame by the time it gets here, so
+                // an exact string compare can never match.
+                if frame.contains(crate::event_render::HOST_RELOAD_FRAME_TYPE)
+                    && frame_type_is(&frame, crate::event_render::HOST_RELOAD_FRAME_TYPE)
+                {
+                    let _ = proxy_for_bot.send_event(UserEvent::ReloadRequested);
+                    return;
+                }
                 let _ = proxy_for_bot.send_event(UserEvent::Dispatch(frame));
             },
         ));
@@ -808,6 +919,10 @@ fn run_gui_inner(
     let host_root_for_proto = host_conn
         .as_ref()
         .map(|_| std::env::current_dir().unwrap_or_default());
+    let bridge_for_files = bot_link.clone();
+    let host_root_for_files = host_conn
+        .as_ref()
+        .map(|_| std::env::current_dir().unwrap_or_default());
     let active_bot_dir = move || -> Option<std::path::PathBuf> {
         let root = host_root_for_proto.as_ref()?;
         let slug = bridge_for_proto
@@ -815,7 +930,19 @@ fn run_gui_inner(
             .ok()?
             .as_ref()
             .map(|b| b.slug.clone())?;
-        Some(crate::bots::bot_dir(root, &slug))
+        Some(crate::bots::resolve_agent_dir(root, &slug))
+    };
+    // Where the USER's files are, which is the workspace the agent runs in —
+    // not the agent's own folder. A chapter's `../images/…` lives here, and
+    // serving it from the agent folder is how the previews came up broken.
+    let active_workspace = move || -> Option<std::path::PathBuf> {
+        let root = host_root_for_files.as_ref()?;
+        let slug = bridge_for_files
+            .lock()
+            .ok()?
+            .as_ref()
+            .map(|b| b.slug.clone())?;
+        Some(crate::bots::resolve_agent(root, &slug).0)
     };
     // The workspace the host serves — what the folder picker offers to
     // change, and what a pick inside it leaves alone.
@@ -824,7 +951,11 @@ fn run_gui_inner(
         .map(|_| std::env::current_dir().unwrap_or_default());
     // The picker is offered once per window, not once per bot: every bot's
     // tree asks `get_cwd` when it is first shown.
-    let picker_offered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // #211: seeded from the answer this process chain already has, so a pick
+    // that re-execs the app does not ask again on the other side.
+    let picker_offered = Arc::new(std::sync::atomic::AtomicBool::new(
+        crate::util::picker_answered(),
+    ));
     let picker_offered_for_ipc = picker_offered.clone();
     let host_for_ipc = host_conn;
     let proxy_for_bots = proxy.clone();
@@ -1057,14 +1188,23 @@ fn run_gui_inner(
                 // Under a host a relative path is relative to the bot's
                 // folder, not the shelf; the shelf never holds a bot's
                 // `images/…`, so it is tried last rather than first.
-                let in_bot = active_bot_dir()
-                    .map(|dir| dir.join(&decoded).to_string_lossy().into_owned());
+                // Two candidates under a host, and they are different
+                // folders: the user's files live in the workspace the agent
+                // runs in, while an asset the agent ships is in its own. The
+                // workspace comes first — a chapter's images are the common
+                // case — and the shelf the window holds is tried last, since
+                // it holds neither.
+                let candidates: Vec<String> = [active_workspace(), active_bot_dir()]
+                    .into_iter()
+                    .flatten()
+                    .map(|dir| dir.join(&decoded).to_string_lossy().into_owned())
+                    .collect();
                 let resolved = crate::sandbox::Sandbox::check(&abs_first)
-                    .or_else(|e| match &in_bot {
-                        Some(p) if std::path::Path::new(p).is_file() => {
-                            crate::sandbox::Sandbox::check(p)
-                        }
-                        _ => Err(e),
+                    .or_else(|e| {
+                        candidates
+                            .iter()
+                            .find(|p| std::path::Path::new(p).is_file())
+                            .map_or(Err(e), |p| crate::sandbox::Sandbox::check(p))
                     })
                     .or_else(|_| crate::sandbox::Sandbox::check(&decoded));
                 // HTTP Range support — <video>/<audio> in shells stream large
@@ -1180,6 +1320,26 @@ fn run_gui_inner(
                 // which on a release build with a GUI shell took longer than
                 // that, so the window opened on "couldn't reach its backend".
                 // The window knows the answer, so it gives it at once.
+                // Host mode's stand-in for `SendInitialState`, which never
+                // fires here. Observed on its way past, not consumed — the
+                // bot wants this frame too.
+                //
+                // `frontend_ready` and NOT `get_cwd`, even though get_cwd is
+                // the earlier frame and the host answers it directly: the
+                // page sends get_cwd from its bootstrap, before the component
+                // holding the update subscriber exists, and
+                // `dispatchToSubscribers` has no buffer — a frame that early
+                // is dropped and never seen again. The ready beacon is
+                // mounted only once the startup modals are gone, by which
+                // point someone is listening.
+                if kind == "frontend_ready" {
+                    dispatch_update_notice(&proxy_for_ipc);
+                    if let Some(root) = host_root_for_ipc.as_ref() {
+                        for frame in crate::bots::migrate::workspace_notice_frames(root) {
+                            let _ = proxy_for_bots.send_event(UserEvent::Dispatch(frame));
+                        }
+                    }
+                }
                 if kind == "get_cwd" {
                     let slug = bridge_for_ipc
                         .lock()
@@ -1187,7 +1347,21 @@ fn run_gui_inner(
                         .and_then(|b| b.as_ref().map(|b| b.slug.clone()))
                         .unwrap_or_default();
                     let root = host_root_for_ipc.clone().unwrap_or_default();
-                    let dir = crate::bots::bot_dir(&root, &slug);
+                    // The agent that actually runs, which a doubly-migrated
+                    // workspace puts a level further down — its settings are
+                    // what carry `guiShell.tabDefault`.
+                    let dir = crate::bots::resolve_agent_dir(&root, &slug);
+                    // The picker picks a WORKSPACE — a folder that may hold
+                    // several agents — so that is what the box shows. Answering
+                    // with the bot's folder rewrote what the user had typed,
+                    // and the page asks again for every bot it mounts, so the
+                    // box kept jumping back to `…/.thclaws/bots/<slug>` while
+                    // they were still choosing.
+                    let shown = if root.as_os_str().is_empty() {
+                        dir.clone()
+                    } else {
+                        root.clone()
+                    };
                     let initial_tab = std::fs::read_to_string(dir.join(".thclaws/settings.json"))
                         .ok()
                         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
@@ -1205,12 +1379,46 @@ fn run_gui_inner(
                     let _ = proxy_for_bots.send_event(UserEvent::Dispatch(
                         serde_json::json!({
                             "type": "current_cwd",
-                            "path": dir.to_string_lossy(),
+                            "path": shown.to_string_lossy(),
                             "needs_modal": first,
                             "recent_dirs": crate::recent_dirs::load_recent_dirs(),
                             "initial_tab": initial_tab,
                         })
                         .to_string(),
+                    ));
+                    return;
+                }
+                // A confirmation dialog belongs to the window, like the folder
+                // picker above it: it opens a native OS panel, which a bot's
+                // `--serve` has none of. Forwarded, it reached a process with
+                // no `confirm` arm at all, so nothing replied, the page's
+                // promise never settled, and the action it guarded — deleting
+                // a KMS, among others — did nothing at all with no error to
+                // show for it. `--serve` in a browser was unaffected: no
+                // `window.ipc` there, so it uses the browser's own dialog.
+                if kind == "confirm" {
+                    let id = parsed
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let title = parsed
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Confirm");
+                    let message = parsed.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                    let yes_label = parsed
+                        .get("yes_label")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("OK");
+                    let no_label = parsed
+                        .get("no_label")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Cancel");
+                    let ok = native_confirm(title, message, yes_label, no_label);
+                    let _ = proxy_for_bots.send_event(UserEvent::Dispatch(
+                        serde_json::json!({ "type": "confirm_result", "id": id, "ok": ok })
+                            .to_string(),
                     ));
                     return;
                 }
@@ -1238,15 +1446,17 @@ fn run_gui_inner(
                         .unwrap_or_default()
                         .to_string();
                     let target = std::path::Path::new(&path);
-                    let inside = host_root_for_ipc.as_ref().is_some_and(|root| {
-                        let canon = |p: &std::path::Path| {
-                            p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
-                        };
-                        canon(target).starts_with(canon(root))
-                    });
+                    let inside = host_root_for_ipc
+                        .as_ref()
+                        .is_some_and(|root| crate::util::is_inside(root, target));
                     let reply = if inside {
                         // Answered: other bots' trees open without it now.
                         picker_offered_for_ipc.store(true, std::sync::atomic::Ordering::SeqCst);
+                        // This pick keeps the cwd, so it never re-execs and
+                        // the marker would otherwise stay unset for the life
+                        // of the process — which is what lets the window size
+                        // be saved and the bootstrap run.
+                        crate::util::mark_picker_answered();
                         serde_json::json!({ "type": "cwd_changed", "path": path, "ok": true })
                     } else if target.is_dir() {
                         crate::recent_dirs::save_recent_dir(&path);
@@ -1405,6 +1615,10 @@ fn run_gui_inner(
                 // the shared dispatch path today.
                 let on_zoom: crate::ipc::ZoomFn = Arc::new(|_scale: f64| {});
                 let ipc_ctx = crate::ipc::IpcContext {
+                    // The window is ONE viewer for the life of the app. It
+                    // cannot be derived from `dispatch`, which is rebuilt
+                    // above on every message.
+                    viewer_id: gui_viewer_id,
                     is_serve_mode: false,
                     shared: shared_for_ipc.clone(),
                     approver: approver_for_ipc.clone(),
@@ -1846,6 +2060,9 @@ fn run_gui_inner(
                 ));
             }
             Event::UserEvent(UserEvent::SendInitialState) => {
+                // The classic window's "the page is listening" signal. Host
+                // mode has its own — see `dispatch_update_notice`.
+                dispatch_update_notice(&proxy);
                 let config = AppConfig::load().unwrap_or_default();
                 // No auto-switch here. This used to rewrite settings.json to
                 // a local runtime whenever the active provider had no key —
@@ -1903,10 +2120,31 @@ fn run_gui_inner(
                 request_gui_shutdown(&shared_for_events, control_flow, latest_window_size);
             }
             Event::UserEvent(UserEvent::ReloadRequested) => {
-                // Save the live window size first (the re-exec bypasses the
-                // close path), then re-exec off-thread after a beat so the
-                // "[reload]…" line paints before the process image is replaced.
+                // #211: a restart keeps its working directory, so the folder is
+                // already decided — it must never re-open the startup picker.
+                // Marking here covers `/reload` too, not just a folder pick.
+                crate::util::mark_picker_answered();
                 persist_window_size(latest_window_size);
+                // A reload IS a restart, so it owes everything a quit does.
+                // Without this the re-exec left the engine-managed Chromium
+                // and this session's tmux teammates orphaned — and
+                // `request_gui_shutdown` notes that a surviving Chromium
+                // breaks the next launch's CDP attach. Flush the session
+                // first, so "on-disk sessions survive" is actually true.
+                let _ = shared_for_events.input_tx.send(ShellInput::SaveAndQuit);
+                crate::team::kill_my_teammates();
+                crate::audit::shutdown();
+                crate::browser_cdp::shutdown();
+                // #209/#210: agents log into this process's pipes, and an
+                // exec pulls those out from under them. Stop and wait BEFORE
+                // arming the exec below — not in parallel with it, or the
+                // 400ms timer fires while agents are still being stopped and
+                // we reproduce the crash that fix removed.
+                if !crate::server::stop_host_agents(std::time::Duration::from_secs(5)) {
+                    crate::util::log_line(
+                        "\x1b[33m[reload] agents did not stop within 5s — re-execing anyway\x1b[0m",
+                    );
+                }
                 std::thread::spawn(|| {
                     std::thread::sleep(std::time::Duration::from_millis(400));
                     let err = crate::util::reexec_self();
@@ -2092,5 +2330,40 @@ mod tool_coalesce_tests {
             envelope["input"]["note"],
             "Authorization: Bearer <redacted>"
         );
+    }
+}
+
+#[cfg(test)]
+mod host_frame_tests {
+    use super::frame_type_is;
+    use crate::bots::desktop::tag;
+    use crate::event_render::HOST_RELOAD_FRAME_TYPE;
+
+    /// The regression: the host used to compare the reload frame against a
+    /// fixed string, but every frame reaches it through `tag`, which stamps
+    /// `_bot` in front of the object. Nothing ever matched, so `/reload` in
+    /// host mode printed its message and did nothing. Built with the real
+    /// `tag` rather than a hand-written copy of its output — writing that
+    /// copy from memory is what produced the bug.
+    #[test]
+    fn a_tagged_reload_frame_is_recognised() {
+        let raw = serde_json::json!({ "type": HOST_RELOAD_FRAME_TYPE }).to_string();
+        assert!(frame_type_is(&raw, HOST_RELOAD_FRAME_TYPE));
+        assert!(frame_type_is(&tag("main", &raw), HOST_RELOAD_FRAME_TYPE));
+    }
+
+    /// And the reason it is decided on the parsed `type`: a bot streams the
+    /// user's own words back as chat envelopes, so a substring test would
+    /// hand every user a way to restart the host by typing the frame name.
+    #[test]
+    fn user_text_quoting_the_frame_name_is_not_a_reload() {
+        let chat = serde_json::json!({
+            "type": "chat_text_delta",
+            "text": r#"{"type":"host_reload_requested"}"#,
+        })
+        .to_string();
+        assert!(chat.contains(HOST_RELOAD_FRAME_TYPE));
+        assert!(!frame_type_is(&chat, HOST_RELOAD_FRAME_TYPE));
+        assert!(!frame_type_is(&tag("main", &chat), HOST_RELOAD_FRAME_TYPE));
     }
 }

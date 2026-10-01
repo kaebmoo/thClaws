@@ -11,11 +11,8 @@ import { useVersion } from "../hooks/useVersion";
 import logoDark from "../assets/thClaws-logo-dark.png";
 import logoLight from "../assets/thClaws-logo-light.png";
 import { WorkflowReviewBubble } from "./WorkflowReviewBubble";
-import {
-  SlashCommandPopup,
-  filterCommands,
-  type SlashCommandInfo,
-} from "./SlashCommandPopup";
+import { SlashCommandPopup } from "./SlashCommandPopup";
+import { filterCommands, type SlashCommandInfo } from "./slashCommands";
 import { McpAppIframe } from "./McpAppIframe";
 
 type ChatMessage = {
@@ -314,12 +311,22 @@ export function ChatView({ active, modalOpen }: Props) {
   // user isn't mid-prompt for an `ask_user_question`. Hidden during a
   // streaming turn — slash commands fire instantly so there's nothing
   // useful to autocomplete while the model is still talking.
+  // dev-plan/64 P5.8: the popup used to close at the first space, so a
+  // command whose name has one — `/kms verify`, `/research refresh` —
+  // could never be reached by typing. It now stays open for as long as
+  // what has been typed is still completing some command's name, which
+  // keeps it out of the way of `/research what is abundance`: that is a
+  // prefix of nothing, so the menu closes on the first word of a query.
+  const slashRaw = input.startsWith("/") ? input.slice(1) : "";
   const slashOpen =
     !askPrompt &&
     !streaming &&
     input.startsWith("/") &&
-    !input.slice(1).includes(" ");
-  const slashQuery = slashOpen ? input.slice(1).split(/\s/)[0] : "";
+    (!slashRaw.includes(" ") ||
+      slashCommands.some((c) =>
+        c.name.toLowerCase().startsWith(slashRaw.toLowerCase()),
+      ));
+  const slashQuery = slashOpen ? slashRaw : "";
   const slashFiltered = slashOpen
     ? filterCommands(slashCommands, slashQuery)
     : [];

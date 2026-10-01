@@ -6,7 +6,7 @@ import {
   isOpenRouterFreeOnly,
   setOpenRouterFreeOnly,
   refreshOpenRouterFreeOnly,
-} from "./ModelPickerModal";
+} from "./openrouterFreeOnly";
 
 type KeyStatus = {
   provider: string;
@@ -67,6 +67,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   "brave-search": "Brave Search",
   serpapi: "SerpAPI (Google Search)",
   youcom: "You.com Search",
+  serply: "Serply (Google Search)",
   hal: "HAL Public API (YouTube transcript + Web scrape)",
   ltx: "LTX (video generation + native audio)",
   iapp: "iApp (Thai image generation)",
@@ -541,6 +542,10 @@ function useGatewaySettings(): GatewaySettings {
   useEffect(() => {
     ensureGatewaySubscription();
     gatewayListeners.add(setState);
+    // Priming from an external store on subscribe — the case the rule
+    // itself names as legitimate: the cache may have been filled by
+    // another instance between this one's initializer and this effect.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (cachedGatewaySettings) setState(cachedGatewaySettings);
     return () => {
       gatewayListeners.delete(setState);

@@ -13,6 +13,7 @@ thClaws คุยกับ **provider ได้ทั้งหมดสามส
 | Groq | `groq/*` | `GROQ_API_KEY` | Groq LPU (เร็วมาก); `groq/llama-3.3-70b-versatile` |
 | TokenRouter | `tokenrouter/*` | `TOKENROUTER_API_KEY` | Router รวมเข้าถึง 300+ model (`tokenrouter/<vendor>/<model>`) |
 | AtlasCloud | `atlascloud/*` | `ATLASCLOUD_API_KEY` | router แบบ OpenAI-compatible ที่โฮสต์ให้; ค่าเริ่มต้น `atlascloud/qwen/qwen3.5-flash` |
+| Unifically | `unifically/*` | `UNIFICALLY_API_KEY` | router แบบ OpenAI-compatible ที่โฮสต์ให้; ค่าเริ่มต้น `unifically/google/gemini-3.5-flash` |
 | Meta | `meta/*` | `META_API_KEY` | API ที่ Meta โฮสต์เอง; ค่าเริ่มต้น `meta/muse-spark-1.2` |
 | 9router | `9router/*` | `NINEROUTER_API_KEY` | router แบบ **self-host** — ตั้ง `NINEROUTER_BASE_URL` (ค่าเริ่มต้น `http://localhost:20128/v1`) แก้ base URL ได้ใน Settings |
 | Qwen Cloud | `qwen-cloud/*` | `QWENCLOUD_API_KEY` | บริการ Qwen ที่โฮสต์โดย Alibaba |
@@ -304,7 +305,7 @@ DashScope ถูกล็อกไว้ที่ค่าเริ่มต้�
 ล้าง key ได้ด้วยไอคอนถังขยะ entry ใน keychain จะถูกลบ และ
 env var จะถูก unset สำหรับ session ที่กำลังรันอยู่
 
-![thClaws setting LLM Keys](../user-manual-img/ch-05/thClaws-setting-llm-keys.png)
+![Settings & API keys — หนึ่งแถวต่อหนึ่ง provider บอกสถานะของ key และที่เก็บ](../user-manual-img/ch-06/settings-api-keys.png)
 
 ## ไฟล์ `.env` (CI, headless, quick-start)
 

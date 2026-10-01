@@ -418,6 +418,30 @@ enum BotsCmd {
         #[arg(long)]
         path: Option<String>,
     },
+    /// Point an agent's own `.thclaws/…` paths back at its folder. Migration
+    /// does this for workspaces it moves; this is for one already on disk,
+    /// whose agent still looks for its scripts and state at the workspace root
+    /// and so reports an empty project.
+    FixPaths {
+        /// Report what would change without writing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Workspace to repair. Defaults to the current directory.
+        #[arg(long)]
+        path: Option<String>,
+    },
+    /// Undo a double migration: a workspace an older engine migrated twice
+    /// holds its real agent one level too deep, and the host supervises a
+    /// folder that is not an agent. Promotes the inner workspace and keeps the
+    /// bare outer host beside it.
+    Unnest {
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+        /// Workspace to un-nest. Defaults to the current directory.
+        #[arg(long)]
+        path: Option<String>,
+    },
     /// Undo `migrate` for a workspace whose one agent is `main`: the agent goes
     /// back to the root, and the host's `.thclaws/` is kept beside it.
     Unmigrate {
@@ -689,8 +713,31 @@ enum ScheduleCmd {
 fn install_serve_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        let where_ = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown location".into());
+        let text = format!("panic at {where_}: {payload}");
+        // Kept where a dead stderr cannot swallow it (#210).
+        thclaws_core::util::write_panic_log(&text);
+        if thclaws_core::util::panic_is_print_failure(&payload) {
+            // Our own log write failed, which means the host's pipe is gone.
+            // Reporting it would write to that same pipe and panic again —
+            // a panic inside a panic is an abort, and that is the crash report
+            // users saw on every quit. Leave quietly instead; this agent's work
+            // is done the moment its host is.
+            std::process::exit(0);
+        }
         default_hook(info);
-        eprintln!("\x1b[31m[--serve] panic — aborting so the port is released\x1b[0m");
+        thclaws_core::util::log_line(
+            "\x1b[31m[--serve] panic — aborting so the port is released\x1b[0m",
+        );
         std::process::abort();
     }));
 }
@@ -951,6 +998,22 @@ async fn main() {
         || cli.messenger
         || cli.workflow.is_some()
         || cli.team_agent.is_some();
+    // Whether this process still has to be told which folder it is for. A
+    // desktop opened from an icon starts wherever the OS put it — Documents on
+    // Windows, where the Start-menu shortcut sets
+    // `WorkingDirectory="PersonalFolder"`. Nothing may write into that folder
+    // until the picker is answered: `.thclaws/state` alone makes
+    // `looks_like_v2_agent` true, so a bootstrap there turns the user's
+    // Documents into a workspace that the next launch offers to upgrade —
+    // and `is_never_a_workspace` does not cover it, because it guards home
+    // itself, not the folders inside it. A pick carries the answer across a
+    // re-exec in THCLAWS_PICKER_ANSWERED; a CLI / `-p` / `--serve` run chose
+    // its folder by `cd`-ing into it.
+    #[cfg(feature = "gui")]
+    let folder_undecided =
+        thclaws_core::util::folder_undecided(!use_cli && (!cli.serve || cli.gui));
+    #[cfg(not(feature = "gui"))]
+    let folder_undecided = false;
     // dev-plan/59 §7.8: opening a v2 workspace in the app upgrades it. The
     // desktop and `--serve` are the surfaces a person is looking at, so the
     // banner below is seen; `-p` and the adapters are left alone, because a
@@ -961,7 +1024,16 @@ async fn main() {
     {
         let opens_desktop = !use_cli && (!cli.serve || cli.gui);
         let auto_allowed = thclaws_core::bots::migrate::auto_migrate_allowed();
-        if auto_allowed && !use_cli && !cli.multi_tenant && (cli.serve || opens_desktop) {
+        // `!folder_undecided`: upgrading a folder is the most destructive
+        // thing a launch does, so it waits for the picker like every other
+        // write. A v2 folder that is picked opens as a host, which re-execs,
+        // and the restarted process — marker set — upgrades it then.
+        if auto_allowed
+            && !use_cli
+            && !cli.multi_tenant
+            && !folder_undecided
+            && (cli.serve || opens_desktop)
+        {
             if let Ok(cwd) = std::env::current_dir() {
                 use thclaws_core::bots::migrate::AutoOutcome;
                 match thclaws_core::bots::migrate::auto_migrate_if_v2(&cwd) {
@@ -1035,19 +1107,23 @@ async fn main() {
     // the doomed parent. See `respawn_detached_for_gui_if_needed`.
     respawn_detached_for_gui_if_needed(&cli);
 
-    // Workspace layout migration (v1 flat → v2 `state/`): relocate any
-    // legacy runtime dirs under `.thclaws/state/` and seed authored
-    // workflows. Runs BEFORE the default-settings bootstrap so a legacy
-    // workspace (runtime dirs, no settings.json) is detected as legacy
-    // rather than freshly stamped v2. No-op on already-migrated or
-    // multiuser workspaces.
-    thclaws_core::config::ProjectConfig::migrate_workspace_if_needed();
+    // Held back until a folder is chosen — see `folder_undecided` above.
+    // `set_cwd` runs both of these against the folder the user picks.
+    if !folder_undecided {
+        // Workspace layout migration (v1 flat → v2 `state/`): relocate any
+        // legacy runtime dirs under `.thclaws/state/` and seed authored
+        // workflows. Runs BEFORE the default-settings bootstrap so a legacy
+        // workspace (runtime dirs, no settings.json) is detected as legacy
+        // rather than freshly stamped v2. No-op on already-migrated or
+        // multiuser workspaces.
+        thclaws_core::config::ProjectConfig::migrate_workspace_if_needed();
 
-    // First-run bootstrap: drop a `.thclaws/settings.json` with model +
-    // permissions defaults into the project so users get a working
-    // config the first time they `cd` in. Skipped if a config already
-    // exists or if a Claude Code `.claude/settings.json` is present.
-    thclaws_core::config::ProjectConfig::ensure_default_exists();
+        // First-run bootstrap: drop a `.thclaws/settings.json` with model +
+        // permissions defaults into the project so users get a working
+        // config the first time they `cd` in. Skipped if a config already
+        // exists or if a Claude Code `.claude/settings.json` is present.
+        thclaws_core::config::ProjectConfig::ensure_default_exists();
+    }
 
     // Wire up `--set-model` / `--model` before any AppConfig::load runs.
     // `--set-model` persists to `.thclaws/settings.json` (refusing to
@@ -1290,6 +1366,16 @@ async fn main() {
         #[cfg(feature = "gui")]
         {
             detach_console_for_gui();
+            // The desktop window is the one surface whose stderr genuinely
+            // has no reader: double-clicked, it is wired to nothing, and
+            // every `[research] …` line the engine writes about what it is
+            // doing is discarded. Keep it. Only here — `--cli`, `-p` and
+            // `--serve` all have someone listening, and a supervised
+            // `--serve` child in particular is read by this very process,
+            // which relays it prefixed and keeps a tail to explain a child
+            // that dies before it serves. Redirecting there would take that
+            // away; redirecting here captures it, relayed lines included.
+            thclaws_core::util::redirect_stderr_to_log();
             // dev-plan/59 §7.6 step 2: in a v3 workspace the supervisor runs
             // alongside the window, which is still the window that shipped —
             // same protocol, same IPC bridge, same untouched bundle. Nothing
@@ -1553,7 +1639,16 @@ async fn run_bots_subcommand(cmd: BotsCmd) -> i32 {
                 Ok(p) => {
                     println!("workspace  {}", p.workspace.display());
                     match &p.status {
-                        migrate::Status::AlreadyV3 => println!("layout     multiple agents (v3 or later)"),
+                        migrate::Status::AlreadyV3 => {
+                            println!("layout     multiple agents (v3 or later)");
+                            if let Some((slug, _)) = migrate::nested_bot(&ws) {
+                                println!(
+                                    "nested     agent '{slug}' runs a level below this shelf — \
+                                     an older migration ran twice. It is followed, so nothing \
+                                     is missing; `thclaws bots unnest` flattens it"
+                                );
+                            }
+                        }
                         migrate::Status::Migrate => println!(
                             "layout     v2 (single agent) — `thclaws bots migrate` moves it to v3"
                         ),
@@ -1725,6 +1820,103 @@ async fn run_bots_subcommand(cmd: BotsCmd) -> i32 {
                     eprintln!("\n\x1b[31mmigration failed: {e}\x1b[0m");
                     eprintln!("The workspace is mid-migration and safe to resume — run the same");
                     eprintln!("command again once the cause is fixed.");
+                    1
+                }
+            }
+        }
+        BotsCmd::FixPaths { dry_run, path } => {
+            let ws = resolve(path);
+            let cfg = match thclaws_core::bots::BotsConfig::load(&ws) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!(
+                        "\x1b[31m{} has no agents to repair: {e}\x1b[0m",
+                        ws.display()
+                    );
+                    return 1;
+                }
+            };
+            println!("workspace  {}", ws.display());
+            let mut total = 0usize;
+            for def in &cfg.bots {
+                let dir = thclaws_core::bots::bot_dir(&ws, &def.slug);
+                match thclaws_core::bots::agent_paths::fix(&dir, dry_run) {
+                    Ok(r) => {
+                        total += r.commands + r.literals;
+                        println!(
+                            "{}      {}{} file(s): {} command(s), {} path(s)",
+                            def.slug,
+                            if dry_run { "would change " } else { "" },
+                            r.files,
+                            r.commands,
+                            r.literals
+                        );
+                        for skipped in &r.skipped {
+                            println!("           left alone (no import block): {skipped}");
+                        }
+                    }
+                    Err(e) => eprintln!("\x1b[31m{}: {e}\x1b[0m", def.slug),
+                }
+            }
+            if total == 0 {
+                println!("nothing to change — these agents already find their own files");
+            } else if !dry_run {
+                println!("\n\x1b[33m  Restart thClaws on this workspace to pick it up.\x1b[0m");
+            }
+            0
+        }
+        BotsCmd::Unnest { yes, path } => {
+            let ws = resolve(path);
+            let Some((slug, dir)) = migrate::nested_bot(&ws) else {
+                eprintln!(
+                    "\x1b[31m{} is not a doubly-migrated workspace — nothing to un-nest\x1b[0m",
+                    ws.display()
+                );
+                return 1;
+            };
+            println!("workspace  {}", ws.display());
+            println!(
+                "nested     {} (agent '{slug}' is a workspace of its own)",
+                dir.display()
+            );
+            println!(
+                "action     promote it to the root; the bare outer host is kept as {}",
+                migrate::NESTED_BACKUP
+            );
+            println!(
+                "\n\x1b[33m  Close any thClaws window or `--serve` on this workspace first.\x1b[0m"
+            );
+            if !yes {
+                print!("\nType `yes` to continue: ");
+                use std::io::Write as _;
+                let _ = std::io::stdout().flush();
+                let mut answer = String::new();
+                if std::io::stdin().read_line(&mut answer).is_err() || answer.trim() != "yes" {
+                    println!("cancelled — nothing was moved.");
+                    return 1;
+                }
+            }
+            match migrate::unnest(&ws) {
+                Ok(r) => {
+                    println!("moved      {} entries to the root", r.moved);
+                    println!("kept       {}", r.host_backup.display());
+                    if !r.rewritten_schedules.is_empty() {
+                        println!("schedules  {}", r.rewritten_schedules.join(", "));
+                    }
+                    // The layout is fixed; the agent's own paths are not. An
+                    // agent installed before agents learned $THCLAWS_AGENT_DIR
+                    // still looks for its state at the workspace root, and it
+                    // reports that as an empty project rather than an error —
+                    // "No book yet" for a book that is right there.
+                    println!(
+                        "\n\x1b[33m  The layout is fixed. If '{slug}' still shows nothing, it \
+                         was installed before agents learned to find their own files — \
+                         `thclaws bots fix-paths` repairs it, or get the agent again.\x1b[0m"
+                    );
+                    0
+                }
+                Err(e) => {
+                    eprintln!("\x1b[31m{e}\x1b[0m");
                     1
                 }
             }

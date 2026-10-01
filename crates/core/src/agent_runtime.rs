@@ -87,6 +87,7 @@ pub async fn build_runtime_with_provider(
     tool_registry.register(Arc::new(crate::tools::KmsWriteTool));
     tool_registry.register(Arc::new(crate::tools::KmsWriteSourceTool));
     tool_registry.register(Arc::new(crate::tools::KmsAppendTool));
+    tool_registry.register(Arc::new(crate::tools::KmsEditTool));
     tool_registry.register(Arc::new(crate::tools::KmsDeleteTool));
     tool_registry.register(Arc::new(crate::tools::KmsCreateTool));
     tool_registry.register(Arc::new(crate::tools::MemoryReadTool));
@@ -126,6 +127,16 @@ pub async fn build_runtime_with_provider(
         config.model.clone(),
         None,
     )));
+
+    // The HTTP path honoured neither list. Applied here, after the late
+    // registrations, so `allowedTools` / `disallowedTools` mean the same
+    // thing on all four entry points (issue #221).
+    let no_keep: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    tool_registry.apply_filter(
+        config.allowed_tools.as_deref(),
+        config.disallowed_tools.as_deref(),
+        &no_keep,
+    );
 
     // Opt-in native Gemini image tools. Same gating as the
     // GUI/serve registration in shared_session.rs — settings flag
