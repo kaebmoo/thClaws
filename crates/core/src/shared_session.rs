@@ -740,6 +740,11 @@ pub struct SharedSessionHandle {
     /// construction so a queue submission survives a session reload
     /// or cwd change.
     pub injection_queue: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+    /// True while the worker is handling an input (a turn, a slash
+    /// command, a workflow review). Written under the `injection_queue`
+    /// lock so an inject can't land between the worker's last drain and
+    /// it going idle — see `queue_or_submit_injection`.
+    pub worker_busy: Arc<std::sync::atomic::AtomicBool>,
     /// dev-plan/32 Tier 3 workflow approver, shared between the
     /// shared-session worker (`WorkerState.workflow_approver`) and
     /// the IPC dispatch (`IpcContext.workflow_approver`) so both
@@ -770,6 +775,51 @@ impl SharedSessionHandle {
     pub fn request_cancel(&self) {
         self.cancel.cancel();
     }
+
+    pub fn is_worker_busy(&self) -> bool {
+        self.worker_busy.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+type InjectionQueue = std::sync::Mutex<std::collections::VecDeque<String>>;
+
+/// Where a message typed mid-turn went.
+#[derive(Debug, PartialEq, Eq)]
+pub enum InjectRoute {
+    /// Waiting for the running turn's next tool_result boundary, or for
+    /// the worker to finish it; carries the queue length.
+    Queued(usize),
+    /// The worker is idle (the UI only thought a turn was running), so
+    /// the caller should submit the text as a normal line.
+    Submit(String),
+}
+
+pub fn queue_or_submit_injection(
+    queue: &InjectionQueue,
+    busy: &std::sync::atomic::AtomicBool,
+    text: String,
+) -> InjectRoute {
+    let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
+    if busy.load(std::sync::atomic::Ordering::SeqCst) {
+        q.push_back(text);
+        InjectRoute::Queued(q.len())
+    } else {
+        InjectRoute::Submit(text)
+    }
+}
+
+/// The worker going idle: clear the busy flag and take what was typed
+/// during the input it just finished but never reached a tool_result
+/// boundary (a reply with no tool call, an error, a cancel). Without this
+/// the message sat in the queue forever and its bubble stayed "queued".
+fn go_idle_taking_injections(
+    queue: &InjectionQueue,
+    busy: &std::sync::atomic::AtomicBool,
+) -> Option<String> {
+    let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
+    busy.store(false, std::sync::atomic::Ordering::SeqCst);
+    let texts: Vec<String> = q.drain(..).collect();
+    (!texts.is_empty()).then(|| texts.join("\n\n"))
 }
 
 /// Bundle of owned state the worker loop passes by `&mut` down into
@@ -1197,6 +1247,8 @@ pub fn spawn_with_roots(
     let input_tx_for_poller = input_tx.clone();
     let gate_for_thread = ready_gate.clone();
     let injection_queue_for_worker = injection_queue.clone();
+    let worker_busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker_busy_for_worker = worker_busy.clone();
     let workflow_approver_for_worker = workflow_approver.clone();
     let session_roots_for_worker = session_roots.clone();
     let browser_mcp_for_worker = browser_mcp.clone();
@@ -1211,6 +1263,7 @@ pub fn spawn_with_roots(
                 approver,
                 gate_for_thread,
                 injection_queue_for_worker,
+                worker_busy_for_worker,
                 workflow_approver_for_worker,
                 session_roots_for_worker,
                 browser_mcp_for_worker,
@@ -1235,6 +1288,7 @@ pub fn spawn_with_roots(
         cancel,
         ready_gate,
         injection_queue,
+        worker_busy,
         workflow_approver,
         session_roots,
         browser_mcp,
@@ -1411,6 +1465,7 @@ async fn run_worker(
     approver: std::sync::Arc<dyn crate::permissions::ApprovalSink>,
     ready_gate: Arc<ReadyGate>,
     injection_queue: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+    worker_busy: Arc<std::sync::atomic::AtomicBool>,
     workflow_approver: std::sync::Arc<crate::workflow::WorkflowApprover>,
     session_roots: Option<crate::multi_tenant::SessionRoots>,
     browser_mcp: std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<crate::mcp::McpClient>>>>,
@@ -2267,7 +2322,12 @@ async fn run_worker(
         });
     }
 
-    while let Ok(input) = input_rx.recv() {
+    loop {
+        if let Some(text) = go_idle_taking_injections(&injection_queue, &worker_busy) {
+            let _ = input_tx_self.send(ShellInput::Line(text));
+        }
+        let Ok(input) = input_rx.recv() else { break };
+        worker_busy.store(true, std::sync::atomic::Ordering::SeqCst);
         match input {
             ShellInput::Line(text) => {
                 cancel.reset();
@@ -4278,6 +4338,7 @@ async fn handle_line(
                          `rework: <note>` (or click in the Chat tab)"
                             .to_string(),
                     ));
+                    let _ = events_tx.send(ViewEvent::TurnDone);
                     return;
                 }
             }
@@ -5877,6 +5938,91 @@ pub(crate) fn maybe_warn_file_size(
     state.warned_file_size = true;
     let mb = meta.len() as f64 / (1024.0 * 1024.0);
     let _ = events_tx.send(ViewEvent::ContextWarning { file_size_mb: mb });
+}
+
+#[cfg(test)]
+mod injection_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn queue() -> std::sync::Mutex<std::collections::VecDeque<String>> {
+        std::sync::Mutex::new(std::collections::VecDeque::new())
+    }
+
+    /// A turn that ends without another tool call never reaches the
+    /// tool_result drain; going idle must hand the leftovers back.
+    #[test]
+    fn going_idle_returns_what_the_turn_never_drained() {
+        let q = queue();
+        let busy = AtomicBool::new(true);
+        assert_eq!(
+            queue_or_submit_injection(&q, &busy, "first".into()),
+            InjectRoute::Queued(1)
+        );
+        assert_eq!(
+            queue_or_submit_injection(&q, &busy, "second".into()),
+            InjectRoute::Queued(2)
+        );
+        assert_eq!(
+            go_idle_taking_injections(&q, &busy).as_deref(),
+            Some("first\n\nsecond")
+        );
+        assert!(!busy.load(Ordering::SeqCst));
+        assert!(q.lock().unwrap().is_empty());
+        assert_eq!(go_idle_taking_injections(&q, &busy), None);
+    }
+
+    #[test]
+    fn an_idle_worker_takes_the_message_directly() {
+        let q = queue();
+        let busy = AtomicBool::new(false);
+        assert_eq!(
+            queue_or_submit_injection(&q, &busy, "hello".into()),
+            InjectRoute::Submit("hello".into())
+        );
+        assert!(q.lock().unwrap().is_empty());
+    }
+
+    /// Hammer the hand-off: whatever the interleaving of injects with the
+    /// worker going idle, every message comes out exactly once — through
+    /// the queue drain or as a direct submit, never stranded.
+    #[test]
+    fn no_message_is_stranded_or_duplicated_under_contention() {
+        for _ in 0..200 {
+            let q = Arc::new(queue());
+            let busy = Arc::new(AtomicBool::new(true));
+            let injector = {
+                let (q, busy) = (q.clone(), busy.clone());
+                std::thread::spawn(move || {
+                    let mut direct = Vec::new();
+                    for i in 0..50 {
+                        if let InjectRoute::Submit(t) =
+                            queue_or_submit_injection(&q, &busy, format!("m{i}"))
+                        {
+                            direct.push(t);
+                        }
+                    }
+                    direct
+                })
+            };
+            let mut drained = Vec::new();
+            for _ in 0..20 {
+                if let Some(t) = go_idle_taking_injections(&q, &busy) {
+                    drained.extend(t.split("\n\n").map(str::to_string));
+                }
+                busy.store(true, Ordering::SeqCst);
+                std::thread::yield_now();
+            }
+            let direct = injector.join().unwrap();
+            if let Some(t) = go_idle_taking_injections(&q, &busy) {
+                drained.extend(t.split("\n\n").map(str::to_string));
+            }
+            let mut all: Vec<String> = drained.into_iter().chain(direct).collect();
+            all.sort_by_key(|m| m[1..].parse::<u32>().unwrap());
+            let want: Vec<String> = (0..50).map(|i| format!("m{i}")).collect();
+            assert_eq!(all, want);
+        }
+    }
 }
 
 #[cfg(test)]

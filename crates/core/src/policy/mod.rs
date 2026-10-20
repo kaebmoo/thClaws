@@ -111,6 +111,20 @@ pub struct Policies {
     /// Phase 8 — what the agent and the binary may do on this machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<RuntimePolicy>,
+    /// Phase 6 — installs come only from the org's private marketplace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marketplace: Option<MarketplacePolicy>,
+}
+
+/// Skills, plugins, subagents and MCP servers install only by name from
+/// the catalogue at `url` (the engine's marketplace.json schema), never
+/// from a URL or a path. Unreachable catalogue = nothing installable.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MarketplacePolicy {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub url: String,
 }
 
 /// Phase 8 — the block that says *no*.
@@ -216,11 +230,12 @@ pub struct PluginsPolicy {
     /// air-gapped deployments.
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
-    /// Reject skills that ship executable `scripts/` dirs.
-    /// `false` (default) → declarative-only skills only.
+    /// `false` rejects skills that ship executable `scripts/` dirs.
+    /// Defaults to `true`; set it explicitly to lock scripts out.
     #[serde(default = "default_true")]
     pub allow_external_scripts: bool,
-    /// Reject MCP servers whose endpoint isn't in `allowed_hosts`.
+    /// `false` refuses stdio MCP servers and HTTP ones whose endpoint
+    /// isn't in `allowed_hosts`. Defaults to `true` (no MCP restriction).
     #[serde(default = "default_true")]
     pub allow_external_mcp: bool,
 }
@@ -492,6 +507,81 @@ pub fn external_mcp_disallowed() -> bool {
         .and_then(|a| a.policy.policies.plugins.as_ref())
         .map(|p| p.enabled && !p.allow_external_mcp)
         .unwrap_or(false)
+}
+
+/// Env pair a hosted runner gets from its provisioner. It can only
+/// tighten: an open-core user who sets it locks only themselves.
+pub const ENV_INSTALL_SOURCE: &str = "THCLAWS_INSTALL_SOURCE";
+pub const ENV_MARKETPLACE_URL: &str = "THCLAWS_MARKETPLACE_URL";
+
+/// `Some(catalogue url)` when installs are restricted to a private
+/// marketplace — from the signed policy, else from the runner env. An
+/// empty url still locks (nothing installable) rather than falling open.
+pub fn marketplace_only_url() -> Option<String> {
+    if let Some(m) = active()
+        .and_then(|a| a.policy.policies.marketplace.as_ref())
+        .filter(|m| m.enabled)
+    {
+        return Some(m.url.trim().to_string());
+    }
+    marketplace_only_from_env(
+        std::env::var(ENV_INSTALL_SOURCE).ok().as_deref(),
+        std::env::var(ENV_MARKETPLACE_URL).ok().as_deref(),
+    )
+}
+
+pub fn marketplace_only_from_env(source: Option<&str>, url: Option<&str>) -> Option<String> {
+    source
+        .filter(|s| s.trim().eq_ignore_ascii_case("marketplace"))
+        .map(|_| url.unwrap_or("").trim().to_string())
+}
+
+/// Why the active policy refuses this MCP server, or `None` when it may
+/// run. Checked where a server is saved and again where it is started,
+/// so `/mcp add`, marketplace installs, plugin-contributed servers and
+/// hand-edited mcp.json all meet the same rule.
+pub fn mcp_server_refusal(cfg: &crate::mcp::McpServerConfig) -> Option<String> {
+    if let Some(reason) = active().and_then(|a| mcp_server_refusal_with(cfg, &a.policy)) {
+        return Some(reason);
+    }
+    if marketplace_only_url().is_some()
+        && !cfg.engine_managed
+        && !crate::marketplace::mcp_server_listed(cfg)
+    {
+        return Some(format!(
+            "mcp '{}' blocked: only MCP servers from your organisation's marketplace may run",
+            cfg.name
+        ));
+    }
+    None
+}
+
+/// With `allow_external_mcp: false`, an HTTP server must match
+/// `allowed_hosts` and a stdio server is refused outright: its command
+/// typically fetches a package from npm or PyPI, which no host rule can
+/// see. Engine-managed servers are the engine's own choice, not an
+/// install, and pass.
+pub fn mcp_server_refusal_with(
+    cfg: &crate::mcp::McpServerConfig,
+    policy: &Policy,
+) -> Option<String> {
+    let plugins = policy.policies.plugins.as_ref()?;
+    if !plugins.enabled || plugins.allow_external_mcp || cfg.engine_managed {
+        return None;
+    }
+    if cfg.transport == "http" {
+        return match allowlist::check_url_with(&cfg.url, policy) {
+            AllowDecision::Denied { reason } => Some(format!(
+                "mcp '{}' blocked by org policy: {reason}",
+                cfg.name
+            )),
+            _ => None,
+        };
+    }
+    Some(format!(
+        "mcp '{}' blocked by org policy: stdio MCP servers are disabled (allow_external_mcp: false)",
+        cfg.name
+    ))
 }
 
 /// Startup entry point. Call once, before `AppConfig::load()`. On
@@ -1309,6 +1399,7 @@ mod tests {
                 sso: None,
                 audit: None,
                 runtime: None,
+                marketplace: None,
             },
             signature: Some("sig".into()),
         };
@@ -1320,6 +1411,42 @@ mod tests {
             parsed.policies.plugins.as_ref().unwrap().allowed_hosts,
             vec!["github.com/acme/*"]
         );
+    }
+}
+
+#[cfg(test)]
+mod marketplace_only_tests {
+    use super::*;
+
+    #[test]
+    fn env_locks_only_when_it_says_marketplace() {
+        assert_eq!(
+            marketplace_only_from_env(
+                Some("marketplace"),
+                Some(" https://t/api/marketplace.json ")
+            ),
+            Some("https://t/api/marketplace.json".into())
+        );
+        assert_eq!(
+            marketplace_only_from_env(Some("Marketplace"), None),
+            Some(String::new())
+        );
+        assert_eq!(
+            marketplace_only_from_env(Some("open"), Some("https://t")),
+            None
+        );
+        assert_eq!(marketplace_only_from_env(None, Some("https://t")), None);
+    }
+
+    #[test]
+    fn policy_block_parses() {
+        let p: Policies = serde_json::from_str(
+            r#"{"marketplace":{"enabled":true,"url":"https://sis.thclaws.ai/api/marketplace.json"}}"#,
+        )
+        .unwrap();
+        let m = p.marketplace.unwrap();
+        assert!(m.enabled);
+        assert_eq!(m.url, "https://sis.thclaws.ai/api/marketplace.json");
     }
 }
 

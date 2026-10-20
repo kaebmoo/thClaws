@@ -646,6 +646,9 @@ impl McpClient {
         config: McpServerConfig,
         approver: Option<Arc<dyn crate::permissions::ApprovalSink>>,
     ) -> Result<Arc<Self>> {
+        if let Some(reason) = crate::policy::mcp_server_refusal(&config) {
+            return Err(Error::Provider(reason));
+        }
         if config.transport == "http" {
             return Self::connect_http(config, false).await;
         }
@@ -661,6 +664,9 @@ impl McpClient {
         config: McpServerConfig,
         approver: Option<Arc<dyn crate::permissions::ApprovalSink>>,
     ) -> Result<Arc<Self>> {
+        if let Some(reason) = crate::policy::mcp_server_refusal(&config) {
+            return Err(Error::Provider(reason));
+        }
         if config.transport == "http" {
             return Self::connect_http(config, true).await;
         }

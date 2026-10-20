@@ -668,6 +668,10 @@ pub async fn install_from_url(
     // URL must match allowed_hosts. Single guard covers both .zip and
     // git dispatch paths below. Open-core builds without a policy fall
     // through unchanged (AllowDecision::NoPolicy).
+    crate::marketplace::ensure_fresh().await;
+    if !crate::marketplace::install_url_allowed(url) {
+        return Err(Error::Tool(crate::marketplace::install_refusal("skill")));
+    }
     if let crate::policy::AllowDecision::Denied { reason } = crate::policy::check_url(url) {
         return Err(Error::Tool(format!(
             "skill install blocked by org policy: {reason}"
@@ -868,12 +872,15 @@ pub(crate) async fn download_zip(url: &str) -> Result<Vec<u8>> {
     // marketplace fetch uses a similar 10s cap; zip installs may pull
     // larger payloads so we allow a touch more headroom.
     let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .redirect(crate::policy::allowlist::install_redirect_policy())
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| Error::Tool(format!("http client: {e}")))?;
-    let resp = client
-        .get(url)
+    let mut req = client.get(url);
+    if let Some(token) = crate::marketplace::auth_token_for(url) {
+        req = req.bearer_auth(token);
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| Error::Tool(format!("download: {e}")))?;

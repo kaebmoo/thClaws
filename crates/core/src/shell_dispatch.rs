@@ -5166,7 +5166,8 @@ fn resolve_skill_install_target_gui(
             String::new(),
             None,
             Some(format!(
-                "no skill named '{arg}' in marketplace and not a URL — try /skill search <query> or pass a git URL"
+                "no skill named '{arg}' in marketplace and not a URL — {}",
+                crate::marketplace::not_found_hint("try /skill search <query> or pass a git URL")
             )),
         ),
     }

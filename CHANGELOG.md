@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.142.0] — 2026-10-20
+
+**`--serve` fixes and tighter Enterprise install controls.** Messages typed while the agent works are no longer stranded, pasted images work in the browser, Browse picks a working folder, and an org policy can now lock out local MCP servers.
+
+### Added
+
+- **Enterprise: private marketplace.** With `policies.marketplace` (EE desktops) or `THCLAWS_INSTALL_SOURCE=marketplace` (hosted workspaces), skills, plugins, subagents and MCP servers install only by name from the organisation's own catalogue; URL, path and `/mcp add` installs are refused, and an unreachable catalogue offers nothing. The catalogue and its downloads carry the cloud sign-in token, sent only to the marketplace's own host.
+
+### Fixed
+
+- **Messages typed during a turn are always answered.** A message sent while the agent was working stayed "QUEUED" for good when the turn ended without another tool call. It is now sent as the next message.
+- **Pasting an image works in `--serve`.** The chat used to hang; the image now goes to the agent like in the desktop app.
+- **Reconnecting clears a stale "working" state**, and pressing Stop on an idle agent no longer leaves the chat waiting.
+- **Permanent provider errors are not retried.** A 400/401/403/404 answer used to be retried three times before you saw it; 408 and 429 still retry.
+- **Qwen thinking at High no longer fails on DashScope.** The thinking budget is kept below the model's output cap.
+- **Plugin allow-list: an `@` in a URL's path or query no longer passes as the allowed host.** `https://evil.example/x@allowed.host/skill.zip` matched `allowed.host` while the download went to evil.example.
+- **Browse works in `--serve`.** The working-directory picker's Browse button sent a request only the desktop window answers, so in a browser it did nothing. `--serve` now opens a folder browser in the page: walk the host's folders, go up or home, and pick one. The desktop app keeps its native dialog, and multi-user servers refuse to list folders.
+
+### Changed
+
+- **Enterprise: `allow_external_mcp: false` now refuses local (stdio) MCP servers** wherever they come from — `/mcp add`, the marketplace, a plugin or a hand-edited `mcp.json` — and HTTP servers must match `allowed_hosts`. The check runs when a server is saved and again when it starts. Skill and plugin downloads re-check every redirect against the list.
+- **Model catalogue and Appendix A refreshed.** Provider test fixtures that leaked into a vendor's model list are no longer offered as models.
+- **Dependencies:** `quinn-proto` updated to 0.11.19 (RUSTSEC-2026-0338/0339/0340/0342); frontend `source-map-js` and `brace-expansion` bumped.
+
 ## [0.141.0] — 2026-10-10
 
 **A release about consent and boundaries.** Approvals — for spawned commands, symlinked writes, shares, and served workspaces — now land where the settings say they should, and a handful of server-side stumbles got fixed.

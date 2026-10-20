@@ -4208,7 +4208,11 @@ fn resolve_skill_install_target(
         Some(entry) => match &entry.install_url {
             Some(url) => (
                 url.clone(),
-                Some(explicit_name.map(String::from).unwrap_or_else(|| entry.name.clone())),
+                Some(
+                    explicit_name
+                        .map(String::from)
+                        .unwrap_or_else(|| entry.name.clone()),
+                ),
                 None,
             ),
             None => (
@@ -4224,7 +4228,8 @@ fn resolve_skill_install_target(
             String::new(),
             None,
             Some(format!(
-                "no skill named '{arg}' in marketplace and not a URL — try /skill search <query> or pass a git URL"
+                "no skill named '{arg}' in marketplace and not a URL — {}",
+                crate::marketplace::not_found_hint("try /skill search <query> or pass a git URL")
             )),
         ),
     }
@@ -4275,7 +4280,8 @@ pub fn resolve_plugin_install_target(arg: &str) -> (String, Option<String>) {
         None => (
             String::new(),
             Some(format!(
-                "no plugin named '{arg}' in marketplace and not a URL — try /plugin search <query> or pass a git URL"
+                "no plugin named '{arg}' in marketplace and not a URL — {}",
+                crate::marketplace::not_found_hint("try /plugin search <query> or pass a git URL")
             )),
         ),
     }
@@ -4317,7 +4323,8 @@ pub async fn install_mcp_from_marketplace(
     let entry = mp
         .find_mcp(name)
         .ok_or_else(|| format!(
-            "no MCP named '{name}' in marketplace — try /mcp search <query>, /mcp add <name> <url> (HTTP), or /mcp add <name> <command> [args...] (stdio) for a custom server"
+            "no MCP named '{name}' in marketplace — {}",
+            crate::marketplace::not_found_hint("try /mcp search <query>, /mcp add <name> <url> (HTTP), or /mcp add <name> <command> [args...] (stdio) for a custom server")
         ))?
         .clone();
 

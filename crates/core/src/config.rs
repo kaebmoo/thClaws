@@ -2101,32 +2101,16 @@ impl ProjectConfig {
                 })
             })
             .collect();
-        // Org-policy gate (Phase 2): when policies.plugins.enabled with
-        // allow_external_mcp: false, reject HTTP MCP servers whose URL
-        // host isn't in `allowed_hosts`. Stdio entries pass through —
-        // gating arbitrary stdio commands is a separate sub-policy
-        // (admin's mcp.json content = admin's responsibility).
-        let filtered: Vec<crate::mcp::McpServerConfig> = if crate::policy::external_mcp_disallowed()
-        {
-            parsed
-                .into_iter()
-                .filter(|s| {
-                    if s.transport != "http" {
-                        return true;
-                    }
-                    match crate::policy::check_url(&s.url) {
-                        crate::policy::AllowDecision::Allowed
-                        | crate::policy::AllowDecision::NoPolicy => true,
-                        crate::policy::AllowDecision::Denied { reason } => {
-                            eprintln!("\x1b[33m[mcp] '{}' skipped: {}\x1b[0m", s.name, reason);
-                            false
-                        }
-                    }
-                })
-                .collect()
-        } else {
-            parsed
-        };
+        let filtered: Vec<crate::mcp::McpServerConfig> = parsed
+            .into_iter()
+            .filter(|s| match crate::policy::mcp_server_refusal(s) {
+                Some(reason) => {
+                    eprintln!("\x1b[33m[mcp] skipped: {reason}\x1b[0m");
+                    false
+                }
+                None => true,
+            })
+            .collect();
         Some(filtered)
     }
 }
@@ -2135,6 +2119,9 @@ impl ProjectConfig {
 /// `user=true` writes to `~/.config/thclaws/mcp.json`, otherwise
 /// `.thclaws/mcp.json` (project-local). Returns the path written to.
 pub fn save_mcp_server(server: &crate::mcp::McpServerConfig, user: bool) -> Result<PathBuf> {
+    if let Some(reason) = crate::policy::mcp_server_refusal(server) {
+        return Err(Error::Config(reason));
+    }
     let path = mcp_config_path(user)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

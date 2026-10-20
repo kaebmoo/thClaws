@@ -1636,7 +1636,8 @@ impl Agent {
                                 // A spent credit quota stays spent; a rate-limit 429 clears.
                                 let is_config = matches!(e, Error::Config(_))
                                     || crate::providers::is_quota_exceeded(&e.to_string())
-                                    || crate::desktop_update::is_client_update_required(&e.to_string());
+                                    || crate::desktop_update::is_client_update_required(&e.to_string())
+                                    || is_permanent_provider_error(&e.to_string());
                                 if !is_config && attempt < max_retries {
                                     let delay = tokio::time::Duration::from_secs(1 << attempt);
                                     eprintln!(
@@ -3027,6 +3028,73 @@ mod browser_step_thinking_tests {
     fn auto_survives_when_nothing_browsed() {
         let b = B::default();
         assert_eq!(b.budget(None), None);
+    }
+}
+
+/// HTTP status a provider error carries as `http <code> <reason>: …`.
+fn provider_http_status(msg: &str) -> Option<u16> {
+    msg.match_indices("http ").find_map(|(i, _)| {
+        let rest = &msg[i + 5..];
+        let code = rest.get(..3)?;
+        let after_ok = rest[3..].chars().next().is_none_or(|c| !c.is_ascii_digit());
+        if code.bytes().all(|b| b.is_ascii_digit()) && after_ok {
+            code.parse().ok()
+        } else {
+            None
+        }
+    })
+}
+
+/// A 4xx (bad model id, model not activated, auth) answers the same on every
+/// attempt; only 408 and 429 clear by waiting.
+fn is_permanent_provider_error(msg: &str) -> bool {
+    matches!(provider_http_status(msg), Some(s) if (400..500).contains(&s) && s != 408 && s != 429)
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::{is_permanent_provider_error, provider_http_status};
+
+    #[test]
+    fn reads_the_status_out_of_provider_errors() {
+        assert_eq!(
+            provider_http_status(
+                "provider error: http 404 Not Found: {\"error\":\"Model not exist\"}"
+            ),
+            Some(404)
+        );
+        assert_eq!(
+            provider_http_status("provider error: http 429 Too Many Requests: slow down"),
+            Some(429)
+        );
+        assert_eq!(
+            provider_http_status("provider error: http: connection refused"),
+            None
+        );
+        assert_eq!(provider_http_status("provider error: http 4040"), None);
+        assert_eq!(provider_http_status("see https://x/http 12"), None);
+    }
+
+    #[test]
+    fn only_lasting_client_errors_skip_the_retry() {
+        for permanent in [
+            "provider error: http 400 Bad Request: model not activated",
+            "provider error: http 401 Unauthorized: bad key",
+            "provider error: http 404 Not Found: Model not exist",
+            "provider error: http 422 Unprocessable Entity: nope",
+        ] {
+            assert!(is_permanent_provider_error(permanent), "{permanent}");
+        }
+        for transient in [
+            "provider error: http 408 Request Timeout: slow",
+            "provider error: http 429 Too Many Requests: slow down",
+            "provider error: http 500 Internal Server Error: oops",
+            "provider error: http 503 Service Unavailable: later",
+            "provider error: http: error sending request",
+            "provider error: stream ended early",
+        ] {
+            assert!(!is_permanent_provider_error(transient), "{transient}");
+        }
     }
 }
 
@@ -4783,6 +4851,48 @@ mod tests {
             elapsed < std::time::Duration::from_secs(2),
             "cancel didn't short-circuit the retry backoff (took {elapsed:?})",
         );
+    }
+
+    /// A 404 "Model not exist" is answered once, not after 1+2+4 s of
+    /// identical retries. (No 5xx case here: its backoff would hold the
+    /// process-wide gateway turn open for seconds and race
+    /// `gateway_turn::tests`; `only_lasting_client_errors_skip_the_retry`
+    /// covers the classification.)
+    #[tokio::test]
+    async fn permanent_4xx_is_not_retried() {
+        struct StatusErrProvider {
+            msg: &'static str,
+            calls: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        #[async_trait]
+        impl Provider for StatusErrProvider {
+            async fn stream(&self, _req: crate::providers::StreamRequest) -> Result<EventStream> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(Error::Provider(self.msg.into()))
+            }
+        }
+        for (msg, want_calls) in [
+            ("http 404 Not Found: {\"error\":\"Model not exist\"}", 1),
+            ("http 400 Bad Request: model not activated", 1),
+        ] {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let agent = Agent::new(
+                Arc::new(StatusErrProvider {
+                    msg,
+                    calls: calls.clone(),
+                }),
+                ToolRegistry::default(),
+                "test-model",
+                "",
+            );
+            let result = collect_agent_turn(agent.run_turn("hi".into())).await;
+            assert!(result.is_err(), "{msg}");
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                want_calls,
+                "{msg}"
+            );
+        }
     }
 
     /// Setting `next_turn_chunk_timeout` before `run_turn` causes the
