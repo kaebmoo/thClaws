@@ -197,7 +197,11 @@ jobs:
       - name: Verify KeyLocker connectivity
         if: matrix.os == 'windows' && env.SM_API_KEY != ''
         shell: pwsh
-        run: smctl healthcheck
+        run: |
+          smctl healthcheck
+          # signtool finds the cert by fingerprint in the user store; a fresh
+          # runner has none until certsync pulls it from KeyLocker.
+          smctl windows certsync --keypair-alias key_1454244402
 
       - name: Sign Windows binary
         if: matrix.os == 'windows' && env.SM_API_KEY != ''
@@ -208,6 +212,11 @@ jobs:
           smctl sign --fingerprint %SM_CERT_FINGERPRINT% --input "target\${{ matrix.target }}\release\thclaws.exe"
           rem smctl exits 0 even when signing fails; signtool's verdict is the real one.
           signtool verify /pa "target\${{ matrix.target }}\release\thclaws.exe" || exit /b 1
+
+      - name: KeyLocker logs (on signing failure)
+        if: failure() && matrix.os == 'windows' && env.SM_API_KEY != ''
+        shell: pwsh
+        run: Get-ChildItem "$env:USERPROFILE\.signingmanager\logs" -Filter *.log | ForEach-Object { "== $($_.Name)"; Get-Content $_.FullName -Tail 40 }
 
       - name: Install WiX 3.11 (ARM64 runner only)
         # windows-2022 image ships WiX 3.11 pre-installed; the
