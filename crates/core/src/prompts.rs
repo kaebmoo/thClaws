@@ -575,7 +575,12 @@ pub(crate) fn documents_prompt_section() -> String {
          outline: `# Heading` starts a new slide, bullets become body. \
          Read extracts slide text.\n\
          - **PdfCreate** / **PdfRead** — PDF. Markdown in, supports \
-         tables, inline images, embedded fonts. A4 / Letter / Legal.\n\
+         tables, inline images, embedded fonts. A4 / Letter / Legal. \
+         PdfRead OCRs scanned pages (`ocr`: auto / vision / tesseract).\n\
+         - **DocConvert** — convert between formats on the document \
+         service: Word/Excel/PowerPoint → PDF, old .doc/.xls/.ppt/.odt → \
+         docx/xlsx/pptx (then read with the matching `*Read`), .html → \
+         typeset PDF.\n\
          - **EpubCreate** — reflowable EPUB 3 e-book. Markdown in, splits \
          into chapters at headings, embeds images + Noto fonts, builds \
          navigation. Use for e-books / long-form reading on e-readers \

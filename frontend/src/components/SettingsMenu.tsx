@@ -40,6 +40,7 @@ function FeatureFlagRow({
   enabled,
   dirty,
   onToggle,
+  locked = false,
 }: {
   icon: React.ReactNode;
   label: string;
@@ -47,13 +48,16 @@ function FeatureFlagRow({
   enabled: boolean | null;
   dirty: boolean;
   onToggle: () => void;
+  /** On by the deployment (e.g. through the organisation's gateway): shown,
+   *  not switchable. */
+  locked?: boolean;
 }) {
   return (
     <button
       onClick={onToggle}
       className="sm-row w-full text-left px-3 py-1.5 flex items-start gap-2"
       style={{ color: "var(--text-primary)", fontSize: "12px" }}
-      disabled={enabled === null}
+      disabled={enabled === null || locked}
     >
       <span
         className="sm-subtle"
@@ -122,6 +126,7 @@ export function SettingsMenu({
   // Opt-in HAL tools (`halEnabled`) — YouTubeTranscript + WebScrape.
   // Registered at agent build, so flipping needs a restart/reload.
   const [halEnabled, setHalEnabled] = useState<boolean | null>(null);
+  const [halForced, setHalForced] = useState(false);
   const [halDirty, setHalDirty] = useState(false);
   // Opt-in Shell tab (`shellTabEnabled`). App.tsx swaps the tab live off
   // the same broadcast, so no restart note is needed here.
@@ -172,6 +177,7 @@ export function SettingsMenu({
         typeof msg.enabled === "boolean"
       ) {
         setHalEnabled(msg.enabled as boolean);
+        setHalForced(msg.forced === true);
       } else if (
         msg.type === "hal_enabled_result" &&
         typeof msg.enabled === "boolean"
@@ -737,10 +743,15 @@ export function SettingsMenu({
             <FeatureFlagRow
               icon={<FileText size={12} />}
               label="HAL tools"
-              desc="YouTubeTranscript, WebScrape — needs a HAL key/gateway (writes `.thclaws/settings.json`)"
+              desc={
+                halForced
+                  ? "YouTubeTranscript, WebScrape — on through your organisation's gateway; no HAL key needed"
+                  : "YouTubeTranscript, WebScrape — needs a HAL key/gateway (writes `.thclaws/settings.json`)"
+              }
               enabled={halEnabled}
               dirty={halDirty}
               onToggle={toggleHal}
+              locked={halForced}
             />
             <FeatureFlagRow
               icon={<SquareTerminal size={12} />}

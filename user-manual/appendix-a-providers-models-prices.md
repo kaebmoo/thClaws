@@ -36,7 +36,7 @@ Prices are **what you pay** — upstream cost with the 1.25× platform markup al
 
 A context marked **`?`** was never published by the provider — it is that provider's blanket default, kept because a missing window breaks model pickers. Treat it as a lower bound, not a specification.
 
-664 models across 14 providers.
+609 models across 14 providers.
 
 ### Anthropic
 
@@ -232,21 +232,20 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `cohere/command-r-plus-08-2024` | 128k | $3.12 | — | $12.50 |
 | `cohere/command-r7b-12-2024` | 128k | $0.05 | — | $0.19 |
 | `cohere/north-mini-code:free` | 256k | free | — | free |
-| `deepseek/deepseek-chat` | 164k | $0.40 | — | $1.11 |
+| `deepseek/deepseek-chat` | 164k | $0.32 | — | $1.29 |
 | `deepseek/deepseek-chat-v3-0324` | 164k | $0.36 | — | $1.42 |
 | `deepseek/deepseek-chat-v3.1` | 33k | $0.31 | — | $1.19 |
-| `deepseek/deepseek-r1` | 64k | $0.88 | — | $3.12 |
 | `deepseek/deepseek-r1-0528` | 164k | $0.62 | — | $2.69 |
 | `deepseek/deepseek-v3.1-terminus` | 164k | $0.34 | — | $1.25 |
 | `deepseek/deepseek-v3.2` | 131k | $0.35 | — | $0.53 |
 | `deepseek/deepseek-v3.2-exp` | 164k | $0.34 | — | $0.51 |
 | `deepseek/deepseek-v4-flash` | 1.04858M | $0.11 | — | $0.23 |
-| `deepseek/deepseek-v4-flash-0731` | 1.04858M | $0.19 | — | $0.19 |
+| `deepseek/deepseek-v4-flash-0731` | 1.04858M | $0.06 | — | $0.17 |
 | `deepseek/deepseek-v4-flash-vision-exp` | 1.04858M | $0.27 | — | $0.81 |
-| `deepseek/deepseek-v4-pro` | 1.04858M | $1.19 | — | $2.39 |
+| `deepseek/deepseek-v4-pro` | 1.04858M | $0.48 | — | $0.96 |
 | `deepseek/deepseek-v4-pro-0813` | 1.04858M | $0.83 | — | $2.48 |
-| `deepseek/deepseek-v4.1-flash` | 1.04858M | $0.06 | — | $0.10 |
-| `deepseek/deepseek-v4.1-flash-1017` | 1.04858M | $0.38 | — | $1.50 |
+| `deepseek/deepseek-v4.1-flash` | 1.04858M | $0.04 | — | $0.17 |
+| `deepseek/deepseek-v4.1-flash-1017` | 1.04858M | $0.19 | — | $0.75 |
 | `dots-studio/dots-3-note-preview:free` | 512k | free | — | free |
 | `elorian/glimpse` | 262k | $0.75 | — | $3.75 |
 | `fireworks/ember-1` | 1.04858M | $3.75 | — | $18.75 |
@@ -272,8 +271,8 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `google/gemma-2-27b-it` | 8k | $0.81 | — | $0.81 |
 | `google/gemma-3-12b-it` | 131k | $0.06 | — | $0.19 |
 | `google/gemma-3-27b-it` | 131k | $0.10 | — | $0.44 |
-| `google/gemma-3-4b-it` | 131k | $0.06 | — | $0.12 |
-| `google/gemma-4-26b-a4b-it` | 262k | $0.11 | — | $0.38 |
+| `google/gemma-3-4b-it` | 131k | $0.05 | — | $0.06 |
+| `google/gemma-4-26b-a4b-it` | 262k | $0.10 | — | $0.32 |
 | `google/gemma-4-26b-a4b-it:free` | 262k | free | — | free |
 | `google/gemma-4-31b-it` | 262k | $0.25 | — | $0.50 |
 | `google/gemma-4-31b-it:free` | 262k | free | — | free |
@@ -282,6 +281,7 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `ibm-granite/granite-4.2-8b` | 131k | $0.07 | — | $0.31 |
 | `inception/mercury-2` | 128k | $0.31 | $0.03 | $0.94 |
 | `inception/mercury-2.5` | 260k | $0.05 | — | $0.19 |
+| `inception/mercury-3` | 1M | $0.12 | — | $0.44 |
 | `inclusionai/ling-3.0-flash` | 262k | $0.03 | — | $0.08 |
 | `inclusionai/ling-3.0-flash-vl` | 131k | $0.07 | — | $0.22 |
 | `inclusionai/ling-3.1-flash` | 262k | $0.09 | — | $0.28 |
@@ -308,7 +308,6 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `meta/muse-spark-open` | 1.04858M | $1.56 | — | $5.31 |
 | `meta/muse-wonder` | 1.04858M | $5.00 | — | $25.00 |
 | `microsoft/phi-4` | 16k | $0.09 | — | $0.18 |
-| `microsoft/wizardlm-2-8x22b` | 66k | $0.78 | — | $0.78 |
 | `minimax/minimax-01` | 1.00019M | $0.25 | — | $1.38 |
 | `minimax/minimax-m1` | 1M | $0.69 | — | $2.75 |
 | `minimax/minimax-m2` | 197k | $0.32 | — | $1.27 |
@@ -317,6 +316,7 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `minimax/minimax-m2.5` | 197k | $0.34 | $0.19 | $1.19 |
 | `minimax/minimax-m2.7` | 197k | $0.38 | — | $1.50 |
 | `minimax/minimax-m3` | 1.04858M | $0.38 | — | $1.50 |
+| `minimax/minimax-m3.1-flash:free` | 1M | free | — | free |
 | `mistralai/codestral-2508` | 256k | $0.38 | — | $1.12 |
 | `mistralai/devstral-2512` | 262k | $0.50 | — | $2.50 |
 | `mistralai/ministral-14b-2512` | 262k | $0.25 | — | $0.25 |
@@ -325,7 +325,7 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `mistralai/mistral-large` | 128k | $2.50 | — | $7.50 |
 | `mistralai/mistral-large-2407` | 131k | $2.50 | — | $7.50 |
 | `mistralai/mistral-large-2512` | 262k | $0.62 | — | $1.88 |
-| `mistralai/mistral-large-4-0` | 1.04858M | $0.85 | — | $2.61 |
+| `mistralai/mistral-large-4-0` | 1.04858M | $1.70 | — | $5.22 |
 | `mistralai/mistral-medium-3` | 131k | $0.50 | — | $2.50 |
 | `mistralai/mistral-medium-3-5` | 262k | $1.88 | — | $9.38 |
 | `mistralai/mistral-medium-3.1` | 131k | $0.50 | — | $2.50 |
@@ -355,7 +355,7 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `nousresearch/hermes-4-405b` | 131k | $1.25 | — | $3.75 |
 | `nvidia/nemotron-3-nano-30b-a3b` | 262k | $0.07 | — | $0.30 |
 | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | 256k | free | — | free |
-| `nvidia/nemotron-3-super-120b-a12b` | 262k | $0.10 | — | $0.56 |
+| `nvidia/nemotron-3-super-120b-a12b` | 262k | $0.38 | — | $3.00 |
 | `nvidia/nemotron-3-super-120b-a12b:free` | 262k | free | — | free |
 | `nvidia/nemotron-3-ultra-550b-a55b` | 1M | $0.75 | — | $3.00 |
 | `nvidia/nemotron-3-ultra-550b-a55b:free` | 1M | free | — | free |
@@ -363,7 +363,7 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `nvidia/nemotron-3.5-content-safety:free` | 128k | free | — | free |
 | `nvidia/nemotron-3.5-lightning` | 262k | $0.09 | — | $0.25 |
 | `nvidia/nemotron-3.5-lightning:free` | 1M | free | — | free |
-| `nvidia/nemotron-3.5-super-vl` | 1.04858M | $0.12 | — | $0.50 |
+| `nvidia/nemotron-3.5-super-vl` | 1.04858M | $0.19 | — | $0.62 |
 | `nvidia/nemotron-3.5-super-vl:free` | 1M | free | — | free |
 | `openai/gpt-3.5-turbo` | 16k | $0.62 | — | $1.88 |
 | `openai/gpt-3.5-turbo-0613` | 4k | $1.25 | — | $2.50 |
@@ -460,27 +460,28 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `qwen/qwen3-vl-30b-a3b-thinking` | 131k | $0.36 | — | $1.25 |
 | `qwen/qwen3-vl-8b-instruct` | 131k | $0.31 | — | $0.94 |
 | `qwen/qwen3.5-122b-a10b` | 262k | $0.33 | — | $2.60 |
-| `qwen/qwen3.5-27b` | 262k | $0.24 | — | $1.95 |
-| `qwen/qwen3.5-35b-a3b` | 262k | $0.19 | — | $1.25 |
-| `qwen/qwen3.5-397b-a17b` | 262k | $0.62 | — | $4.50 |
-| `qwen/qwen3.5-9b` | 262k | $0.12 | — | $0.19 |
+| `qwen/qwen3.5-27b` | 262k | $0.34 | — | $2.70 |
+| `qwen/qwen3.5-35b-a3b` | 262k | $0.18 | — | $1.25 |
+| `qwen/qwen3.5-397b-a17b` | 262k | $0.49 | — | $2.92 |
+| `qwen/qwen3.5-9b` | 262k | $0.10 | — | $0.16 |
 | `qwen/qwen3.5-flash-02-23` | 1M | $0.08 | — | $0.33 |
 | `qwen/qwen3.5-plus-02-15` | 1M | $0.33 | — | $1.95 |
 | `qwen/qwen3.5-plus-20260420` | 1M | $0.38 | — | $2.25 |
 | `qwen/qwen3.6-27b` | 262k | $0.31 | — | $2.50 |
-| `qwen/qwen3.6-35b-a3b` | 262k | $0.19 | — | $1.25 |
+| `qwen/qwen3.6-35b-a3b` | 262k | $0.12 | — | $1.19 |
 | `qwen/qwen3.6-flash` | 1M | $0.23 | — | $1.41 |
 | `qwen/qwen3.6-plus` | 1M | $0.41 | — | $2.44 |
 | `qwen/qwen3.7-flash` | 1M | $0.04 | — | $0.16 |
 | `qwen/qwen3.7-max` | 1M | $1.84 | — | $5.53 |
 | `qwen/qwen3.7-plus` | 1M | $0.40 | — | $1.60 |
 | `qwen/qwen3.8-2.4t-a95b` | 1.04858M | $2.50 | — | $7.50 |
-| `qwen/qwen3.8-27b` | 1M | $0.30 | — | $2.75 |
+| `qwen/qwen3.8-27b` | 1M | $0.05 | — | $1.69 |
 | `qwen/qwen3.8-flash` | 1M | $0.19 | — | $0.59 |
 | `qwen/qwen3.8-max-0902` | 1M | $2.50 | — | $7.50 |
 | `qwen/qwen3.8-max-prime` | 1M | $5.00 | — | $15.00 |
 | `qwen/qwen3.8-omni-flash` | 1M | $0.19 | — | $0.59 |
-| `reflection/beam-1.0-501b-a23b` | 1.04858M | $1.25 | — | $3.75 |
+| `recursive/flint-v1.0:free` | 262k | free | — | free |
+| `reflection/beam-1.0-501b-a23b` | 1.04858M | $0.38 | — | $1.25 |
 | `rekaai/reka-edge` | 16k | $0.12 | — | $0.12 |
 | `rekaai/reka-flash-3` | 66k | $0.12 | — | $0.25 |
 | `relace/relace-apply-3` | 256k | $1.06 | — | $1.56 |
@@ -491,7 +492,6 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `sakana/sakana-namazu` | 262k | $1.19 | — | $5.00 |
 | `sao10k/l3-lunaris-8b` | 8k | $0.05 | — | $0.06 |
 | `sao10k/l3.1-euryale-70b` | 131k | $1.06 | — | $1.06 |
-| `sao10k/l3.3-euryale-70b` | 131k | $0.81 | — | $0.94 |
 | `scaledown/extract` | 1M | $0.05 | — | free |
 | `scaledown/summarize` | 1M | $0.05 | — | free |
 | `stepfun/step-3.5-flash` | 262k | $0.12 | — | $0.38 |
@@ -501,9 +501,9 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `tencent/hy-mt2-1.8b` | 8k | $0.05 | — | $0.22 |
 | `tencent/hy-mt2-30b-a3b` | 8k | $0.09 | — | $0.37 |
 | `tencent/hy-mt2-7b` | 8k | $0.09 | — | $0.37 |
-| `tencent/hy3` | 262k | $0.17 | — | $0.66 |
+| `tencent/hy3` | 262k | $0.10 | — | $0.41 |
 | `tencent/hy3-preview` | 262k | $0.22 | — | $0.75 |
-| `tencent/hy4-preview` | 1.04858M | $1.04 | — | $3.13 |
+| `tencent/hy4-preview` | 1.04858M | $0.94 | — | $2.81 |
 | `thedrummer/cydonia-24b-v4.1` | 131k | $0.38 | — | $0.62 |
 | `thedrummer/skyfall-36b-v2` | 33k | $0.69 | — | $1.00 |
 | `thedrummer/unslopnemo-12b` | 33k | $0.50 | — | $0.50 |
@@ -516,7 +516,7 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `undi95/remm-slerp-l2-13b` | 6k | $0.44 | — | $0.81 |
 | `upstage/solar-mini4` | 524k | $0.06 | — | $0.25 |
 | `upstage/solar-pro-3` | 131k | $0.19 | — | $0.75 |
-| `upstage/solar-pro4` | 524k | $0.11 | — | $0.45 |
+| `upstage/solar-pro4` | 524k | $0.19 | — | $0.75 |
 | `writer/palmyra-x5` | 1.04M | $0.75 | — | $7.50 |
 | `x-ai/grok-4.20` | 2M | $1.56 | — | $3.12 |
 | `x-ai/grok-4.20-multi-agent` | 2M | $1.56 | — | $3.12 |
@@ -525,8 +525,8 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `x-ai/grok-4.6` | 500k | $2.50 | — | $7.50 |
 | `x-ai/grok-4.7` | 500k | $2.50 | — | $7.50 |
 | `x-ai/grok-build-0.1` | 256k | $1.25 | — | $2.50 |
-| `xiaomi/mimo-v2.5` | 1.04858M | $0.18 | $0.10 | $0.35 |
-| `xiaomi/mimo-v2.5-pro` | 1.04858M | $0.54 | $0.25 | $1.09 |
+| `xiaomi/mimo-v2.5` | 1.04858M | $0.15 | $0.10 | $0.30 |
+| `xiaomi/mimo-v2.5-pro` | 1.04858M | $0.38 | $0.25 | $0.76 |
 | `xiaomi/mimo-v2.6-flash` | 1.04858M | $0.18 | — | $0.35 |
 | `xiaomi/mimo-v2.6-pro` | 1.04858M | $0.54 | — | $1.09 |
 | `xiaomi/mimo-v2.6-pro-ultraspeed` | 1.04858M | $5.44 | — | $10.88 |
@@ -534,16 +534,16 @@ A context marked **`?`** was never published by the provider — it is that prov
 | `z-ai/glm-4.5` | 131k | $0.75 | — | $2.75 |
 | `z-ai/glm-4.5-air` | 131k | $0.16 | — | $1.06 |
 | `z-ai/glm-4.5v` | 66k | $0.75 | — | $2.25 |
-| `z-ai/glm-4.6` | 205k | $0.62 | — | $2.50 |
+| `z-ai/glm-4.6` | 205k | $0.69 | — | $2.75 |
 | `z-ai/glm-4.6v` | 131k | $0.38 | — | $1.12 |
 | `z-ai/glm-4.7` | 203k | $0.68 | free | $2.48 |
 | `z-ai/glm-4.7-flash` | 203k | $0.08 | free | $0.50 |
 | `z-ai/glm-5` | 203k | $1.25 | — | $4.00 |
 | `z-ai/glm-5-turbo` | 203k | $1.50 | — | $5.00 |
-| `z-ai/glm-5.1` | 203k | $1.21 | — | $3.79 |
-| `z-ai/glm-5.2` | 1.04858M | $0.78 | — | $3.02 |
-| `z-ai/glm-5.3` | 1.04858M | $0.10 | — | $1.75 |
-| `z-ai/glm-5.3-flash` | 1.31072M | $0.06 | — | $0.25 |
+| `z-ai/glm-5.1` | 203k | $1.75 | — | $5.50 |
+| `z-ai/glm-5.2` | 1.04858M | $0.04 | — | $8.75 |
+| `z-ai/glm-5.3` | 1.04858M | $0.88 | — | $2.75 |
+| `z-ai/glm-5.3-flash` | 1.31072M | $0.19 | — | $0.62 |
 | `z-ai/glm-5.3-flashx` | 1.04858M | $0.46 | — | $1.56 |
 | `z-ai/glm-5.3-prime` | 1M | $3.50 | — | $11.00 |
 | `z-ai/glm-5v-turbo` | 203k | $1.50 | — | $5.00 |
@@ -558,126 +558,71 @@ A context marked **`?`** was never published by the provider — it is that prov
 
 ### DashScope (Alibaba)
 
-| Model | Context | Input ($/M) | Output ($/M) |
-|---|---:|---:|---:|
-| `dashscope/ZHIPU/GLM-5.3` | 262k? | $1.75 | $5.50 |
-| `dashscope/deepseek-v3.2` | 164k | $0.71 | $2.14 |
-| `dashscope/deepseek-v4-flash` | 1M | $0.25 | $0.50 |
-| `dashscope/deepseek-v4-flash-0731` | 1.04858M | $0.25 | $0.50 |
-| `dashscope/deepseek-v4-pro` | 1M | $3.00 | $6.00 |
-| `dashscope/deepseek-v4-pro-0813` | 1M | $3.00 | $6.00 |
-| `dashscope/deepseek-v4.1-flash` | 262k? | $0.38 | $1.50 |
-| `dashscope/deepseek-v4.1-flash-1017` | 262k? | $0.38 | $1.50 |
-| `dashscope/glm-5.1` | 205k | $1.75 | $5.50 |
-| `dashscope/glm-5.2` | 1.04858M | $1.75 | $5.50 |
-| `dashscope/glm-5.2-fast-preview` | 131k | $3.50 | $11.00 |
-| `dashscope/glm-5.3` | 262k? | $1.75 | $5.50 |
-| `dashscope/kimi-k2.7-code` | 262k | $1.19 | $5.00 |
-| `dashscope/kimi-k3` | 262k? | $3.75 | $18.75 |
-| `dashscope/kimi/kimi-k3` | 262k? | $3.75 | $18.75 |
-| `dashscope/qvq-max` | 131k | $1.50 | $6.00 |
-| `dashscope/qwen-coder-plus` | 262k? | $7.50 | $75.00 |
-| `dashscope/qwen-flash` | 998k | $0.31 | $2.50 |
-| `dashscope/qwen-flash-character` | 8k | $0.31 | $2.50 |
-| `dashscope/qwen-max` | 31k | $2.00 | $8.00 |
-| `dashscope/qwen-mt-flash` | 131k | $0.20 | $0.61 |
-| `dashscope/qwen-mt-lite` | 131k | $0.15 | $0.45 |
-| `dashscope/qwen-mt-plus` | 131k | $3.08 | $9.21 |
-| `dashscope/qwen-mt-turbo` | 131k | $0.20 | $0.61 |
-| `dashscope/qwen-omni-turbo` | 33k | $0.09 | $0.34 |
-| `dashscope/qwen-plus` | 129k | $0.50 | $1.50 |
-| `dashscope/qwen-plus-2025-01-25` | 129k | $0.50 | $1.50 |
-| `dashscope/qwen-plus-2025-04-28` | 129k | $0.50 | $1.50 |
-| `dashscope/qwen-plus-2025-07-14` | 129k | $0.50 | $1.50 |
-| `dashscope/qwen-plus-2025-09-11` | 998k | $1.50 | $4.50 |
-| `dashscope/qwen-plus-2025-12-01` | 1M | $1.50 | $4.50 |
-| `dashscope/qwen-plus-character` | 33k | $1.50 | $4.50 |
-| `dashscope/qwen-plus-latest` | 998k | $1.50 | $4.50 |
-| `dashscope/qwen-turbo` | 129k | $0.06 | $0.25 |
-| `dashscope/qwen-vl-max` | 131k | $1.00 | $4.00 |
-| `dashscope/qwen-vl-ocr-2025-11-20` | 31k | $0.09 | $0.20 |
-| `dashscope/qwen-vl-plus` | 8k | $0.26 | $0.79 |
-| `dashscope/qwen3-14b` | 131k | $0.44 | $1.75 |
-| `dashscope/qwen3-235b-a22b` | 131k | $0.88 | $3.50 |
-| `dashscope/qwen3-235b-a22b-instruct-2507` | 129k | $0.88 | $3.50 |
-| `dashscope/qwen3-235b-a22b-thinking-2507` | 262k | $0.88 | $10.50 |
-| `dashscope/qwen3-30b-a3b` | 129k | $0.25 | $1.00 |
-| `dashscope/qwen3-30b-a3b-instruct-2507` | 262k | $0.25 | $1.00 |
-| `dashscope/qwen3-30b-a3b-thinking-2507` | 82k | $0.25 | $1.00 |
-| `dashscope/qwen3-32b` | 131k | $0.20 | $0.80 |
-| `dashscope/qwen3-8b` | 131k | $0.22 | $0.88 |
-| `dashscope/qwen3-coder-480b-a35b-instruct` | 262k | $7.50 | $75.00 |
-| `dashscope/qwen3-coder-flash` | 998k | $2.00 | $12.00 |
-| `dashscope/qwen3-coder-next` | 262k | $7.50 | $75.00 |
-| `dashscope/qwen3-coder-plus` | 998k | $7.50 | $75.00 |
-| `dashscope/qwen3-coder-plus-2025-07-22` | 998k | $7.50 | $75.00 |
-| `dashscope/qwen3-coder-plus-2025-09-23` | 1M | $7.50 | $75.00 |
-| `dashscope/qwen3-livetranslate-flash-realtime` | 53k | $12.50 | $47.50 |
-| `dashscope/qwen3-livetranslate-flash-realtime-2025-09-22` | 49k | $12.50 | $47.50 |
-| `dashscope/qwen3-max` | 258k | $3.75 | $18.75 |
-| `dashscope/qwen3-max-2025-09-23` | 256k | $3.75 | $18.75 |
-| `dashscope/qwen3-max-2026-01-23` | 258k | $3.75 | $18.75 |
-| `dashscope/qwen3-max-preview` | 258k | $3.75 | $18.75 |
-| `dashscope/qwen3-next-80b-a3b-instruct` | 262k | $0.19 | $1.50 |
-| `dashscope/qwen3-next-80b-a3b-thinking` | 262k | $0.19 | $1.50 |
-| `dashscope/qwen3-omni-30b-a3b-captioner` | 31k | $4.76 | $3.83 |
-| `dashscope/qwen3-omni-flash` | 66k | $0.54 | $2.07 |
-| `dashscope/qwen3-omni-flash-2025-09-15` | 262k? | $0.54 | $2.07 |
-| `dashscope/qwen3-omni-flash-2025-12-01` | 16k | $0.54 | $2.07 |
-| `dashscope/qwen3-omni-flash-realtime` | 66k | $0.65 | $2.49 |
-| `dashscope/qwen3-omni-flash-realtime-2025-09-15` | 57k | $0.65 | $2.49 |
-| `dashscope/qwen3-omni-flash-realtime-2025-12-01` | 57k | $0.65 | $2.49 |
-| `dashscope/qwen3-vl-235b-a22b-instruct` | 131k | $0.50 | $2.00 |
-| `dashscope/qwen3-vl-235b-a22b-thinking` | 131k | $0.50 | $5.00 |
-| `dashscope/qwen3-vl-flash` | 256k | $0.31 | $2.50 |
-| `dashscope/qwen3-vl-flash-2025-10-15` | 256k | $0.31 | $2.50 |
-| `dashscope/qwen3-vl-flash-2026-01-22` | 256k | $0.31 | $2.50 |
-| `dashscope/qwen3-vl-plus` | 260k | $0.25 | $2.00 |
-| `dashscope/qwen3-vl-plus-2025-09-23` | 256k | $0.25 | $2.00 |
-| `dashscope/qwen3-vl-plus-2025-12-19` | 256k | $0.25 | $2.00 |
-| `dashscope/qwen3.5-122b-a10b` | 262k | $0.50 | $4.00 |
-| `dashscope/qwen3.5-27b` | 262k | $0.38 | $3.00 |
-| `dashscope/qwen3.5-35b-a3b` | 262k | $0.31 | $2.50 |
-| `dashscope/qwen3.5-397b-a17b` | 262k | $0.75 | $4.50 |
-| `dashscope/qwen3.5-flash` | 1M | $0.12 | $0.50 |
-| `dashscope/qwen3.5-flash-2026-02-23` | 1M | $0.12 | $0.50 |
-| `dashscope/qwen3.5-livetranslate-flash-realtime` | 131k | $9.38 | $37.50 |
-| `dashscope/qwen3.5-livetranslate-flash-realtime-2026-05-19` | 131k | $9.38 | $37.50 |
-| `dashscope/qwen3.5-omni-flash` | 197k | $0.50 | $2.75 |
-| `dashscope/qwen3.5-omni-flash-2026-03-15` | 197k | $0.50 | $2.75 |
-| `dashscope/qwen3.5-omni-flash-realtime` | 197k | $0.69 | $4.12 |
-| `dashscope/qwen3.5-omni-flash-realtime-2026-03-15` | 197k | $0.69 | $4.12 |
-| `dashscope/qwen3.5-omni-plus` | 197k | $1.75 | $10.38 |
-| `dashscope/qwen3.5-omni-plus-2026-03-15` | 197k | $1.75 | $10.38 |
-| `dashscope/qwen3.5-omni-plus-realtime` | 197k | $2.62 | $15.50 |
-| `dashscope/qwen3.5-omni-plus-realtime-2026-03-15` | 197k | $2.62 | $15.50 |
-| `dashscope/qwen3.5-plus` | 992k | $0.62 | $3.75 |
-| `dashscope/qwen3.5-plus-2026-02-15` | 1M | $0.62 | $3.75 |
-| `dashscope/qwen3.5-plus-2026-04-20` | 1M | $0.62 | $3.75 |
-| `dashscope/qwen3.6-27b` | 262k | $0.75 | $4.50 |
-| `dashscope/qwen3.6-35b-a3b` | 262k | $0.47 | $2.81 |
-| `dashscope/qwen3.6-flash` | 1M | $1.25 | $5.00 |
-| `dashscope/qwen3.6-flash-2026-04-16` | 1M | $1.25 | $5.00 |
-| `dashscope/qwen3.6-max-preview` | 262k | $2.50 | $15.00 |
-| `dashscope/qwen3.6-plus` | 1M | $2.50 | $7.50 |
-| `dashscope/qwen3.6-plus-2026-04-02` | 1M | $2.50 | $7.50 |
-| `dashscope/qwen3.7-flash` | 1M | $0.25 | $1.00 |
-| `dashscope/qwen3.7-flash-2026-07-15` | 131k | $0.25 | $1.00 |
-| `dashscope/qwen3.7-max` | 992k | $3.12 | $9.38 |
-| `dashscope/qwen3.7-max-2026-05-17` | 131k | $3.12 | $9.38 |
-| `dashscope/qwen3.7-max-2026-05-20` | 131k | $3.12 | $9.38 |
-| `dashscope/qwen3.7-max-2026-06-08` | 131k | $3.12 | $9.38 |
-| `dashscope/qwen3.7-max-preview` | 131k | $3.12 | $9.38 |
-| `dashscope/qwen3.7-plus` | 992k | $1.50 | $6.00 |
-| `dashscope/qwen3.7-plus-2026-05-26` | 131k | $1.50 | $6.00 |
-| `dashscope/qwen3.8-2.4t-a95b` | 1M | $2.50 | $7.50 |
-| `dashscope/qwen3.8-27b` | 1M | $0.62 | $3.75 |
-| `dashscope/qwen3.8-flash` | 1M | $0.19 | $0.59 |
-| `dashscope/qwen3.8-max` | 1M | $2.50 | $7.50 |
-| `dashscope/qwen3.8-max-0902` | 262k? | $2.50 | $7.50 |
-| `dashscope/qwen3.8-omni-flash` | 992k | $0.19 | $0.59 |
-| `dashscope/qwq-plus` | 98k | $1.00 | $3.00 |
-| `dashscope/qwq-plus-2025-03-05` | 131k | $1.00 | $3.00 |
+| Model | Context | Input ($/M) | Cached in ($/M) | Output ($/M) |
+|---|---:|---:|---:|---:|
+| `dashscope/deepseek-v4-flash-0731` | 1.04858M | $0.55 | $0.05 | $1.65 |
+| `dashscope/deepseek-v4-pro` | 1M | $3.00 | $0.25 | $6.00 |
+| `dashscope/deepseek-v4-pro-0813` | 1M | $1.65 | $0.17 | $4.95 |
+| `dashscope/deepseek-v4.1-flash` | 262k? | $0.38 | $0.04 | $1.50 |
+| `dashscope/deepseek-v4.1-flash-1017` | 262k? | $0.38 | $0.04 | $1.50 |
+| `dashscope/glm-5.1` | 205k | $1.75 | $0.32 | $5.50 |
+| `dashscope/glm-5.2` | 1.04858M | $1.75 | $0.35 | $5.50 |
+| `dashscope/glm-5.2-fast-preview` | 131k | $3.50 | $0.70 | $11.00 |
+| `dashscope/glm-5.3` | 262k? | $1.75 | $0.35 | $5.50 |
+| `dashscope/kimi-k2.7-code` | 262k | $1.19 | $0.12 | $5.00 |
+| `dashscope/kimi-k3` | 262k? | $3.75 | $0.38 | $18.75 |
+| `dashscope/qwen-flash` | 998k | $0.31 | $0.06 | $2.50 |
+| `dashscope/qwen-flash-character` | 8k | $0.31 | $0.06 | $2.50 |
+| `dashscope/qwen-max` | 31k | $2.00 | $0.40 | $8.00 |
+| `dashscope/qwen-mt-flash` | 131k | $0.20 | — | $0.61 |
+| `dashscope/qwen-mt-lite` | 131k | $0.15 | — | $0.45 |
+| `dashscope/qwen-mt-plus` | 131k | $3.08 | — | $9.21 |
+| `dashscope/qwen-plus` | 129k | $0.50 | $0.10 | $1.50 |
+| `dashscope/qwen-plus-2025-01-25` | 129k | $0.50 | $0.10 | $1.50 |
+| `dashscope/qwen-plus-2025-04-28` | 129k | $0.50 | $0.10 | $1.50 |
+| `dashscope/qwen-plus-2025-07-14` | 129k | $0.50 | $0.10 | $1.50 |
+| `dashscope/qwen-plus-2025-12-01` | 1M | $1.50 | $0.30 | $4.50 |
+| `dashscope/qwen-plus-character` | 33k | $1.50 | $0.30 | $4.50 |
+| `dashscope/qwen-plus-latest` | 998k | $1.50 | $0.30 | $4.50 |
+| `dashscope/qwen-vl-ocr-2025-11-20` | 31k | $0.09 | — | $0.20 |
+| `dashscope/qwen3-coder-flash` | 998k | $2.00 | $0.40 | $12.00 |
+| `dashscope/qwen3-omni-flash` | 66k | $0.54 | — | $2.07 |
+| `dashscope/qwen3-vl-plus` | 260k | $0.25 | $0.05 | $2.00 |
+| `dashscope/qwen3.5-122b-a10b` | 262k | $0.50 | — | $4.00 |
+| `dashscope/qwen3.5-27b` | 262k | $0.38 | — | $3.00 |
+| `dashscope/qwen3.5-35b-a3b` | 262k | $0.31 | — | $2.50 |
+| `dashscope/qwen3.5-397b-a17b` | 262k | $0.75 | — | $4.50 |
+| `dashscope/qwen3.5-flash` | 1M | $0.12 | — | $0.50 |
+| `dashscope/qwen3.5-flash-2026-02-23` | 1M | $0.12 | — | $0.50 |
+| `dashscope/qwen3.5-omni-flash` | 197k | $0.50 | — | $2.75 |
+| `dashscope/qwen3.5-omni-flash-2026-03-15` | 197k | $0.50 | — | $2.75 |
+| `dashscope/qwen3.5-omni-plus` | 197k | $1.75 | — | $10.38 |
+| `dashscope/qwen3.5-omni-plus-2026-03-15` | 197k | $1.75 | — | $10.38 |
+| `dashscope/qwen3.5-plus` | 992k | $0.62 | — | $3.75 |
+| `dashscope/qwen3.5-plus-2026-02-15` | 1M | $0.62 | — | $3.75 |
+| `dashscope/qwen3.5-plus-2026-04-20` | 1M | $0.62 | — | $3.75 |
+| `dashscope/qwen3.6-27b` | 262k | $0.75 | — | $4.50 |
+| `dashscope/qwen3.6-35b-a3b` | 262k | $0.47 | — | $2.81 |
+| `dashscope/qwen3.6-flash` | 1M | $1.25 | — | $5.00 |
+| `dashscope/qwen3.6-flash-2026-04-16` | 1M | $1.25 | — | $5.00 |
+| `dashscope/qwen3.6-plus` | 1M | $2.50 | — | $7.50 |
+| `dashscope/qwen3.6-plus-2026-04-02` | 1M | $2.50 | — | $7.50 |
+| `dashscope/qwen3.7-flash` | 1M | $0.25 | $0.05 | $1.00 |
+| `dashscope/qwen3.7-flash-2026-07-15` | 131k | $0.25 | $0.05 | $1.00 |
+| `dashscope/qwen3.7-max` | 992k | $3.12 | $0.62 | $9.38 |
+| `dashscope/qwen3.7-max-2026-05-17` | 131k | $3.12 | $0.62 | $9.38 |
+| `dashscope/qwen3.7-max-2026-05-20` | 131k | $3.12 | $0.62 | $9.38 |
+| `dashscope/qwen3.7-max-2026-06-08` | 131k | $3.12 | $0.62 | $9.38 |
+| `dashscope/qwen3.7-max-preview` | 131k | $3.12 | $0.62 | $9.38 |
+| `dashscope/qwen3.7-plus` | 992k | $1.50 | $0.30 | $6.00 |
+| `dashscope/qwen3.7-plus-2026-05-26` | 131k | $1.50 | $0.30 | $6.00 |
+| `dashscope/qwen3.8-2.4t-a95b` | 1M | $2.50 | $0.50 | $7.50 |
+| `dashscope/qwen3.8-27b` | 1M | $0.62 | $0.12 | $3.75 |
+| `dashscope/qwen3.8-flash` | 1M | $0.19 | $0.02 | $0.59 |
+| `dashscope/qwen3.8-max` | 1M | $2.50 | $0.31 | $7.50 |
+| `dashscope/qwen3.8-max-0902` | 262k? | $2.50 | $0.31 | $7.50 |
+| `dashscope/qwen3.8-omni-flash` | 992k | $0.19 | $0.02 | $0.59 |
+| `dashscope/qwq-plus-2025-03-05` | 131k | $1.00 | — | $3.00 |
 
 ### Z.ai
 

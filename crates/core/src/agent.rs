@@ -942,6 +942,11 @@ pub struct Agent {
     /// user/assistant alternation valid for providers (e.g. Anthropic)
     /// that reject two consecutive user messages.
     pub(crate) injection_queue: Arc<Mutex<std::collections::VecDeque<String>>>,
+    /// The running turn's usage so far, updated after every provider
+    /// call. A turn that ends in an error or is dropped on cancel never
+    /// yields `Done`, so surfaces read this instead
+    /// ([`Agent::partial_turn_usage`]) — the gateway billed those calls.
+    turn_usage: Arc<Mutex<Usage>>,
 }
 
 /// Build a provider for a model that belongs to a different backend than
@@ -1088,7 +1093,17 @@ impl Agent {
             next_turn_chunk_timeout: Arc::new(Mutex::new(None)),
             turn_notes: Arc::new(Mutex::new(TurnNotes::default())),
             injection_queue: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            turn_usage: Arc::new(Mutex::new(Usage::default())),
         }
+    }
+
+    /// Usage of the current (or last) turn's completed provider calls —
+    /// for a turn that ended without `Done` (error, cancel).
+    pub fn partial_turn_usage(&self) -> Usage {
+        self.turn_usage
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     /// Append a user message to the injection queue. Drained at the
@@ -1403,6 +1418,10 @@ impl Agent {
         let hooks = self.hooks.clone();
         let origin = self.origin.clone();
         let injection_queue = self.injection_queue.clone();
+        let turn_usage = self.turn_usage.clone();
+        if let Ok(mut g) = turn_usage.lock() {
+            *g = Usage::default();
+        }
 
         try_stream! {
             // One turn id for every gateway call this turn makes, so a quota
@@ -1808,6 +1827,9 @@ impl Agent {
                             turn_stop_reason = stop_reason;
                             if let Some(u) = &usage {
                                 cumulative_usage.accumulate(u);
+                                if let Ok(mut g) = turn_usage.lock() {
+                                    *g = cumulative_usage.clone();
+                                }
                             }
                         }
                     }

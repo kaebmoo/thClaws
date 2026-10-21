@@ -7009,7 +7009,12 @@ async fn llm_link_oneshot(
         };
         match next {
             Ok(Some(Ok(ProviderEvent::TextDelta(s)))) => text.push_str(&s),
-            Ok(Some(Ok(ProviderEvent::MessageStop { .. }))) => break,
+            Ok(Some(Ok(ProviderEvent::MessageStop { usage, .. }))) => {
+                if let Some(u) = &usage {
+                    crate::usage::note_side_usage(model, u);
+                }
+                break;
+            }
             Ok(Some(Ok(_))) => {}
             Ok(Some(Err(e))) => return Err(e),
             Ok(None) => break,

@@ -218,8 +218,16 @@ pub async fn dispatch(
             emit(events_tx, text);
         }
         SlashCommand::Usage => {
-            let tracker =
-                crate::usage::UsageTracker::new(crate::usage::UsageTracker::default_path());
+            // A multiuser pod books each member's turns under their own
+            // usage dir; the default path is the pod's, which they never
+            // write.
+            let tracker = crate::usage::UsageTracker::new(
+                state
+                    .session_roots
+                    .as_ref()
+                    .map(|r| r.usage_dir.clone())
+                    .unwrap_or_else(crate::usage::UsageTracker::default_path),
+            );
             emit(events_tx, tracker.summary());
         }
         SlashCommand::Doctor { fix } => {
@@ -900,6 +908,7 @@ pub async fn dispatch(
             );
         }
         SlashCommand::Cost { reset } => {
+            crate::shared_session::sync_session_cost(state);
             if reset {
                 state.session_cost_usd = 0.0;
                 #[cfg(feature = "cost_bridge")]
@@ -1705,6 +1714,7 @@ pub async fn dispatch(
             // Resolve marketplace name → install_url (or fall through
             // for a URL). See `repl::resolve_skill_install_target` for
             // the same logic in the CLI surface.
+            crate::marketplace::refresh_private().await;
             let (effective_url, effective_name, abort_msg) =
                 resolve_skill_install_target_gui(&git_url, name.as_deref());
             if let Some(msg) = abort_msg {
@@ -1755,6 +1765,7 @@ pub async fn dispatch(
                     ),
                 }
             }
+            crate::marketplace::refresh_private().await;
             let mp = crate::marketplace::load();
             // M6.11 (H2): include cache freshness in the header so
             // users see how old their snapshot is at a glance.
@@ -1850,6 +1861,7 @@ pub async fn dispatch(
                     emit(events_tx, format!("refresh failed: {e}"));
                 }
             }
+            crate::marketplace::refresh_private().await;
             let mp = crate::marketplace::load();
             let age_suffix = match crate::marketplace::cache_age_label() {
                 Some(label) => format!(", {label}"),
@@ -1923,6 +1935,7 @@ pub async fn dispatch(
             }
         }
         SlashCommand::SubagentInstall { arg, name, project } => {
+            crate::marketplace::refresh_private().await;
             let (effective_url, abort_msg) =
                 crate::agent_defs::resolve_subagent_install_target(&arg);
             if let Some(msg) = abort_msg {
@@ -1961,6 +1974,7 @@ pub async fn dispatch(
                     emit(events_tx, format!("refresh failed: {e}"));
                 }
             }
+            crate::marketplace::refresh_private().await;
             let mp = crate::marketplace::load();
             // Installed-name sets for the [installed ✓] badges. Skills
             // from the live SkillStore; subagents from the loaded defs
@@ -1994,6 +2008,7 @@ pub async fn dispatch(
                     emit(events_tx, format!("refresh failed: {e}"));
                 }
             }
+            crate::marketplace::refresh_private().await;
             let mp = crate::marketplace::load();
             let age_suffix = match crate::marketplace::cache_age_label() {
                 Some(label) => format!(", {label}"),
@@ -2109,6 +2124,7 @@ pub async fn dispatch(
                     emit(events_tx, format!("refresh failed: {e}"));
                 }
             }
+            crate::marketplace::refresh_private().await;
             let mp = crate::marketplace::load();
             let age_suffix = match crate::marketplace::cache_age_label() {
                 Some(label) => format!(", {label}"),
@@ -3354,6 +3370,7 @@ pub async fn dispatch(
         }
         SlashCommand::PluginInstall { url, user, force } => {
             // Resolve marketplace slug → install_url (no-op for URLs).
+            crate::marketplace::refresh_private().await;
             let (effective_url, abort_msg) = crate::repl::resolve_plugin_install_target(&url);
             if let Some(msg) = abort_msg {
                 emit(events_tx, msg);

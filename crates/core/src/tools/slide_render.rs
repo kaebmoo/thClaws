@@ -43,10 +43,10 @@ fn opt(input: &Value, key: &str) -> String {
         .to_string()
 }
 
-struct SlideEndpoint {
-    url: String,
-    bearer: Option<String>,
-    via_gateway: bool,
+pub(crate) struct SlideEndpoint {
+    pub(crate) url: String,
+    pub(crate) bearer: Option<String>,
+    pub(crate) via_gateway: bool,
 }
 
 /// Native (`SLIDE_RENDER_API`) wins over the gateway so a self-hosted /
@@ -60,7 +60,7 @@ fn resolve_slide_endpoint() -> Result<SlideEndpoint> {
 /// `pptx`). Split out when `/pptx` landed — the two share every rule
 /// (native URL wins over gateway, gateway is the zero-config fallback)
 /// and only differ in the path.
-fn resolve_slide_endpoint_for(endpoint: &str) -> Result<SlideEndpoint> {
+pub(crate) fn resolve_slide_endpoint_for(endpoint: &str) -> Result<SlideEndpoint> {
     if let Ok(base) = std::env::var("SLIDE_RENDER_API") {
         let base = base.trim();
         if !base.is_empty() {

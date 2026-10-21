@@ -680,6 +680,15 @@ pub async fn ensure_fresh() {
 
 const PRIVATE_FRESH_SECS: u64 = 5 * 60;
 
+/// Marketplace-only mode: refetch before resolving an install by name or
+/// listing the catalogue, so an item the admin added a minute ago shows up
+/// instead of the stale cache answering "no skill named …".
+pub async fn refresh_private() {
+    if crate::policy::marketplace_only_url().is_some() {
+        let _ = refresh_from_remote().await;
+    }
+}
+
 fn load_cache() -> Option<Marketplace> {
     let path = cache_path()?;
     let body = std::fs::read_to_string(path).ok()?;

@@ -618,18 +618,48 @@ fn pdf_cloud_default(env: Option<&str>, locked: bool) -> bool {
 /// Resolve a launch command on PATH (or as an absolute path). Shared
 /// by the browser-MCP injection guard and the `browser_status_get`
 /// IPC arm so both agree on whether the managed browser can start.
-/// `.cmd` is the Windows npm-shim extension.
+/// On Windows a bare name also matches each `PATHEXT` extension — poppler's
+/// `pdftotext.exe` went undetected when only `.cmd` (the npm shim) was tried.
 pub fn command_on_path(command: &str) -> bool {
     let p = std::path::Path::new(command);
     if p.is_absolute() {
         return p.is_file();
     }
+    let names = command_candidates(
+        command,
+        cfg!(windows),
+        std::env::var("PATHEXT").ok().as_deref(),
+    );
     std::env::var_os("PATH")
         .map(|paths| {
-            std::env::split_paths(&paths)
-                .any(|d| d.join(command).is_file() || d.join(format!("{command}.cmd")).is_file())
+            std::env::split_paths(&paths).any(|d| names.iter().any(|n| d.join(n).is_file()))
         })
         .unwrap_or(false)
+}
+
+fn command_candidates(command: &str, windows: bool, pathext: Option<&str>) -> Vec<String> {
+    let mut names = vec![command.to_string()];
+    if std::path::Path::new(command).extension().is_some() {
+        return names;
+    }
+    let exts: Vec<String> = if windows {
+        pathext
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(".COM;.EXE;.BAT;.CMD")
+            .split(';')
+            .map(|e| e.trim().to_ascii_lowercase())
+            .filter(|e| e.starts_with('.') && e.len() > 1)
+            .collect()
+    } else {
+        vec![".cmd".to_string()]
+    };
+    for ext in exts {
+        let n = format!("{command}{ext}");
+        if !names.contains(&n) {
+            names.push(n);
+        }
+    }
+    names
 }
 
 fn default_auto_learn_reconcile_hours() -> u32 {
@@ -2856,6 +2886,21 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn command_candidates_cover_windows_executables() {
+        let win = command_candidates("pdftotext", true, Some(".COM;.EXE;.BAT;.CMD"));
+        assert!(win.contains(&"pdftotext.exe".to_string()), "{win:?}");
+        assert!(win.contains(&"pdftotext.cmd".to_string()), "{win:?}");
+        let default = command_candidates("pdftoppm", true, None);
+        assert!(default.contains(&"pdftoppm.exe".to_string()), "{default:?}");
+        assert_eq!(
+            command_candidates("pdftotext.exe", true, None),
+            ["pdftotext.exe"]
+        );
+        let unix = command_candidates("npx", false, Some(".EXE"));
+        assert_eq!(unix, ["npx", "npx.cmd"]);
+    }
+
     /// dev-plan/65 P5. Multiuser isolates each user's FILES into their own
     /// folder — but the managed browser is one Chromium with one cookie jar
     /// for the whole pod, so a login by any member is a login for every

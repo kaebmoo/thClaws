@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.143.0] — 2026-10-22
+
+**Office documents, honest usage numbers, and a tidier model catalogue.** DocConvert and PdfRead now work in hosted workspaces with OCR proofreading, usage books side calls and stopped turns against a single token definition, and models Alibaba no longer serves are hidden.
+
+### Added
+
+- **Office documents in hosted workspaces.** DocConvert and PdfRead run through the document service with automatic OCR — the model proofreads tesseract against every page image — plus xlsx/read fixes.
+
+### Fixed
+
+- **Thai DOCX documents render correctly.** Sarabun sits at the Latin size, headings use real heading styles, and bullets render instead of dropping.
+- **XlsxEdit writes formulas.** A value starting with `=` is stored as a formula rather than literal text.
+- **PPTX preview and PDF glyphs.** PPTX preview works under a workspace host, and PdfCreate substitutes symbols its fonts lack.
+- **Private marketplace listings stay current.** The private catalogue is refetched before install-by-name and listings, so the organisation's latest entries are offered.
+- **Publishing to the web reports progress.** The files tool now says publishing is running and where the link will land.
+
+### Changed
+
+- **Usage accounting unified.** Side calls, stopped turns and per-session cost are booked, and every place shares one token definition so session and totals views agree.
+- **Model catalogue and pricing refreshed.** Models Alibaba no longer serves, realtime-only rows and unpriced entries are hidden; DashScope's qwen-vl-ocr joins the catalogue; and implicit-cache hits are priced at the provider's bill rates.
+
 ## [0.142.0] — 2026-10-20
 
 **`--serve` fixes and tighter Enterprise install controls.** Messages typed while the agent works are no longer stranded, pasted images work in the browser, Browse picks a working folder, and an org policy can now lock out local MCP servers.

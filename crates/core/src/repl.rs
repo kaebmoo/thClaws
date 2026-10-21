@@ -5682,6 +5682,63 @@ async fn ollama_is_reachable() -> bool {
 }
 
 /// Save model to project-level `.thclaws/settings.json`.
+/// Book one REPL turn's usage — the per-model tracker, the ledger, the
+/// session's cost, and the session's side calls (subagents, compaction, …)
+/// since the last footer — and return its `[tokens: …]` line. `stopped`
+/// marks a turn that ended without `Done`.
+fn book_repl_turn(
+    config: &AppConfig,
+    session: &mut Session,
+    session_cost_usd: &mut f64,
+    session_cost_for: &mut String,
+    usage: &crate::providers::Usage,
+    elapsed: std::time::Duration,
+    stopped: Option<&str>,
+) -> String {
+    let provider_name = config.detect_provider().unwrap_or("unknown");
+    let tracker = crate::usage::UsageTracker::new(crate::usage::UsageTracker::default_path());
+    tracker.record(provider_name, &config.model, usage);
+    if let Ok(cwd) = std::env::current_dir() {
+        crate::usage::append_usage_ledger(&cwd, "main", provider_name, &config.model, usage);
+    }
+    let side = crate::usage::take_side_usage(&session.id);
+    if let Some(side) = &side {
+        side.record(&tracker);
+    }
+    if *session_cost_for != session.id {
+        *session_cost_usd = session.cost_usd();
+        *session_cost_for = session.id.clone();
+    }
+    // Cost: unknown / tier-billed models price as None — no cost suffix.
+    let turn_cost = crate::model_catalogue::EffectiveCatalogue::load()
+        .compute_cost_usd(
+            &config.model,
+            &crate::model_catalogue::TokenUsage::from_usage(usage),
+        )
+        .unwrap_or(0.0)
+        + side.as_ref().map_or(0.0, |s| s.cost_usd);
+    *session_cost_usd += turn_cost;
+    let cost_str = if *session_cost_usd > 0.0 {
+        format!(" · ${:.4} session", *session_cost_usd)
+    } else {
+        String::new()
+    };
+    let line = format!(
+        "[tokens: {}{} · {}{}{}]",
+        usage.tokens_note(),
+        side.as_ref().map(|s| s.footer_note()).unwrap_or_default(),
+        format_duration(elapsed),
+        stopped.map(|s| format!(" · {s}")).unwrap_or_default(),
+        cost_str
+    );
+    session.turn_usage.push(crate::session::TurnUsage {
+        after: session.messages.len(),
+        text: line.clone(),
+        cost_usd: turn_cost,
+    });
+    line
+}
+
 /// Format a turn duration for the `[tokens: ... · 3.2s]` line.
 /// Short durations render in ms, sub-minute in seconds with one decimal,
 /// longer runs as `1m 23s`.
@@ -6086,6 +6143,7 @@ pub async fn run_print_mode_with(
     // thinking onto stdout buries the actual answer and corrupts
     // downstream parsers — so the captured output is just the final text.
     let stdout_is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    crate::gateway_turn::set_session(&session.id);
     let mut stream = Box::pin(agent.run_turn(prompt.to_string()));
     let mut last_was_thinking = false;
     while let Some(ev) = stream.next().await {
@@ -6132,12 +6190,11 @@ pub async fn run_print_mode_with(
                 // (piped / scheduler-captured), so a scheduled run log
                 // always ends with a token + duration footer.
                 if verbose || !stdout_is_tty {
-                    let cache_info = usage.cache_note();
                     let elapsed = format_duration(turn_start.elapsed());
-                    eprintln!(
-                        "[tokens: {}in/{}out{} · {}]",
-                        usage.input_tokens, usage.output_tokens, cache_info, elapsed
-                    );
+                    let side = crate::usage::take_side_usage(&session.id)
+                        .map(|s| s.footer_note())
+                        .unwrap_or_default();
+                    eprintln!("[tokens: {}{side} · {elapsed}]", usage.tokens_note());
                 }
             }
             Err(e) => {
@@ -7186,6 +7243,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
 
                 // Run the agent turn.
                 repl_cancel.reset();
+                crate::gateway_turn::set_session(&session.id);
                 let mut stream = Box::pin(agent.run_turn(prompt));
                 loop {
                     let heartbeat_delay =
@@ -7284,9 +7342,8 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 &usage,
                             );
                             team_println!(
-                                "\n[tokens: {}in/{}out · {}]",
-                                usage.input_tokens,
-                                usage.output_tokens,
+                                "\n[tokens: {} · {}]",
+                                usage.tokens_note(),
                                 format_duration(turn_start.elapsed())
                             );
                         }
@@ -7492,6 +7549,9 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     // model catalogue after every AgentEvent::Done and shown alongside
     // the per-turn token counts. `/cost reset` zeroes it.
     let mut session_cost_usd: f64 = 0.0;
+    // The session `session_cost_usd` belongs to; a `/load` or `/new`
+    // restarts it from that session's recorded turn costs.
+    let mut session_cost_for = String::new();
 
     // Cardputer cost-display bridge — best-effort BLE central that
     // streams `session_cost_usd` to a `thClaws-Cost-*` peripheral and
@@ -7574,6 +7634,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 lead_log!("{COLOR_GREEN}");
                 let _ = std::io::stdout().flush();
                 repl_cancel.reset();
+                crate::gateway_turn::set_session(&session.id);
                 let mut stream = Box::pin(agent.run_turn(team_prompt));
                 let mut last_was_thinking = false;
                 let mut active_tools: std::collections::HashMap<String, crate::tool_display::ActiveToolDisplay> =
@@ -9012,6 +9073,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     // Allow `/plugin install <name>` to resolve a
                     // marketplace slug to its install_url. If `url`
                     // already looks like a URL, this is a no-op.
+                    crate::marketplace::refresh_private().await;
                     let (effective_url, abort_msg) = resolve_plugin_install_target(&url);
                     if let Some(msg) = abort_msg {
                         println!("{COLOR_YELLOW}{msg}{COLOR_RESET}");
@@ -9598,6 +9660,10 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     }
                 }
                 SlashCommand::Cost { reset } => {
+                    if session_cost_for != session.id {
+                        session_cost_usd = session.cost_usd();
+                        session_cost_for = session.id.clone();
+                    }
                     if reset {
                         session_cost_usd = 0.0;
                         #[cfg(feature = "cost_bridge")]
@@ -10065,6 +10131,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     // or a `<repo>#<branch>:<subpath>` extension, install
                     // directly. Otherwise treat it as a marketplace name
                     // and look up the install_url from the catalogue.
+                    crate::marketplace::refresh_private().await;
                     let (effective_url, effective_name, abort_msg) =
                         resolve_skill_install_target(&git_url, name.as_deref());
                     if let Some(msg) = abort_msg {
@@ -10359,6 +10426,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     }
                 }
                 SlashCommand::SubagentInstall { arg, name, project } => {
+                    crate::marketplace::refresh_private().await;
                     let (effective_url, abort_msg) =
                         crate::agent_defs::resolve_subagent_install_target(&arg);
                     if let Some(msg) = abort_msg {
@@ -13057,6 +13125,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         let _ = std::io::stdout().flush();
         let turn_start = std::time::Instant::now();
         repl_cancel.reset();
+        crate::gateway_turn::set_session(&session.id);
         let mut stream = Box::pin(agent.run_turn(line.to_string()));
         let mut _cancelled = false;
         let mut last_was_thinking = false;
@@ -13082,6 +13151,20 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     println!("{COLOR_RESET}\n{COLOR_YELLOW}[cancelled by Ctrl-C]{COLOR_RESET}");
                     repl_cancel.cancel();
                     drop(stream);
+                    // The calls finished before the stop were billed.
+                    let partial = agent.partial_turn_usage();
+                    if partial.prompt_tokens() > 0 || partial.output_tokens > 0 {
+                        let line = book_repl_turn(
+                            &config,
+                            &mut session,
+                            &mut session_cost_usd,
+                            &mut session_cost_for,
+                            &partial,
+                            turn_start.elapsed(),
+                            Some("stopped"),
+                        );
+                        println!("{COLOR_DIM}{line}{COLOR_RESET}");
+                    }
                     break;
                 }
                 Some(msgs) = inbox_rx.recv(), if team_enabled => {
@@ -13331,56 +13414,24 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             lead_log!("\n{COLOR_YELLOW}[hit max_iterations]{COLOR_RESET}\n");
                         }
                     }
-                    // Show token usage + elapsed turn duration.
-                    let cache_info = usage.cache_note();
-                    let elapsed = format_duration(turn_start.elapsed());
-                    // Cost: convert provider Usage → catalogue TokenUsage
-                    // (different field names, same numbers), then look up
-                    // the active model's pricing. Unknown / tier-billed
-                    // models return None — we just skip the cost suffix.
-                    let token_usage = crate::model_catalogue::TokenUsage::from_usage(&usage);
-                    let catalogue = crate::model_catalogue::EffectiveCatalogue::load();
-                    if let Some(c) = catalogue.compute_cost_usd(&config.model, &token_usage) {
-                        session_cost_usd += c;
-                    }
+                    // Show token usage + elapsed turn duration, and book it.
+                    let line = book_repl_turn(
+                        &config,
+                        &mut session,
+                        &mut session_cost_usd,
+                        &mut session_cost_for,
+                        &usage,
+                        turn_start.elapsed(),
+                        None,
+                    );
                     // Push the running total to the Cardputer display.
                     // Send fails silently when no device is paired —
                     // we don't want a missing buddy to disrupt the REPL.
                     #[cfg(feature = "cost_bridge")]
                     let _ = cost_bridge.tx_cost.send(session_cost_usd);
-                    let cost_str = if session_cost_usd > 0.0 {
-                        format!(" · ${:.4} session", session_cost_usd)
-                    } else {
-                        String::new()
-                    };
-                    println!(
-                        "\n{COLOR_DIM}[tokens: {}in/{}out{} · {}{}]{COLOR_RESET}",
-                        usage.input_tokens, usage.output_tokens, cache_info, elapsed, cost_str
-                    );
-                    lead_log!(
-                        "\n{COLOR_DIM}[tokens: {}in/{}out{} · {}{}]{COLOR_RESET}\n",
-                        usage.input_tokens,
-                        usage.output_tokens,
-                        cache_info,
-                        elapsed,
-                        cost_str
-                    );
+                    println!("\n{COLOR_DIM}{line}{COLOR_RESET}");
+                    lead_log!("\n{COLOR_DIM}{line}{COLOR_RESET}\n");
                     let _ = std::io::stdout().flush();
-
-                    // Record usage to .thclaws/usage/.
-                    let provider_name = config.detect_provider().unwrap_or("unknown");
-                    let usage_tracker =
-                        crate::usage::UsageTracker::new(crate::usage::UsageTracker::default_path());
-                    usage_tracker.record(provider_name, &config.model, &usage);
-                    if let Ok(cwd) = std::env::current_dir() {
-                        crate::usage::append_usage_ledger(
-                            &cwd,
-                            "main",
-                            provider_name,
-                            &config.model,
-                            &usage,
-                        );
-                    }
 
                     // Auto-save the session after each completed turn.
                     if let Some(store) = &session_store {
@@ -13393,6 +13444,20 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 Err(e) => {
                     println!("{COLOR_RESET}\n{COLOR_YELLOW}error: {e}{COLOR_RESET}");
                     lead_log!("{COLOR_RESET}\n{COLOR_YELLOW}error: {e}{COLOR_RESET}\n");
+                    drop(stream);
+                    let partial = agent.partial_turn_usage();
+                    if partial.prompt_tokens() > 0 || partial.output_tokens > 0 {
+                        let line = book_repl_turn(
+                            &config,
+                            &mut session,
+                            &mut session_cost_usd,
+                            &mut session_cost_for,
+                            &partial,
+                            turn_start.elapsed(),
+                            Some("failed"),
+                        );
+                        println!("{COLOR_DIM}{line}{COLOR_RESET}");
+                    }
                     break;
                 }
             }

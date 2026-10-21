@@ -19,6 +19,7 @@ import {
   Type,
   ListTree,
   Globe,
+  FileOutput,
 } from "lucide-react";
 import { send, subscribe } from "../hooks/useIPC";
 import {
@@ -96,6 +97,26 @@ function platformConfirm(opts: {
     });
   });
 }
+
+// "Convert to…" targets that make sense per source type; the conversion
+// runs on the document service (DocConvert's `convert_file`).
+function convertTargets(name: string): string[] {
+  const ext = name.split(".").pop()?.toLowerCase() ?? "";
+  if (["docx", "doc", "odt", "rtf", "txt", "html", "htm"].includes(ext)) {
+    return ext === "docx" ? ["pdf"] : ["pdf", "docx"];
+  }
+  if (["xlsx", "xls", "ods", "csv"].includes(ext)) {
+    return ext === "xlsx" ? ["pdf"] : ["pdf", "xlsx"];
+  }
+  if (["pptx", "ppt", "odp"].includes(ext)) {
+    return ext === "pptx" ? ["pdf"] : ["pdf", "pptx"];
+  }
+  return [];
+}
+
+// Files the translator / summarizer subagents can read: markdown, plus the
+// office formats and PDF their reader tools cover.
+const LANG_ACTION_RE = /\.(md|markdown|pdf|docx|pptx|xlsx|xls)$/i;
 
 type FileEntry = {
   name: string;
@@ -494,6 +515,7 @@ export function FilesView({ active }: Props) {
   // chapters) want the bytes left alone. Sticks for the tab's lifetime.
   const [mdSourceEdit, setMdSourceEdit] = useState(false);
   const [saveToast, setSaveToast] = useState<string | null>(null);
+  const [publishNotice, setPublishNotice] = useState<string | null>(null);
   // True while files are being dragged over the tree panel (drop-to-upload).
   const [dragActive, setDragActive] = useState(false);
   const pendingNavigation = useRef<{ path: string } | null>(null);
@@ -788,7 +810,7 @@ export function FilesView({ active }: Props) {
         TRANSLATE_LANGUAGES[0];
       const slash = path.lastIndexOf("/");
       const dir = slash >= 0 ? path.slice(0, slash) : "";
-      const stem = name.replace(/\.(md|markdown)$/i, "");
+      const stem = name.replace(LANG_ACTION_RE, "");
       const suffix = mode === "summarize" ? `-${lang.code}-sum` : `-${lang.code}`;
       const outPath = `${dir ? `${dir}/` : ""}${stem}${suffix}.md`;
       const prompt =
@@ -895,6 +917,47 @@ export function FilesView({ active }: Props) {
   // converts the base64 payload into a Blob and triggers a browser
   // `<a download>` click. The subscriber unhooks itself once the
   // matching reply lands so we don't leak handlers across clicks.
+  // "Convert to…": the backend replies `needs_confirm` first unless the
+  // install's document service is the organisation's own (EE), so the user
+  // sees where the file is going before it is uploaded.
+  const convertDoc = useCallback(
+    (path: string, name: string, to: string, confirmed = false) => {
+      const unsub = subscribe((msg) => {
+        if (
+          msg.type !== "doc_convert_result" ||
+          msg.path !== path ||
+          msg.to !== to
+        ) {
+          return;
+        }
+        unsub();
+        if (msg.needs_confirm) {
+          setSaveToast(null);
+          void platformConfirm({
+            title: `Convert ${name} to ${to.toUpperCase()}?`,
+            message:
+              `The file is uploaded to ${String(msg.destination ?? "the document service")} ` +
+              `for conversion; the result is saved beside it.`,
+            yesLabel: "Upload and convert",
+          }).then((yes) => {
+            if (yes) convertDoc(path, name, to, true);
+          });
+          return;
+        }
+        if (msg.ok) {
+          setSaveToast(`wrote ${String(msg.out ?? "").split(/[\\/]/).pop()}`);
+          send({ type: "file_list", path: currentPath, show_hidden: showHidden });
+        } else {
+          setSaveToast(`convert failed: ${msg.error ?? "unknown error"}`);
+        }
+        setTimeout(() => setSaveToast(null), 4000);
+      });
+      setSaveToast(`converting ${name} to ${to.toUpperCase()}…`);
+      send({ type: "doc_convert", path, to, confirmed });
+    },
+    [currentPath, showHidden],
+  );
+
   const downloadFile = useCallback((path: string) => {
     const reqId = Date.now() + Math.floor(Math.random() * 1000);
     const unsub = subscribe((msg) => {
@@ -1431,9 +1494,21 @@ export function FilesView({ active }: Props) {
 
   return (
     <div
-      className="flex flex-col sm:flex-row h-full"
+      className="relative flex flex-col sm:flex-row h-full"
       style={{ background: "var(--bg-primary)" }}
     >
+      {publishNotice && (
+        <div
+          className="absolute bottom-3 right-3 z-20 text-[11px] px-3 py-1.5 rounded shadow"
+          style={{
+            background: "var(--bg-secondary)",
+            color: "var(--text-primary)",
+            border: "1px solid var(--border)",
+          }}
+        >
+          {publishNotice}
+        </div>
+      )}
       {/* Tree panel — full-width strip on top below `sm` (capped height so
           the editor stays visible), fixed-width left column at `sm:`+. */}
       <div
@@ -1949,6 +2024,10 @@ export function FilesView({ active }: Props) {
                   const m = entryMenu;
                   setEntryMenu(null);
                   send({ type: "shell_input", text: `/publish ${m.path}` });
+                  // The link lands in Chat, not here — without this the
+                  // Files tab shows no sign the click did anything.
+                  setPublishNotice(`Publishing ${m.name} — the link will appear in Chat`);
+                  setTimeout(() => setPublishNotice(null), 6000);
                 }}
               />
             )}
@@ -1959,7 +2038,7 @@ export function FilesView({ active }: Props) {
               <MenuItem
                 icon={<FileText size={13} />}
                 label="Convert to markdown"
-                title="Extract the text beside the PDF as .md — no model, no cost"
+                title="Extract the text beside the PDF as .md — no model for text PDFs; a scan is OCR'd on your organisation's document service, then proofread by the agent against the page images"
                 onClick={() => {
                   const m = entryMenu;
                   setEntryMenu(null);
@@ -1977,14 +2056,32 @@ export function FilesView({ active }: Props) {
                     }
                     unsub();
                     if (msg.ok) {
-                      setSaveToast(
-                        `wrote ${String(msg.out ?? "").split("/").pop()}`,
-                      );
+                      const out = String(msg.out ?? "");
                       send({
                         type: "file_list",
                         path: currentPath,
                         show_hidden: showHidden,
                       });
+                      if (msg.ocr) {
+                        // Tesseract alone misreads Thai scans: the agent
+                        // proofreads the draft against the page images.
+                        setSaveToast(
+                          `OCR done — the agent is proofreading ${out.split("/").pop()} against the scan…`,
+                        );
+                        send({
+                          type: "shell_input",
+                          text:
+                            `/agent content-extractor Proofread \`${out}\`. It is raw OCR of the scanned PDF ` +
+                            `\`${m.path}\`. Read the PDF with PdfRead (it attaches every page image), ` +
+                            `correct the markdown against the images — misread words and numbers, missing ` +
+                            `vowels and tone marks, junk lines from specks — keep the document's own ` +
+                            `headings and order, drop the <!-- page --> comments, and overwrite ` +
+                            `\`${out}\` with the corrected text. Do not modify the PDF.`,
+                        });
+                        setTimeout(() => setSaveToast(null), 6000);
+                        return;
+                      }
+                      setSaveToast(`wrote ${out.split("/").pop()}`);
                     } else {
                       setSaveToast(
                         `convert failed: ${msg.error ?? "unknown error"}`,
@@ -2089,9 +2186,23 @@ export function FilesView({ active }: Props) {
                 )}
               </div>
             )}
-            {/* Markdown-only: translate or summarize into a chosen language,
-                saved as a `<stem>-<code>.md` / `<stem>-<code>-sum.md` sibling. */}
-            {!entryMenu.isDir && /\.(md|markdown)$/i.test(entryMenu.name) && (
+            {!entryMenu.isDir &&
+              convertTargets(entryMenu.name).map((to) => (
+                <MenuItem
+                  key={`convert-${to}`}
+                  icon={<FileOutput size={13} />}
+                  label={`Convert to ${to.toUpperCase()}`}
+                  title="Converted on the document service and saved beside the file"
+                  onClick={() => {
+                    const m = entryMenu;
+                    setEntryMenu(null);
+                    convertDoc(m.path, m.name, to);
+                  }}
+                />
+              ))}
+            {/* Translate or summarize into a chosen language, saved as a
+                `<stem>-<code>.md` / `<stem>-<code>-sum.md` sibling. */}
+            {!entryMenu.isDir && LANG_ACTION_RE.test(entryMenu.name) && (
               <>
                 <MenuItem
                   icon={<Languages size={13} />}
@@ -2099,7 +2210,8 @@ export function FilesView({ active }: Props) {
                   onClick={() => {
                     const m = entryMenu;
                     setEntryMenu(null);
-                    setLangCode("th");
+                    // A Thai file is usually translated out of Thai.
+                    setLangCode(/[\u0E00-\u0E7F]/.test(m.name) ? "en" : "th");
                     setLangAction({ mode: "translate", path: m.path, name: m.name });
                   }}
                 />
@@ -2406,7 +2518,7 @@ export function FilesView({ active }: Props) {
               <div style={{ color: "var(--text-secondary)" }}>
                 Saves to{" "}
                 <span className="font-mono" style={{ color: "var(--text-primary)" }}>
-                  {langAction.name.replace(/\.(md|markdown)$/i, "")}-{langCode}
+                  {langAction.name.replace(LANG_ACTION_RE, "")}-{langCode}
                   {langAction.mode === "summarize" ? "-sum" : ""}.md
                 </span>
               </div>

@@ -1973,6 +1973,9 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                                 .await
                                 {
                                     Ok(turn) if !turn.text.trim().is_empty() => {
+                                        if let Some(u) = &turn.usage {
+                                            crate::usage::note_side_usage(&cfg.model, u);
+                                        }
                                         serde_json::json!({ "result": {
                                             "text": turn.text.trim(),
                                             "model": cfg.model,
@@ -5640,12 +5643,19 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
         }
 
         "hal_enabled_get" => {
-            let enabled = crate::config::ProjectConfig::load()
-                .and_then(|c| c.hal_enabled)
-                .unwrap_or(false);
+            // Through a gateway (EE policy, cloud pod, gateway proxy) the
+            // HAL tools are on regardless of the saved flag (config.rs forces
+            // them), so the row reports that instead of an "off" that does
+            // nothing when flipped.
+            let forced = crate::tools::gateway_active();
+            let enabled = forced
+                || crate::config::ProjectConfig::load()
+                    .and_then(|c| c.hal_enabled)
+                    .unwrap_or(false);
             let payload = serde_json::json!({
                 "type": "hal_enabled",
                 "enabled": enabled,
+                "forced": forced,
             });
             (ctx.dispatch)(payload.to_string());
         }
@@ -7082,7 +7092,11 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         // so the Files tab stays responsive. The
                         // frontend shows a pending state until one of
                         // the two payloads below lands.
-                        let workspace = std::env::current_dir().unwrap_or_default();
+                        // workspace_root, not current_dir: under a workspace
+                        // host the agent runs in its own folder, but
+                        // /file-asset serves from the root, so slides cached
+                        // under the agent folder 404'd.
+                        let workspace = crate::workdir::workspace_root();
                         let deck = path.clone();
                         let raw = raw_path.to_string();
                         let mode_s = mode.to_string();
@@ -7424,6 +7438,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let dispatch = ctx.dispatch.clone();
             let (src, dst) = (raw_path.to_string(), out_raw.clone());
             tokio::spawn(async move {
+                let mut ocr = false;
                 let (ok, error): (bool, Option<String>) = match (
                     crate::sandbox::Sandbox::check(&src),
                     crate::sandbox::Sandbox::check(&dst),
@@ -7432,16 +7447,12 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         if dst_path.exists() {
                             (false, Some(format!("{dst} already exists")))
                         } else {
-                            // `extract_text_local`, not `extract_text`: with no
-                            // poppler the latter now falls back to the public
-                            // extraction service, and the consent for that
-                            // lives in `Tool::requires_approval` — which an
-                            // IPC arm never passes through. One click in a
-                            // context menu must not be able to put the user's
-                            // PDF on the network (dev-plan/66).
-                            match crate::tools::pdf_read::extract_text_local(&src_path, None, None)
-                                .await
-                            {
+                            // Never the consent-gated uploads: the consent for
+                            // those lives in `Tool::requires_approval`, which an
+                            // IPC arm never passes through (dev-plan/66). Only an
+                            // EE install's own document service may OCR a scan
+                            // from here (dev-plan/69).
+                            match crate::tools::pdf_read::markdown_text(&src_path).await {
                                 Err(e) => (false, Some(e.to_string())),
                                 Ok(text) if text.trim().is_empty() => (
                                     false,
@@ -7450,10 +7461,16 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                                             .to_string(),
                                     ),
                                 ),
-                                Ok(text) => match std::fs::write(&dst_path, text.as_bytes()) {
-                                    Ok(()) => (true, None),
-                                    Err(e) => (false, Some(format!("write: {e}"))),
-                                },
+                                Ok(text) => {
+                                    // A scan came back as tesseract text; the
+                                    // tab hands it to the agent to proofread
+                                    // against the page images.
+                                    ocr = text.starts_with("<!-- page ");
+                                    match std::fs::write(&dst_path, text.as_bytes()) {
+                                        Ok(()) => (true, None),
+                                        Err(e) => (false, Some(format!("write: {e}"))),
+                                    }
+                                }
                             }
                         }
                     }
@@ -7462,11 +7479,62 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 dispatch(
                     serde_json::json!({
                         "type": "pdf_to_markdown_result",
-                        "path": src, "out": dst, "ok": ok, "error": error,
+                        "path": src, "out": dst, "ok": ok, "error": error, "ocr": ocr,
                     })
                     .to_string(),
                 );
             });
+        }
+
+        // "Convert to…" from the Files tab: the same conversion as the
+        // DocConvert tool. It uploads the file, which an EE install's own
+        // gateway may take without asking (dev-plan/69); anywhere else the
+        // first reply asks the frontend to confirm, naming the destination,
+        // and only a resend with `confirmed: true` uploads.
+        "doc_convert" => {
+            let raw_path = msg
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let to = msg
+                .get("to")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let confirmed = msg
+                .get("confirmed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let dispatch = ctx.dispatch.clone();
+            if !confirmed && !crate::tools::doc_render::uploads_preapproved() {
+                let destination = crate::tools::doc_render::endpoint("convert")
+                    .map(|ep| crate::tools::doc_render::describe(&ep))
+                    .unwrap_or_else(|_| "the document service".into());
+                dispatch(
+                    serde_json::json!({
+                        "type": "doc_convert_result",
+                        "path": raw_path, "to": to, "ok": false,
+                        "needs_confirm": true, "destination": destination,
+                    })
+                    .to_string(),
+                );
+            } else {
+                tokio::spawn(async move {
+                    let (ok, out, error) =
+                        match crate::tools::doc_convert::convert_file(&raw_path, &to, None).await {
+                            Ok(done) => (true, Some(done.out.display().to_string()), None),
+                            Err(e) => (false, None, Some(e.to_string())),
+                        };
+                    dispatch(
+                        serde_json::json!({
+                            "type": "doc_convert_result",
+                            "path": raw_path, "to": to, "ok": ok, "out": out, "error": error,
+                        })
+                        .to_string(),
+                    );
+                });
+            }
         }
 
         // Upload a dropped file (Files-tab drag-and-drop). Content arrives
