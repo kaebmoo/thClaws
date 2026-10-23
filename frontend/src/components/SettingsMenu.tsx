@@ -117,12 +117,12 @@ export function SettingsMenu({
   const { mode, setMode } = useTheme();
   const [teamEnabled, setTeamEnabled] = useState<boolean | null>(null);
   const [teamDirty, setTeamDirty] = useState(false);
-  // Opt-in media-generation tools (`imageToolsEnabled`). Tools register
-  // at agent build, so flipping needs a restart/reload to take effect.
+  // Opt-in media-generation tools (`imageToolsEnabled`); the agent
+  // rebuilds on flip, so no restart. Forced on where the org pays.
   const [mediaToolsEnabled, setMediaToolsEnabled] = useState<boolean | null>(
     null,
   );
-  const [mediaDirty, setMediaDirty] = useState(false);
+  const [mediaForced, setMediaForced] = useState(false);
   // Opt-in HAL tools (`halEnabled`) — YouTubeTranscript + WebScrape.
   // Registered at agent build, so flipping needs a restart/reload.
   const [halEnabled, setHalEnabled] = useState<boolean | null>(null);
@@ -166,12 +166,12 @@ export function SettingsMenu({
         typeof msg.enabled === "boolean"
       ) {
         setMediaToolsEnabled(msg.enabled as boolean);
+        setMediaForced(msg.forced === true);
       } else if (
         msg.type === "media_tools_enabled_result" &&
         typeof msg.enabled === "boolean"
       ) {
         setMediaToolsEnabled(msg.enabled as boolean);
-        setMediaDirty(true);
       } else if (
         msg.type === "hal_enabled" &&
         typeof msg.enabled === "boolean"
@@ -735,10 +735,15 @@ export function SettingsMenu({
             <FeatureFlagRow
               icon={<ImageIcon size={12} />}
               label="Media tools"
-              desc="TextToImage, TextToVideo, … — needs a GEMINI/GOOGLE key (writes `.thclaws/settings.json`)"
+              desc={
+                mediaForced
+                  ? "TextToImage, ImageToVideo, … — on through your organisation's gateway"
+                  : "TextToImage, ImageToVideo, … (writes `.thclaws/settings.json`)"
+              }
               enabled={mediaToolsEnabled}
-              dirty={mediaDirty}
+              dirty={false}
               onToggle={toggleMedia}
+              locked={mediaForced}
             />
             <FeatureFlagRow
               icon={<FileText size={12} />}

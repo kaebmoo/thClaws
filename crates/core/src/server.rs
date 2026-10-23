@@ -47,7 +47,7 @@ use axum::Router;
 use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
@@ -600,6 +600,7 @@ pub async fn run_with_engine(
     if std::env::var("THCLAWS_SUPERVISED").ok().as_deref() != Some("1") {
         spawn_cloud_heartbeat(ws_connections);
     }
+    spawn_media_poller();
 
     // Loopback-only safety check for the API auth-bypass token. The
     // bypass mode (`THCLAWS_API_TOKEN=disable-auth`) makes the OpenAI
@@ -2148,7 +2149,8 @@ fn spawn_cloud_heartbeat(connections: Arc<AtomicUsize>) {
                 _ = transition.notified() => {}
             }
             let connected = connections.load(Ordering::SeqCst) > 0;
-            let busy = crate::agent_activity::is_agent_busy();
+            let busy =
+                crate::agent_activity::is_agent_busy() || MEDIA_RENDERING.load(Ordering::SeqCst);
             // Earliest pending `/schedule` fire, reported so the cloud
             // reaper can resume this workspace in time to run it. On a
             // paused runner nothing is executing when the cron comes
@@ -2192,6 +2194,34 @@ fn spawn_cloud_heartbeat(connections: Arc<AtomicUsize>) {
                     eprintln!("[serve] heartbeat {endpoint} failed: {e}");
                 }
             }
+        }
+    });
+}
+
+/// A video submitted here is still rendering at its provider.
+static MEDIA_RENDERING: AtomicBool = AtomicBool::new(false);
+
+/// Fetch renders whose turn has ended (the user closed the tab) and report
+/// them as busy until they land, so the cloud reaper — which asks
+/// `/healthz` — does not pause the pod under a clip the provider has
+/// already billed. Jobs older than two hours are left for an explicit
+/// `MediaJobStatus`, so a dead provider job cannot keep a pod up forever.
+fn spawn_media_poller() {
+    tokio::spawn(async {
+        let mut tick = tokio::time::interval(Duration::from_secs(30));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            let max_age = chrono::Duration::hours(2);
+            let pending = crate::media::job::pending(max_age).unwrap_or_default();
+            for job in &pending {
+                if let Err(e) = crate::tools::video_gen::advance(&job.id).await {
+                    eprintln!("[serve] media job {} poll failed: {e}", job.id);
+                }
+            }
+            let left = !pending.is_empty()
+                && crate::media::job::pending(max_age).is_ok_and(|p| !p.is_empty());
+            MEDIA_RENDERING.store(left, Ordering::SeqCst);
         }
     });
 }
@@ -2413,7 +2443,9 @@ async fn serve_branding() -> impl IntoResponse {
 }
 
 async fn serve_health() -> impl IntoResponse {
-    let busy = crate::agent_activity::is_agent_busy() || background_jobs_alive();
+    let busy = crate::agent_activity::is_agent_busy()
+        || background_jobs_alive()
+        || MEDIA_RENDERING.load(Ordering::SeqCst);
     axum::Json(serde_json::json!({
         "ok": true,
         "busy": busy,

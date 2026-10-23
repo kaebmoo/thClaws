@@ -493,6 +493,22 @@ fn job_view_json(v: &crate::research::JobView) -> serde_json::Value {
     })
 }
 
+/// The text a Files-tab preview falls back to when an office file can't be
+/// rendered.
+fn office_text(path: &std::path::Path) -> crate::error::Result<String> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "docx" => crate::tools::docx_read::extract_docx(path),
+        "pptx" => crate::tools::pptx_read::extract_pptx(path),
+        _ => crate::tools::xlsx_read::extract_xlsx(path, None, "csv")
+            .map(|csv| crate::file_preview::csv_to_markdown_table(&csv)),
+    }
+}
+
 /// Dispatch a single inbound IPC message. Routes by `msg.type` to one
 /// of ~70 message-type arms (see the body for the full inventory).
 ///
@@ -5609,15 +5625,18 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
         }
 
         // Mirror of team_enabled_get/set for the opt-in media-generation
-        // tools (`imageToolsEnabled` / `mediaToolsEnabled`). Off by
-        // default; the tools also self-hide without a GEMINI/GOOGLE key.
+        // tools (`imageToolsEnabled` / `mediaToolsEnabled`). Off by default,
+        // forced on where the organisation pays (config.rs).
         "media_tools_enabled_get" => {
-            let enabled = crate::config::ProjectConfig::load()
-                .and_then(|c| c.image_tools_enabled)
-                .unwrap_or(false);
+            let forced = crate::shared::org_billed();
+            let enabled = forced
+                || crate::config::ProjectConfig::load()
+                    .and_then(|c| c.image_tools_enabled)
+                    .unwrap_or(false);
             let payload = serde_json::json!({
                 "type": "media_tools_enabled",
                 "enabled": enabled,
+                "forced": forced,
             });
             (ctx.dispatch)(payload.to_string());
         }
@@ -7074,7 +7093,9 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                             "mode": mode,
                         });
                         (ctx.dispatch)(payload.to_string());
-                    } else if is_pptx && crate::tools::slide_render::pptx_preview_available() {
+                    } else if (is_pptx || is_docx || is_xlsx)
+                        && crate::tools::slide_render::pptx_preview_available()
+                    {
                         // Render the real slides instead of dumping the
                         // text we can scrape out of the XML. Needs the
                         // slide-render service (self-hosted URL or a
@@ -7134,10 +7155,11 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                                 return true;
                             }
                             crate::tools::slide_render::PptxPreview::Skip(reason) => {
-                                let md = match crate::tools::pptx_read::extract_pptx(&deck) {
+                                let md = match office_text(&deck) {
                                     Ok(text) => format!(
-                                        "_Extracted preview · PPTX_\n\n\
-                                         > Slides not rendered: {reason}\n\n{text}"
+                                        "_Extracted preview · {}_\n\n\
+                                         > Not rendered: {reason}\n\n{text}",
+                                        ext.to_uppercase()
                                     ),
                                     Err(inner) => {
                                         format!("**Can't render or extract:** {reason}\n\n{inner}")
@@ -7170,9 +7192,12 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         );
                         let dispatch2 = ctx.dispatch.clone();
                         let raw2 = raw_path.to_string();
+                        let ext_s = ext.clone();
                         tokio::spawn(async move {
-                            match crate::tools::slide_render::render_pptx_preview(&workspace, &deck)
-                                .await
+                            match crate::tools::slide_render::render_office_preview(
+                                &workspace, &deck,
+                            )
+                            .await
                             {
                                 Ok(pdf) => {
                                     let rel = pdf
@@ -7201,11 +7226,12 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                                     // Never strand the user on an error
                                     // screen when a usable text preview
                                     // is one call away.
-                                    eprintln!("[pptx] render failed, using extracted text: {e}");
-                                    let md = match crate::tools::pptx_read::extract_pptx(&deck) {
+                                    eprintln!("[preview] render failed, using extracted text: {e}");
+                                    let md = match office_text(&deck) {
                                         Ok(text) => format!(
-                                            "_Extracted preview · PPTX_\n\n\
-                                             > Slide rendering unavailable: {e}\n\n{text}"
+                                            "_Extracted preview · {}_\n\n\
+                                             > Rendering unavailable: {e}\n\n{text}",
+                                            ext_s.to_uppercase()
                                         ),
                                         Err(inner) => {
                                             format!(
@@ -7229,14 +7255,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                             }
                         });
                     } else if is_office {
-                        let extracted = if is_docx {
-                            crate::tools::docx_read::extract_docx(&path)
-                        } else if is_xlsx {
-                            crate::tools::xlsx_read::extract_xlsx(&path, None, "csv")
-                                .map(|csv| crate::file_preview::csv_to_markdown_table(&csv))
-                        } else {
-                            crate::tools::pptx_read::extract_pptx(&path)
-                        };
+                        let extracted = office_text(&path);
                         let (md, ok) = match extracted {
                             Ok(text) => (
                                 format!("_Extracted preview · {}_\n\n{}", ext.to_uppercase(), text),

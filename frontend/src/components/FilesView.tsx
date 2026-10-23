@@ -1678,9 +1678,9 @@ export function FilesView({ active }: Props) {
               className="flex-1 min-h-0 flex flex-col items-center justify-center gap-2 text-xs"
               style={{ color: "var(--text-secondary)" }}
             >
-              <div className="animate-pulse">Rendering slides…</div>
+              <div className="animate-pulse">Rendering preview…</div>
               <div className="opacity-70">
-                Converting this deck on thclaws.cloud · cached after the first time
+                Converting this file to PDF · cached after the first time
               </div>
             </div>
           </div>

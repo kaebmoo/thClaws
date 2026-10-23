@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.144.0] — 2026-10-23
+
+**Craft and edit Office documents through the agent, with Thai text handled properly.** Word, Excel and PowerPoint apps now run as engine-managed tools, the agent replies in your language for the whole conversation, and Files previews render Office documents as PDFs instead of dropping tables and charts.
+
+### Added
+
+- **Office documents over MCP.** GridCraft, WordCraft and DeckCraft run as engine-managed servers so spreadsheets, documents and decks can be created and edited, with a Thai fixup applied on save.
+- **Office-apps skill.** One kind of digit per file, no made-up names or numbers, explicit column widths with right-aligned number headers, and single-page-wide printing.
+- **Stable OpenCode sessions.** The OpenCode integration sends a consistent `x-opencode-session` to stop 400 `MissingSessionID` errors ([#228](https://github.com/thClaws/thClaws/issues/228)).
+
+### Fixed
+
+- **Thai DOCX tables and line breaks.** Cell margins are added so tone marks and upper vowels clear the borders, and Thai runs are tagged `th-TH` complex script so Word for Mac breaks lines at words.
+- **PDF exports carry document fixes.** A file saved in Word or Deck is reloaded before export so the PDF includes the corrections.
+- **The Thai fixup runs only on real edits.** Tools that merely open or read a file no longer trigger the fixup.
+- **Replies stay in your language.** The system prompt keeps the model answering in the user's language for the whole conversation ([#227](https://github.com/thClaws/thClaws/issues/227)).
+
+### Changed
+
+- **Files preview renders Office documents as PDFs.** `.docx` and `.xlsx` previews are rendered like `.pptx` rather than extracted as text, so Word tables and charts are kept.
+
 ## [0.143.0] — 2026-10-22
 
 **Office documents, honest usage numbers, and a tidier model catalogue.** DocConvert and PdfRead now work in hosted workspaces with OCR proofreading, usage books side calls and stopped turns against a single token definition, and models Alibaba no longer serves are hidden.

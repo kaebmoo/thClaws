@@ -498,6 +498,12 @@ pub enum SlashCommand {
         name: Option<String>,
         project: bool,
     },
+    /// `/skill update [--user] <name>` — replace an installed skill with the
+    /// marketplace's current copy.
+    SkillUpdate {
+        name: String,
+        project: bool,
+    },
     SkillShow(String),
     /// `/skill marketplace` — list all skills in the marketplace catalogue.
     /// `--refresh` forces a remote fetch before listing.
@@ -1993,6 +1999,7 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
             // Supported subcommands:
             //   /skill show <name>                                  — installed-skill detail
             //   /skill install [--user] <url-or-zip-or-name> [name] — install (URL or marketplace name)
+            //   /skill update [--user] <name>                       — replace with the marketplace's copy
             //   /skill marketplace [--refresh]                      — list marketplace
             //   /skill search <query>                               — search marketplace
             //   /skill info <name>                                  — marketplace detail
@@ -2024,6 +2031,19 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
                 } else {
                     SlashCommand::SkillInfo(after_info.to_string())
                 }
+            } else if let Some(after_update) = rest.strip_prefix("update").map(str::trim_start) {
+                let mut parts: Vec<&str> = after_update.split_whitespace().collect();
+                let project = parts.first().copied() != Some("--user");
+                if matches!(parts.first().copied(), Some("--user" | "--project")) {
+                    parts.remove(0);
+                }
+                match parts.as_slice() {
+                    [name] => SlashCommand::SkillUpdate {
+                        name: name.to_string(),
+                        project,
+                    },
+                    _ => SlashCommand::Unknown("usage: /skill update [--user] <name>".into()),
+                }
             } else if let Some(after_install) = rest.strip_prefix("install").map(str::trim_start) {
                 let mut project = true;
                 let mut parts: Vec<&str> = after_install.split_whitespace().collect();
@@ -2052,7 +2072,7 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
                 }
             } else {
                 SlashCommand::Unknown(format!(
-                    "unknown skill subcommand: '{rest}' (try: /skill install, /skill marketplace, /skill search, /skill info)"
+                    "unknown skill subcommand: '{rest}' (try: /skill install, /skill update, /skill marketplace, /skill search, /skill info)"
                 ))
             }
         }
@@ -4697,6 +4717,8 @@ pub fn render_help() -> &'static str {
      \x20                 Install a skill (or bundle) from a git repo or\n  \
      \x20                 a .zip URL into ./.thclaws/skills/ (default) or\n  \
      \x20                 ~/.config/thclaws/skills/ (--user)\n  \
+     /skill update [--user] NAME\n  \
+     \x20                 Replace an installed skill with the marketplace's copy\n  \
      /kms              List knowledge bases (* = active for this project)\n  \
      /kms new [--user] NAME\n  \
      \x20                 Create a new KMS under ./.thclaws/kms/\n  \
@@ -10180,6 +10202,42 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         }
                     }
                 }
+                SlashCommand::SkillUpdate { name, project } => {
+                    crate::marketplace::refresh_private().await;
+                    let (url, _, abort_msg) = resolve_skill_install_target(&name, None);
+                    if let Some(msg) = abort_msg {
+                        println!("{COLOR_YELLOW}{msg}{COLOR_RESET}");
+                    } else {
+                        match crate::skills::update_from_url(&url, &name, project).await {
+                            Ok(report) => {
+                                for line in report {
+                                    println!("{COLOR_DIM}  {line}{COLOR_RESET}");
+                                }
+                                let refreshed = crate::skills::SkillStore::discover();
+                                skill_names = refreshed.skills.keys().cloned().collect();
+                                if let Some(handle) = &skill_store_handle {
+                                    if let Ok(mut store) = handle.lock() {
+                                        *store = refreshed;
+                                    }
+                                }
+                                refresh_repl_system_prompt(
+                                    &mut agent,
+                                    &mut system,
+                                    &factory_snapshot,
+                                    &tool_registry,
+                                    &config,
+                                    &cwd,
+                                    &skill_store_handle,
+                                    &mcp_clients,
+                                    &system_addendum,
+                                );
+                            }
+                            Err(e) => {
+                                println!("{COLOR_YELLOW}skill update failed: {e}{COLOR_RESET}");
+                            }
+                        }
+                    }
+                }
                 SlashCommand::SkillMarketplace { refresh } => {
                     if refresh {
                         match crate::marketplace::refresh_from_remote().await {
@@ -14873,6 +14931,28 @@ mod tests {
                 project: false,
             })
         );
+    }
+
+    #[test]
+    fn parse_slash_skill_update() {
+        assert_eq!(
+            parse_slash("/skill update thai-text-image"),
+            Some(SlashCommand::SkillUpdate {
+                name: "thai-text-image".into(),
+                project: true,
+            })
+        );
+        assert_eq!(
+            parse_slash("/skill update --user thai-text-image"),
+            Some(SlashCommand::SkillUpdate {
+                name: "thai-text-image".into(),
+                project: false,
+            })
+        );
+        assert!(matches!(
+            parse_slash("/skill update"),
+            Some(SlashCommand::Unknown(_))
+        ));
     }
 
     #[test]

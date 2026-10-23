@@ -1,7 +1,7 @@
 {
   "schema": 4,
   "source": "baseline 2026-06-10 — pricing synced from LiteLLM (github.com/BerriAI/litellm)",
-  "fetched_at": "2026-10-22T00:00:00Z",
+  "fetched_at": "2026-10-23T00:00:00Z",
   "providers": {
     "anthropic": {
       "list_url": "https://api.anthropic.com/v1/models",
@@ -1653,6 +1653,126 @@
           "source": "https://dashscope.aliyuncs.com/compatible-mode/v1/models (context unverified)",
           "verified_at": "2026-06-02",
           "chat": false
+        },
+        "dashscope/happyhorse-1.0-i2v": {
+          "chat": false,
+          "kind": "video",
+          "video_price_per_second_usd": {
+            "720P": 0.14,
+            "1080P": 0.24
+          },
+          "source": "manual:https://www.alibabacloud.com/help/en/model-studio/model-pricing — the international (Singapore) rate card, the same one sis/happyhorse-1.0-i2v carries; added 2026-10-22 after prod's gateway refused it as unpriced",
+          "verified_at": "2026-10-22"
+        },
+        "dashscope/happyhorse-1.0-t2v": {
+          "chat": false,
+          "kind": "video",
+          "video_price_per_second_usd": {
+            "720P": 0.14,
+            "1080P": 0.24
+          },
+          "source": "manual:https://www.alibabacloud.com/help/en/model-studio/model-pricing — the international (Singapore) rate card, the same one sis/happyhorse-1.0-t2v carries; added 2026-10-22 after prod's gateway refused it as unpriced",
+          "verified_at": "2026-10-22"
+        },
+        "dashscope/wan2.1-t2v-turbo": {
+          "chat": false,
+          "kind": "video",
+          "video_price_per_second_usd": {
+            "720P": 0.036
+          },
+          "source": "manual:https://www.alibabacloud.com/help/en/model-studio/model-pricing — the international (Singapore) rate card, the same one sis/wan2.1-t2v-turbo carries; added 2026-10-22 after prod's gateway refused it as unpriced",
+          "verified_at": "2026-10-22"
+        },
+        "dashscope/wan2.2-i2v-plus": {
+          "chat": false,
+          "kind": "video",
+          "video_price_per_second_usd": {
+            "sd": 0.02,
+            "1080P": 0.1
+          },
+          "source": "manual:https://www.alibabacloud.com/help/en/model-studio/model-pricing — the international (Singapore) rate card, the same one sis/wan2.2-i2v-plus carries; added 2026-10-22 after prod's gateway refused it as unpriced",
+          "verified_at": "2026-10-22"
+        },
+        "dashscope/wan2.2-t2v-plus": {
+          "chat": false,
+          "kind": "video",
+          "video_price_per_second_usd": {
+            "sd": 0.02,
+            "1080P": 0.1
+          },
+          "source": "manual:https://www.alibabacloud.com/help/en/model-studio/model-pricing — the international (Singapore) rate card, the same one sis/wan2.2-t2v-plus carries; added 2026-10-22 after prod's gateway refused it as unpriced",
+          "verified_at": "2026-10-22"
+        },
+        "dashscope/wan2.5-t2v-preview": {
+          "chat": false,
+          "kind": "video",
+          "video_price_per_second_usd": {
+            "720P": 0.1,
+            "1080P": 0.15
+          },
+          "source": "manual:https://www.alibabacloud.com/help/en/model-studio/model-pricing — the international (Singapore) rate card, the same one sis/wan2.5-t2v-preview carries; added 2026-10-22 after prod's gateway refused it as unpriced",
+          "verified_at": "2026-10-22"
+        },
+        "dashscope/wan2.6-i2v": {
+          "chat": false,
+          "kind": "video",
+          "video_price_per_second_usd": {
+            "720P": 0.1,
+            "1080P": 0.15
+          },
+          "source": "manual:https://www.alibabacloud.com/help/en/model-studio/model-pricing — the international (Singapore) rate card, the same one sis/wan2.6-i2v carries; added 2026-10-22 after prod's gateway refused it as unpriced",
+          "verified_at": "2026-10-22"
+        },
+        "dashscope/wan2.6-t2v": {
+          "chat": false,
+          "kind": "video",
+          "video_price_per_second_usd": {
+            "720P": 0.1,
+            "1080P": 0.15
+          },
+          "source": "manual:https://www.alibabacloud.com/help/en/model-studio/model-pricing — the international (Singapore) rate card, the same one sis/wan2.6-t2v carries; added 2026-10-22 after prod's gateway refused it as unpriced",
+          "verified_at": "2026-10-22"
+        },
+        "dashscope/wan2.7-i2v": {
+          "chat": false,
+          "kind": "video",
+          "video_price_per_second_usd": {
+            "720P": 0.1,
+            "1080P": 0.15
+          },
+          "source": "manual:https://www.alibabacloud.com/help/en/model-studio/model-pricing — the international (Singapore) rate card, the same one sis/wan2.7-i2v carries; added 2026-10-22 after prod's gateway refused it as unpriced",
+          "verified_at": "2026-10-22"
+        },
+        "dashscope/wan2.7-image": {
+          "chat": false,
+          "kind": "image",
+          "price_per_image_usd": 0.03,
+          "source": "manual:https://www.alibabacloud.com/help/en/model-studio/model-pricing — the international (Singapore) rate card, the same one sis/wan2.7-image carries; added 2026-10-22 after prod's gateway refused it as unpriced",
+          "verified_at": "2026-10-22"
+        },
+        "dashscope/wan2.7-image-pro": {
+          "chat": false,
+          "kind": "image",
+          "price_per_image_usd": 0.075,
+          "source": "manual:https://www.alibabacloud.com/help/en/model-studio/model-pricing — the international (Singapore) rate card, the same one sis/wan2.7-image-pro carries; added 2026-10-22 after prod's gateway refused it as unpriced",
+          "verified_at": "2026-10-22"
+        },
+        "dashscope/wan2.7-t2v": {
+          "chat": false,
+          "kind": "video",
+          "video_price_per_second_usd": {
+            "720P": 0.1,
+            "1080P": 0.15
+          },
+          "source": "manual:https://www.alibabacloud.com/help/en/model-studio/model-pricing — the international (Singapore) rate card, the same one sis/wan2.7-t2v carries; added 2026-10-22 after prod's gateway refused it as unpriced",
+          "verified_at": "2026-10-22"
+        },
+        "dashscope/z-image-turbo": {
+          "chat": false,
+          "kind": "image",
+          "price_per_image_usd": 0.03,
+          "source": "manual:https://www.alibabacloud.com/help/en/model-studio/model-pricing — the international (Singapore) rate card, the same one sis/z-image-turbo carries; added 2026-10-22 after prod's gateway refused it as unpriced",
+          "verified_at": "2026-10-22"
         }
       }
     },
@@ -1783,7 +1903,8 @@
           "verified_at": "2026-09-04",
           "chat": false,
           "input_per_mtok": 2.0,
-          "output_per_mtok": 120.0
+          "output_per_mtok": 120.0,
+          "reasoning_per_mtok": 12.0
         },
         "gemini-3-pro-preview": {
           "context": 1048576,
@@ -1798,7 +1919,8 @@
           "verified_at": "2026-09-04",
           "chat": false,
           "input_per_mtok": 0.5,
-          "output_per_mtok": 60.0
+          "output_per_mtok": 60.0,
+          "reasoning_per_mtok": 3.0
         },
         "gemini-3.1-flash-lite": {
           "context": 1048576,
@@ -1947,6 +2069,15 @@
           "source": "https://generativelanguage.googleapis.com/v1beta/models (context unverified)",
           "verified_at": "2026-08-03",
           "chat": false
+        },
+        "gemini-omni-1.1-flash": {
+          "chat": false,
+          "kind": "video",
+          "input_per_mtok": 1.5,
+          "output_per_mtok": 17.5,
+          "source": "manual:https://ai.google.dev/gemini-api/docs/pricing — video output billed $17.50/Mtok at 5,792 tokens per second of 720p (~$0.10/s; 360p measured 1,931 tok/s); text output $9/Mtok; input $1.50/Mtok. Interactions API, replaces Veo 3.1 (shut down 2026-10-22)",
+          "verified_at": "2026-10-22",
+          "reasoning_per_mtok": 9.0
         }
       }
     },
@@ -2190,6 +2321,11 @@
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
           "verified_at": "2026-05-04"
         },
+        "nvidia/minimaxai/minimax-m3.1-flash": {
+          "context": 131072,
+          "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
+          "verified_at": "2026-10-23"
+        },
         "nvidia/mistralai/codestral-22b-instruct-v0.1": {
           "context": 131072,
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
@@ -2314,6 +2450,11 @@
           "context": 1000000,
           "source": "https://integrate.api.nvidia.com/v1/models (context: models.dev:nvidia/nemotron-3-ultra-550b-a55b)",
           "verified_at": "2026-06-06"
+        },
+        "nvidia/nvidia/nemotron-3.5-bolt-e4b": {
+          "context": 131072,
+          "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
+          "verified_at": "2026-10-23"
         },
         "nvidia/nvidia/nemotron-3.5-content-safety": {
           "context": 131072,
@@ -3977,11 +4118,11 @@
           "context": 1048576,
           "max_output": 384000,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-10-22",
+          "verified_at": "2026-10-23",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.383496,
-          "output_per_mtok": 0.766992
+          "input_per_mtok": 0.885312,
+          "output_per_mtok": 1.770624
         },
         "deepseek/deepseek-v4-pro-0813": {
           "context": 1048576,
@@ -3996,11 +4137,11 @@
           "context": 1048576,
           "max_output": 384000,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-10-22",
+          "verified_at": "2026-10-23",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.0342,
-          "output_per_mtok": 0.1368
+          "input_per_mtok": 0.3,
+          "output_per_mtok": 1.2
         },
         "deepseek/deepseek-v4.1-flash-1017": {
           "context": 1048576,
@@ -4311,11 +4452,11 @@
         "google/gemma-4-26b-a4b-it": {
           "context": 262144,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-10-22",
+          "verified_at": "2026-10-23",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.0765,
-          "output_per_mtok": 0.255
+          "input_per_mtok": 0.09,
+          "output_per_mtok": 0.3
         },
         "google/gemma-4-26b-a4b-it:free": {
           "context": 262144,
@@ -4759,15 +4900,15 @@
           "input_per_mtok": 0.3,
           "output_per_mtok": 1.2
         },
-        "minimax/minimax-m3.1-flash:free": {
-          "context": 1000000,
+        "minimax/minimax-m3.1-flash": {
+          "context": 1048576,
           "max_output": 524288,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-10-22",
-          "free": true,
+          "verified_at": "2026-10-23",
+          "free": false,
           "chat": true,
-          "input_per_mtok": 0.0,
-          "output_per_mtok": 0.0
+          "input_per_mtok": 0.15,
+          "output_per_mtok": 0.6
         },
         "mistralai/codestral-2508": {
           "context": 256000,
@@ -4929,11 +5070,11 @@
         "mistralai/mistral-small-3.2-24b-instruct": {
           "context": 256000,
           "source": "https://openrouter.ai/api/v1/models (context: openrouter /v1/models) + api:openrouter",
-          "verified_at": "2026-09-17",
+          "verified_at": "2026-10-23",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.09375,
-          "output_per_mtok": 0.25
+          "input_per_mtok": 0.075,
+          "output_per_mtok": 0.2
         },
         "mistralai/mixtral-8x22b-instruct": {
           "context": 65536,
@@ -6235,11 +6376,11 @@
           "context": 262144,
           "max_output": 65536,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-10",
+          "verified_at": "2026-10-23",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.26,
-          "output_per_mtok": 2.08
+          "input_per_mtok": 0.4,
+          "output_per_mtok": 3.2
         },
         "qwen/qwen3.5-27b": {
           "context": 262144,
@@ -6265,20 +6406,20 @@
           "context": 262144,
           "max_output": 65536,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-10-22",
+          "verified_at": "2026-10-23",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.39,
-          "output_per_mtok": 2.34
+          "input_per_mtok": 0.5,
+          "output_per_mtok": 3.6
         },
         "qwen/qwen3.5-9b": {
           "context": 262144,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-10-22",
+          "verified_at": "2026-10-23",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.08,
-          "output_per_mtok": 0.13
+          "input_per_mtok": 0.17,
+          "output_per_mtok": 0.25
         },
         "qwen/qwen3.5-flash-02-23": {
           "context": 1000000,
@@ -6394,11 +6535,11 @@
           "context": 1000000,
           "max_output": 131072,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-10-22",
+          "verified_at": "2026-10-23",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.04,
-          "output_per_mtok": 1.35
+          "input_per_mtok": 0.2,
+          "output_per_mtok": 2.5
         },
         "qwen/qwen3.8-flash": {
           "context": 1000000,
@@ -6454,10 +6595,10 @@
           "context": 1048576,
           "max_output": 943718,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-10-22",
+          "verified_at": "2026-10-23",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.3,
+          "input_per_mtok": 0.25,
           "output_per_mtok": 1.0
         },
         "rekaai/reka-edge": {
@@ -6653,11 +6794,11 @@
           "context": 262144,
           "max_output": 128000,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-10-22",
+          "verified_at": "2026-10-23",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.0825,
-          "output_per_mtok": 0.33
+          "input_per_mtok": 0.132,
+          "output_per_mtok": 0.528
         },
         "tencent/hy3-preview": {
           "context": 262144,
@@ -6673,11 +6814,11 @@
           "context": 1048576,
           "max_output": 64000,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-10-22",
+          "verified_at": "2026-10-23",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.7506,
-          "output_per_mtok": 2.2509
+          "input_per_mtok": 0.834,
+          "output_per_mtok": 2.501
         },
         "thedrummer/cydonia-24b-v4.1": {
           "context": 131072,
@@ -7061,11 +7202,11 @@
           "context": 1048576,
           "max_output": 131072,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-10-22",
+          "verified_at": "2026-10-23",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.7,
-          "output_per_mtok": 2.2
+          "input_per_mtok": 0.079,
+          "output_per_mtok": 1.4
         },
         "z-ai/glm-5.3-flash": {
           "context": 1310720,
@@ -8029,7 +8170,7 @@
         "sis/deepseek-v4-pro": {
           "context": 1000000,
           "source": "derived:dashscope/deepseek-v4-pro — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
-          "verified_at": "2026-10-22",
+          "verified_at": "2026-10-23",
           "input_per_mtok": 2.4,
           "output_per_mtok": 4.8,
           "cached_input_per_mtok": 0.2
@@ -8236,35 +8377,40 @@
           "verified_at": "2026-09-29",
           "chat": false,
           "kind": "image",
-          "price_per_image_usd": 0.045
+          "price_per_image_usd": 0.045,
+          "note": "retired: Alibaba 404 'Model not exist' on the intl region and SIS's workspace (probed 2026-10-22); the engine maps its name to a living model"
         },
         "sis/qwen-image-edit-max": {
           "source": "manual:https://www.alibabacloud.com/help/en/model-studio/model-pricing (Singapore, International)",
           "verified_at": "2026-09-29",
           "chat": false,
           "kind": "image",
-          "price_per_image_usd": 0.075
+          "price_per_image_usd": 0.075,
+          "note": "retired: Alibaba 404 'Model not exist' on the intl region and SIS's workspace (probed 2026-10-22); the engine maps its name to a living model"
         },
         "sis/qwen-image-edit-plus": {
           "source": "manual:https://www.alibabacloud.com/help/en/model-studio/model-pricing (Singapore, International)",
           "verified_at": "2026-09-29",
           "chat": false,
           "kind": "image",
-          "price_per_image_usd": 0.03
+          "price_per_image_usd": 0.03,
+          "note": "retired: Alibaba 404 'Model not exist' on the intl region and SIS's workspace (probed 2026-10-22); the engine maps its name to a living model"
         },
         "sis/qwen-image-max": {
           "source": "manual:https://www.alibabacloud.com/help/en/model-studio/model-pricing (Singapore, International)",
           "verified_at": "2026-09-29",
           "chat": false,
           "kind": "image",
-          "price_per_image_usd": 0.075
+          "price_per_image_usd": 0.075,
+          "note": "retired: Alibaba 404 'Model not exist' on the intl region and SIS's workspace (probed 2026-10-22); the engine maps its name to a living model"
         },
         "sis/qwen-image-plus": {
           "source": "manual:https://www.alibabacloud.com/help/en/model-studio/model-pricing (Singapore, International)",
           "verified_at": "2026-09-29",
           "chat": false,
           "kind": "image",
-          "price_per_image_usd": 0.03
+          "price_per_image_usd": 0.03,
+          "note": "retired: Alibaba 404 'Model not exist' on the intl region and SIS's workspace (probed 2026-10-22); the engine maps its name to a living model"
         },
         "sis/qwen-max": {
           "context": 262144,
@@ -10867,36 +11013,6 @@
           "context": 1048576,
           "source": "https://api.atlascloud.ai/v1/models (context: atlascloud /v1/models)",
           "verified_at": "2026-07-21"
-        },
-        "atlascloud/openai/gpt-4.1-mini": {
-          "context": 1047576,
-          "source": "https://api.atlascloud.ai/v1/models (context: atlascloud /v1/models)",
-          "verified_at": "2026-07-15"
-        },
-        "atlascloud/openai/gpt-5.2-codex": {
-          "context": 400000,
-          "source": "https://api.atlascloud.ai/v1/models (context: atlascloud /v1/models)",
-          "verified_at": "2026-07-15"
-        },
-        "atlascloud/openai/gpt-5.3-codex": {
-          "context": 400000,
-          "source": "https://api.atlascloud.ai/v1/models (context: atlascloud /v1/models)",
-          "verified_at": "2026-07-15"
-        },
-        "atlascloud/openai/gpt-5.4": {
-          "context": 400000,
-          "source": "https://api.atlascloud.ai/v1/models (context: atlascloud /v1/models)",
-          "verified_at": "2026-07-15"
-        },
-        "atlascloud/openai/gpt-5.4-mini": {
-          "context": 400000,
-          "source": "https://api.atlascloud.ai/v1/models (context: atlascloud /v1/models)",
-          "verified_at": "2026-07-15"
-        },
-        "atlascloud/openai/gpt-5.4-nano": {
-          "context": 400000,
-          "source": "https://api.atlascloud.ai/v1/models (context: atlascloud /v1/models)",
-          "verified_at": "2026-07-15"
         },
         "atlascloud/openai/gpt-5.5": {
           "context": 1050000,

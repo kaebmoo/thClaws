@@ -585,6 +585,45 @@ pub async fn render_pptx_preview(workspace: &Path, deck: &Path) -> Result<std::p
     Ok(pdf)
 }
 
+/// Render a Word or Excel file to a PDF for the Files tab, through the
+/// document service's `/convert` (LibreOffice). Same content-hash cache and
+/// failure marker as a deck, so [`pptx_preview_state`] decides for both; a
+/// `.pptx` goes to [`render_pptx_preview`] for its per-slide PNGs. The text
+/// extraction this replaces dropped charts and Word tables.
+pub async fn render_office_preview(workspace: &Path, file: &Path) -> Result<std::path::PathBuf> {
+    let is_pptx = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("pptx"));
+    if is_pptx {
+        return render_pptx_preview(workspace, file).await;
+    }
+    let dir = pptx_cache_dir(workspace, file)?;
+    let pdf = dir.join("deck.pdf");
+    if pdf.is_file() {
+        return Ok(pdf);
+    }
+    let ep = resolve_slide_endpoint_for("convert")?;
+    let bytes = match super::doc_render::convert(&ep, file, "pdf").await {
+        Ok(b) => b,
+        Err(e) => {
+            let reason = e.to_string();
+            if reason.contains("http 4") {
+                mark_render_failed(workspace, file, &reason);
+            }
+            return Err(e);
+        }
+    };
+    if !bytes.starts_with(b"%PDF") {
+        return Err(Error::Tool("document service returned no pdf".into()));
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| Error::Tool(format!("mkdir cache: {e}")))?;
+    let tmp = dir.join("deck.pdf.part");
+    std::fs::write(&tmp, &bytes).map_err(|e| Error::Tool(format!("write preview: {e}")))?;
+    std::fs::rename(&tmp, &pdf).map_err(|e| Error::Tool(format!("write preview: {e}")))?;
+    Ok(pdf)
+}
+
 /// Ceiling on a deck we'll upload. Rejecting here gives the user a
 /// reason ("deck is 240 MB, over the 200 MB render limit") instead of a
 /// bare 413 from the gateway. Kept just under the two caps behind it —
@@ -714,5 +753,25 @@ mod tests {
         assert!(!ep.via_gateway);
         std::env::remove_var("SLIDE_RENDER_API");
         std::env::remove_var("SLIDE_RENDER_TOKEN");
+    }
+
+    /// Live: `SLIDE_RENDER_API=http://… cargo test --lib -- --ignored office_preview_renders`
+    #[tokio::test]
+    #[ignore]
+    async fn office_preview_renders_docx_and_xlsx_to_pdf() {
+        let ws = tempfile::tempdir().unwrap();
+        for f in ["budget.xlsx", "memo.docx"] {
+            let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/office/testdata")
+                .join(f);
+            let file = ws.path().join(f);
+            std::fs::copy(&src, &file).unwrap();
+            let pdf = render_office_preview(ws.path(), &file).await.unwrap();
+            assert!(std::fs::read(&pdf).unwrap().starts_with(b"%PDF"), "{f}");
+            assert!(matches!(
+                pptx_preview_state(ws.path(), &file),
+                PptxPreview::Ready(_)
+            ));
+        }
     }
 }

@@ -1748,6 +1748,31 @@ pub async fn dispatch(
                 Err(e) => emit(events_tx, format!("skill install failed: {e}")),
             }
         }
+        SlashCommand::SkillUpdate { name, project } => {
+            crate::marketplace::refresh_private().await;
+            let (url, _, abort_msg) = resolve_skill_install_target_gui(&name, None);
+            if let Some(msg) = abort_msg {
+                emit(events_tx, msg);
+                return;
+            }
+            match crate::skills::update_from_url(&url, &name, project).await {
+                Ok(report) => {
+                    let refreshed = crate::skills::SkillStore::discover();
+                    if let Ok(mut store) = state.skill_store.lock() {
+                        *store = refreshed;
+                    }
+                    state.rebuild_system_prompt();
+                    if let Err(e) = state.rebuild_agent(true) {
+                        emit(events_tx, format!("rebuild failed: {e}"));
+                        return;
+                    }
+                    let mut out = report.join("\n");
+                    out.push_str("\n(the new version is live in this session — no restart needed)");
+                    emit(events_tx, out);
+                }
+                Err(e) => emit(events_tx, format!("skill update failed: {e}")),
+            }
+        }
         SlashCommand::SkillMarketplace { refresh } => {
             if refresh {
                 match crate::marketplace::refresh_from_remote().await {

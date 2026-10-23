@@ -312,6 +312,12 @@ pub struct AppConfig {
     #[serde(default, alias = "browserHeadless")]
     pub browser_headless: Option<bool>,
 
+    /// dev-plan/70: which bundled ArtCraft office apps (`grid`, `word`,
+    /// `deck`) run as engine-managed MCP servers. `None` = every app whose
+    /// binary is installed; `[]` = none. See [`crate::office::apps`].
+    #[serde(default, alias = "officeApps")]
+    pub office_apps: Option<Vec<String>>,
+
     /// May `PdfRead` fall back to the public `pdf.thclaws.cloud` service
     /// when `pdftotext` is not installed locally (dev-plan/66)? ON by
     /// default, because the alternative for a user without poppler is
@@ -714,6 +720,7 @@ impl Default for AppConfig {
             browser_enabled: default_browser_enabled(),
             browser_fast_steps: false,
             browser_headless: None,
+            office_apps: None,
             pdf_cloud_fallback: default_pdf_cloud_fallback(),
             gateway_use_for: Vec::new(),
             gateway_proxy: false,
@@ -944,6 +951,9 @@ pub struct ProjectConfig {
     /// [`AppConfig::browser_headless`].
     #[serde(rename = "browserHeadless")]
     pub browser_headless: Option<bool>,
+    /// See [`AppConfig::office_apps`].
+    #[serde(rename = "officeApps")]
+    pub office_apps: Option<Vec<String>>,
     /// Opt out of `PdfRead`'s public-service fallback. See
     /// [`AppConfig::pdf_cloud_fallback`].
     #[serde(rename = "pdfCloudFallback")]
@@ -1110,6 +1120,7 @@ impl Default for ProjectConfig {
             browser_enabled: None,
             browser_fast_steps: None,
             browser_headless: None,
+            office_apps: None,
             pdf_cloud_fallback: None,
             sso_sign_in_enabled: None,
             show_raw_response: None,
@@ -1884,6 +1895,9 @@ impl ProjectConfig {
         if let Some(b) = self.browser_headless {
             config.browser_headless = Some(b);
         }
+        if let Some(apps) = &self.office_apps {
+            config.office_apps = Some(apps.clone());
+        }
         if let Some(b) = self.pdf_cloud_fallback {
             config.pdf_cloud_fallback = b;
         }
@@ -2403,6 +2417,18 @@ impl AppConfig {
             }
         }
 
+        // dev-plan/70: the office apps, engine-managed — bundled binaries, not
+        // an install, so an EE "no external MCP" policy doesn't apply. Not in
+        // a multiuser worker: its MCP servers are spawned once and shared by
+        // every member, so they can't be confined to one member's folder.
+        if !cfg!(test) && !crate::workdir::is_multiuser() {
+            for server in crate::office::apps::mcp_configs(config.office_apps.as_deref()) {
+                if !config.mcp_servers.iter().any(|s| s.name == server.name) {
+                    config.mcp_servers.push(server);
+                }
+            }
+        }
+
         // CLI `--model` / `--set-model` override (set by app.rs once at
         // startup). Applied last so it wins over user, project, and the
         // Claude Code fallback — matches the precedence the module docs
@@ -2475,6 +2501,11 @@ impl AppConfig {
         // HAL calls cost money there.
         if gateway_on {
             config.hal_enabled = true;
+        }
+        // The organisation pays for media calls on EE, so the tools are on
+        // without each workspace opting in.
+        if crate::shared::org_billed() {
+            config.image_tools_enabled = true;
         }
 
         if config.model != Self::default().model {
@@ -3123,6 +3154,19 @@ mod tests {
             cfg.unwrap().hal_enabled,
             "gateway-active config must force HAL tools on"
         );
+    }
+
+    #[test]
+    fn org_billed_runner_forces_media_tools_on() {
+        let _guard = crate::kms::test_env_lock();
+        std::env::set_var("THCLAWS_USES_GATEWAY", "1");
+        let stock = crate::shared::org_billed();
+        std::env::set_var("THCLAWS_BRAND_NAME", "SiS");
+        let cfg = AppConfig::load();
+        std::env::remove_var("THCLAWS_BRAND_NAME");
+        std::env::remove_var("THCLAWS_USES_GATEWAY");
+        assert!(!stock, "stock thclaws.cloud runners stay opt-in");
+        assert!(cfg.unwrap().image_tools_enabled);
     }
 
     #[test]
