@@ -130,7 +130,7 @@ jobs:
         shell: bash
         # Run from repo root: workspace Cargo.toml at root since #2.
         # Binary lands at ./target/<target>/release/thclaws.
-        run: cargo build --release --bin thclaws --features gui --target ${{ matrix.target }}
+        run: cargo build --release --bin thclaws --features gui,kms_search_index --target ${{ matrix.target }}
 
       - name: Package (unix)
         if: matrix.os != 'windows'
