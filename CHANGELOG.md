@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.146.0] — 2026-10-25
+
+**On an AI Server box, nothing goes to the thClaws cloud unless the box allows it.** 0.145 kept documents and recordings on the box; 0.146 closes the rest and gives the box's hub an on/off switch.
+
+### Added
+
+- **A cloud switch the AI Server hub controls.** The hub turns cloud use on or off by writing `{"allowCloud": true|false}` to `~/.config/thclaws/aiserver.json`; it takes effect on the next tool call, with no restart. `GET /api/egress` reports what is being enforced (and whether a thClaws Cloud login exists, never the key), so the hub can show it. `THCLAWS_ALLOW_CLOUD=1` or `=0` still pins it.
+
+### Fixed
+
+- **Searches, media and scripts no longer leave an AI Server box through a cloud login.** WebSearch (Tavily/Brave), YouTube transcripts and web scraping, image/video/speech generation, and the gateway key handed to scripts all used the thClaws gateway whenever a cloud login was present. On a box they are now off by default; web search falls back to DuckDuckGo. Desktop, thClaws.cloud and Enterprise installs are unchanged.
+
 ## [0.145.0] — 2026-10-25
 
 **thClaws on an AI Server box keeps your data on the box.** On a DGX Spark or Station running AI Server, documents and recordings are processed by the box's own services and are never sent to the cloud, and the box's RAG engine is available to the agent with no setup.

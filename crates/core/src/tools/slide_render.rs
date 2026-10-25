@@ -110,6 +110,7 @@ fn cloud_fallback_blocked(on_aiserver_box: bool, allowed: bool) -> bool {
 
 fn cloud_render_allowed() -> bool {
     std::env::var("THCLAWS_ALLOW_CLOUD_RENDER").is_ok_and(|v| v.trim() == "1")
+        || crate::providers::thclaws_gateway::cloud_allowed_on_aiserver()
 }
 
 fn mime_of(name: &str) -> &'static str {

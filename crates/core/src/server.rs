@@ -1096,6 +1096,7 @@ fn classic_router(state: ServeState) -> Router {
         .route("/ws", get(ws_handler))
         .route("/upload", post(serve_upload).layer(upload_body_limit()))
         .route("/api/branding", get(serve_branding))
+        .route("/api/egress", get(serve_egress))
         .route("/gui-shell/{shell_id}", get(serve_gui_shell_index))
         .route("/gui-shell/{shell_id}/", get(serve_gui_shell_index))
         .route(
@@ -1320,6 +1321,9 @@ fn supervisor_router(sup: Arc<crate::bots::supervisor::BotSupervisor>) -> Router
         .route("/gui-shell/{shell_id}/{*rel}", get(supervisor_forward))
         // The host forwards the raw body; the agent's `/upload` enforces the cap.
         .route("/upload", post(supervisor_forward))
+        // The cloud switch is box-wide (hub file + env), so the host answers
+        // it directly — every agent it supervises reads the same file.
+        .route("/api/egress", get(serve_egress))
         // dev-plan/60 G5: /cloud push|pull teleports the whole workspace, so
         // under a host it is the host's to serve — no single agent's tree is
         // the workspace.
@@ -2440,6 +2444,21 @@ mod background_job_probe_tests {
 /// Branding for the web UI — the same frame the `branding_get` IPC answers.
 async fn serve_branding() -> impl IntoResponse {
     axum::Json(crate::branding::payload())
+}
+
+/// Whether this thClaws may reach the thClaws cloud — for the AI Server
+/// hub's 🔒/☁️ badge (dev-plan/71). Reports state, never a credential.
+async fn serve_egress() -> impl IntoResponse {
+    let aiserver = crate::aiserver::cached().is_some();
+    let (allowed, source) = crate::providers::thclaws_gateway::cloud_mode();
+    axum::Json(serde_json::json!({
+        "aiserver": aiserver,
+        // Off an AI Server box the gate does not exist: cloud use is allowed.
+        "allow_cloud": !aiserver || allowed,
+        "source": if aiserver { source } else { "not-aiserver" },
+        "cloud_credential": crate::providers::thclaws_gateway::has_cloud_credential(),
+        "switch_file": crate::profile::config_dir().map(|d| d.join("aiserver.json")),
+    }))
 }
 
 async fn serve_health() -> impl IntoResponse {

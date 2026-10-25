@@ -295,6 +295,18 @@ pub(crate) fn resolve_access_key() -> Option<String> {
     if crate::shared::policy_gateway_mode() {
         return crate::cloud::token();
     }
+    // An AI Server box is sold as "data stays on the box": every gateway
+    // consumer (WebSearch, HAL, media/TTS, slide-render, Bash subprocesses)
+    // resolves its credential here, so a cloud login lying around must not
+    // quietly turn into egress (dev-plan/71 egress test). Opt back in with
+    // THCLAWS_ALLOW_CLOUD=1.
+    if crate::aiserver::cached().is_some() && !cloud_allowed_on_aiserver() {
+        return None;
+    }
+    raw_access_key()
+}
+
+fn raw_access_key() -> Option<String> {
     if let Ok(v) = std::env::var("THCLAWS_GATEWAY_API_KEY") {
         let trimmed = v.trim().to_string();
         if !trimmed.is_empty() {
@@ -313,9 +325,63 @@ pub(crate) fn resolve_access_key() -> Option<String> {
     crate::cloud::token()
 }
 
+/// Whether an AI Server box may use the thClaws cloud (gateway models,
+/// search, media, cloud rendering/ASR). Default: no.
+///
+/// - `THCLAWS_ALLOW_CLOUD=1` / `=0` in the environment wins (operator pin).
+/// - Otherwise `allowCloud` in `~/.config/thclaws/aiserver.json`, the
+///   box-level switch the AI Server hub writes. It is read on every check,
+///   so flipping it takes effect on the next tool call with no restart.
+pub(crate) fn cloud_allowed_on_aiserver() -> bool {
+    cloud_mode().0
+}
+
+/// `(allowed, source)`, source one of `env`, `file`, `default`.
+pub(crate) fn cloud_mode() -> (bool, &'static str) {
+    mode_from(
+        std::env::var("THCLAWS_ALLOW_CLOUD").ok(),
+        crate::profile::config_dir()
+            .and_then(|d| std::fs::read_to_string(d.join("aiserver.json")).ok()),
+    )
+}
+
+fn mode_from(env: Option<String>, file: Option<String>) -> (bool, &'static str) {
+    match env.as_deref().map(str::trim) {
+        Some("1") => return (true, "env"),
+        Some("0") => return (false, "env"),
+        _ => {}
+    }
+    if let Some(v) = file
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|j| j.get("allowCloud").and_then(|b| b.as_bool()))
+    {
+        return (v, "file");
+    }
+    (false, "default")
+}
+
+/// A gateway credential exists, ignoring the AI Server gate. For status
+/// display only — never returns the key.
+pub(crate) fn has_cloud_credential() -> bool {
+    raw_access_key().is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_env_pin_beats_the_hub_file_which_beats_the_default() {
+        let on = Some(r#"{"allowCloud": true}"#.to_string());
+        let off = Some(r#"{"allowCloud": false}"#.to_string());
+        assert_eq!(mode_from(None, None), (false, "default"));
+        assert_eq!(mode_from(None, on.clone()), (true, "file"));
+        assert_eq!(mode_from(None, off.clone()), (false, "file"));
+        assert_eq!(mode_from(Some("0".into()), on.clone()), (false, "env"));
+        assert_eq!(mode_from(Some("1".into()), off), (true, "env"));
+        assert_eq!(mode_from(Some("".into()), on), (true, "file"));
+        assert_eq!(mode_from(None, Some("not json".into())), (false, "default"));
+    }
 
     #[test]
     fn a_policy_gateway_url_outranks_the_env_override() {

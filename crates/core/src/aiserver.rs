@@ -312,7 +312,7 @@ mod tests {
         v["asr"] = serde_json::json!({"base_url": "https://127.0.0.1:8193", "up": true, "needs_key": false, "tls_selfsigned": true});
         v["rag"] = serde_json::json!({"base_url": "http://127.0.0.1:8195", "up": true, "needs_key": false,
                                       "tls_selfsigned": false, "mcp_url": "http://127.0.0.1:8195/mcp"});
-        v["slide_render"] = serde_json::json!({"base_url": "http://127.0.0.1:8198", "up": false, "needs_key": false, "tls_selfsigned": false});
+        v["slide_render"] = serde_json::json!({"base_url": "http://127.0.0.1:8475", "up": false, "needs_key": false, "tls_selfsigned": false});
         let d: Discovery = serde_json::from_value(v).expect("parses");
         assert!(d.asr.as_ref().is_some_and(|a| a.live() && a.tls_selfsigned));
         assert_eq!(
@@ -352,10 +352,10 @@ mod tests {
         let d: Discovery = serde_json::from_value(doc("aiserver")).expect("parses");
         assert!(d.slide_render.is_none());
         let mut v = doc("aiserver");
-        v["slide_render"] = serde_json::json!({"base_url": "http://127.0.0.1:8198", "up": true, "needs_key": false});
+        v["slide_render"] = serde_json::json!({"base_url": "http://127.0.0.1:8475", "up": true, "needs_key": false});
         let d: Discovery = serde_json::from_value(v).expect("parses");
         let sr = d.slide_render.expect("slide_render present");
-        assert_eq!(sr.base_url, "http://127.0.0.1:8198");
+        assert_eq!(sr.base_url, "http://127.0.0.1:8475");
         assert!(sr.up && !sr.needs_key && sr.api_key.is_none());
     }
 

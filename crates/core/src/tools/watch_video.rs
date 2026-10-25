@@ -188,7 +188,9 @@ async fn transcribe(video: &Path, dir: &Path, lang: Option<&str>) -> Transcript 
                 Err(e) => Transcript::Failed(e),
             };
         }
-        if !std::env::var("THCLAWS_ALLOW_CLOUD_ASR").is_ok_and(|v| v.trim() == "1") {
+        if !std::env::var("THCLAWS_ALLOW_CLOUD_ASR").is_ok_and(|v| v.trim() == "1")
+            && !crate::providers::thclaws_gateway::cloud_allowed_on_aiserver()
+        {
             return Transcript::Unavailable(
                 "this AI Server box has no speech recognition running (start ASR Studio in the \
                  hub), and audio is not sent to the cloud from here (THCLAWS_ALLOW_CLOUD_ASR=1 \
