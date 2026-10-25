@@ -2429,6 +2429,17 @@ impl AppConfig {
             }
         }
 
+        // dev-plan/71: on an AI Server box the Suite's RAG Engine is the
+        // knowledge store; engine-managed like the office apps, never in a
+        // shared multiuser worker, and a same-named user server wins.
+        if !cfg!(test) && !crate::workdir::is_multiuser() {
+            if let Some(server) = crate::aiserver::rag_mcp_config() {
+                if !config.mcp_servers.iter().any(|s| s.name == server.name) {
+                    config.mcp_servers.push(server);
+                }
+            }
+        }
+
         // CLI `--model` / `--set-model` override (set by app.rs once at
         // startup). Applied last so it wins over user, project, and the
         // Claude Code fallback — matches the precedence the module docs

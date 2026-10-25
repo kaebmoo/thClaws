@@ -75,6 +75,18 @@ pub(crate) fn resolve_slide_endpoint_for(endpoint: &str) -> Result<SlideEndpoint
             });
         }
     }
+    // On an AI Server box the document must not leave the machine just
+    // because a cloud login happens to be lying around (dev-plan/71: the
+    // Suite test matrix converted a .docx through gateway.thclaws.cloud).
+    if cloud_fallback_blocked(crate::aiserver::cached().is_some(), cloud_render_allowed()) {
+        return Err(Error::Tool(
+            "this AI Server box has no local document service, and documents are not sent to \
+             the cloud from here. Install slide-render from the AI Server hub (it is announced \
+             in discovery), or set THCLAWS_ALLOW_CLOUD_RENDER=1 to render through the thClaws \
+             Gateway instead."
+                .into(),
+        ));
+    }
     if let Some(key) = crate::providers::thclaws_gateway::resolve_access_key() {
         let base = crate::providers::thclaws_gateway::resolve_base_url();
         return Ok(SlideEndpoint {
@@ -90,6 +102,14 @@ pub(crate) fn resolve_slide_endpoint_for(endpoint: &str) -> Result<SlideEndpoint
          point SLIDE_RENDER_API at it."
             .into(),
     ))
+}
+
+fn cloud_fallback_blocked(on_aiserver_box: bool, allowed: bool) -> bool {
+    on_aiserver_box && !allowed
+}
+
+fn cloud_render_allowed() -> bool {
+    std::env::var("THCLAWS_ALLOW_CLOUD_RENDER").is_ok_and(|v| v.trim() == "1")
 }
 
 fn mime_of(name: &str) -> &'static str {
@@ -633,6 +653,13 @@ const MAX_PPTX_BYTES: u64 = 200 * 1024 * 1024;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_aiserver_box_never_falls_back_to_the_cloud_unless_allowed() {
+        assert!(super::cloud_fallback_blocked(true, false));
+        assert!(!super::cloud_fallback_blocked(true, true));
+        assert!(!super::cloud_fallback_blocked(false, false));
+    }
+
     use super::*;
 
     /// The Files tab re-reads an open file on a timer, so this decision

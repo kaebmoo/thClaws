@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.145.0] — 2026-10-25
+
+**thClaws on an AI Server box keeps your data on the box.** On a DGX Spark or Station running AI Server, documents and recordings are processed by the box's own services and are never sent to the cloud, and the box's RAG engine is available to the agent with no setup.
+
+### Added
+
+- **AI Server services are found automatically.** thClaws reads the box's discovery document for its document service, speech recognition, RAG engine and studios, and uses the ones that are running.
+- **The box's RAG engine is ready to use.** When AI Server's RAG engine is running, the agent can search and read the documents in your namespaces through it (`search_knowledge`, `read_document`, `list_sources`).
+- **WatchVideo accepts audio-only files.** A phone recording of a meeting (mp3, m4a, wav) returns its transcript instead of failing.
+
+### Fixed
+
+- **Documents and audio stay on an AI Server box.** File conversion, OCR, previews and WatchVideo transcription used to fall back to the thClaws cloud whenever a cloud login was present. On a box they now use its local services, and otherwise stop with an explanation (`THCLAWS_ALLOW_CLOUD_RENDER=1` / `THCLAWS_ALLOW_CLOUD_ASR=1` opt back in).
+- **KMS search in downloaded builds.** Release builds now include the BM25 search index (with Thai matching) that other builds already had; `KmsSearch` no longer falls back to a plain pattern search.
+- **AI buttons in agent-built UI tabs work.** The custom-tab event payloads are now documented and the starter templates read them correctly, so a tab's "ask AI" button shows the answer instead of nothing.
+
+### Changed
+
+- **Clearer note for gateway-routed `auto` models.** When AI Server chooses the model, the message explains why your thinking level is not sent and how to pin a model.
+
 ## [0.144.0] — 2026-10-23
 
 **Craft and edit Office documents through the agent, with Thai text handled properly.** Word, Excel and PowerPoint apps now run as engine-managed tools, the agent replies in your language for the whole conversation, and Files previews render Office documents as PDFs instead of dropping tables and charts.

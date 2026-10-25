@@ -37,7 +37,7 @@ DB เก็บเป็น microcent ต่อ 1k token (`µ¢/kt`) สูต�
 
 context ที่มี **`?`** คือค่าที่ provider ไม่เคยประกาศ — เป็นค่า default ของ provider นั้นที่ใส่ไว้เพราะถ้าเว้นว่างจะทำให้ตัวเลือกโมเดลพัง ให้ถือเป็นขอบล่าง ไม่ใช่สเปกจริง
 
-623 โมเดล จาก 14 provider
+625 โมเดล จาก 14 provider
 
 ### Anthropic
 
@@ -49,7 +49,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `claude-fable-5-1` | 1M | $12.50 | $1.25 | $62.50 |
 | `claude-haiku-4-5` | 200k | $1.25 | $0.12 | $6.25 |
 | `claude-haiku-4-5-20251001` | 200k | $1.25 | $0.12 | $6.25 |
-| `claude-haiku-5-5` | 1M | $0.12 | $0.01 | $0.62 |
+| `claude-haiku-5-5` | 1M | $0.62 | $0.06 | $3.12 |
 | `claude-opus-4-1-20250805` | 200k | $18.75 | $1.88 | $93.75 |
 | `claude-opus-4-20250514` | 200k | $18.75 | $1.88 | $93.75 |
 | `claude-opus-4-5-20251101` | 200k | $6.25 | $0.62 | $31.25 |
@@ -246,11 +246,11 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `deepseek/deepseek-v3.2` | 131k | $0.35 | — | $0.53 |
 | `deepseek/deepseek-v3.2-exp` | 164k | $0.34 | — | $0.51 |
 | `deepseek/deepseek-v4-flash` | 1.04858M | $0.11 | — | $0.23 |
-| `deepseek/deepseek-v4-flash-0731` | 1.04858M | $0.06 | — | $0.17 |
+| `deepseek/deepseek-v4-flash-0731` | 1.04858M | $0.05 | — | $0.21 |
 | `deepseek/deepseek-v4-flash-vision-exp` | 1.04858M | $0.27 | — | $0.81 |
-| `deepseek/deepseek-v4-pro` | 1.04858M | $1.11 | — | $2.21 |
+| `deepseek/deepseek-v4-pro` | 1.04858M | $0.26 | — | $0.52 |
 | `deepseek/deepseek-v4-pro-0813` | 1.04858M | $0.83 | — | $2.48 |
-| `deepseek/deepseek-v4.1-flash` | 1.04858M | $0.38 | — | $1.50 |
+| `deepseek/deepseek-v4.1-flash` | 1.04858M | $0.03 | — | $1.25 |
 | `deepseek/deepseek-v4.1-flash-1017` | 1.04858M | $0.19 | — | $0.75 |
 | `dots-studio/dots-3-note-preview:free` | 512k | free | — | free |
 | `elorian/glimpse` | 262k | $0.75 | — | $3.75 |
@@ -278,7 +278,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `google/gemma-3-12b-it` | 131k | $0.06 | — | $0.19 |
 | `google/gemma-3-27b-it` | 131k | $0.10 | — | $0.44 |
 | `google/gemma-3-4b-it` | 131k | $0.05 | — | $0.06 |
-| `google/gemma-4-26b-a4b-it` | 262k | $0.11 | — | $0.38 |
+| `google/gemma-4-26b-a4b-it` | 262k | $0.08 | — | $0.28 |
 | `google/gemma-4-26b-a4b-it:free` | 262k | free | — | free |
 | `google/gemma-4-31b-it` | 262k | $0.25 | — | $0.50 |
 | `google/gemma-4-31b-it:free` | 262k | free | — | free |
@@ -293,6 +293,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `inclusionai/ling-3.1-flash` | 262k | $0.09 | — | $0.28 |
 | `inference-net/schematron-v2-small` | 128k | $0.06 | — | $0.29 |
 | `inference-net/schematron-v2-turbo` | 128k | $0.04 | — | $0.19 |
+| `liquid/lfm-2.5-2.6b` | 128k | $0.44 | — | $0.62 |
 | `liquid/lfm-2.5-2.6b:free` | 66k | free | — | free |
 | `liquid/lfm-2.5-24b-a2b` | 128k | $0.06 | — | $0.88 |
 | `mancer/weaver` | 8k | $0.50 | — | $0.94 |
@@ -300,7 +301,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `meta-llama/llama-3.1-70b-instruct` | 131k | $0.50 | — | $0.50 |
 | `meta-llama/llama-3.1-8b-instruct` | 16k | $0.06 | — | $0.10 |
 | `meta-llama/llama-3.2-1b-instruct` | 60k | $0.03 | — | $0.25 |
-| `meta-llama/llama-3.2-3b-instruct` | 80k | $0.06 | — | $0.42 |
+| `meta-llama/llama-3.2-3b-instruct` | 80k | $0.06 | — | $0.41 |
 | `meta-llama/llama-3.3-70b-instruct` | 131k | $0.12 | — | $0.40 |
 | `meta-llama/llama-4-maverick` | 1.04858M | $0.23 | — | $0.82 |
 | `meta-llama/llama-4-scout` | 328k | $0.12 | — | $0.38 |
@@ -319,7 +320,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `minimax/minimax-m2` | 197k | $0.32 | — | $1.27 |
 | `minimax/minimax-m2-her` | 66k | $0.38 | — | $1.50 |
 | `minimax/minimax-m2.1` | 197k | $0.38 | free | $1.50 |
-| `minimax/minimax-m2.5` | 197k | $0.34 | $0.19 | $1.19 |
+| `minimax/minimax-m2.5` | 197k | $0.38 | $0.19 | $1.50 |
 | `minimax/minimax-m2.7` | 197k | $0.38 | — | $1.50 |
 | `minimax/minimax-m3` | 1.04858M | $0.38 | — | $1.50 |
 | `minimax/minimax-m3.1-flash` | 1.04858M | $0.19 | — | $0.75 |
@@ -351,7 +352,8 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `moonshotai/kimi-k2.5` | 262k | $0.62 | $0.12 | $3.12 |
 | `moonshotai/kimi-k2.6` | 256k | $0.81 | — | $4.26 |
 | `moonshotai/kimi-k2.7-code` | 262k | $0.84 | — | $4.19 |
-| `moonshotai/kimi-k3` | 1.04858M | $0.30 | — | $14.92 |
+| `moonshotai/kimi-k3` | 1.04858M | $0.30 | — | $13.50 |
+| `moonshotai/kimi-k3.1-pro` | 1.04858M | $2.50 | — | $12.50 |
 | `morph/morph-v3-fast` | 82k | $1.00 | — | $1.50 |
 | `morph/morph-v3-large` | 262k | $1.12 | — | $2.38 |
 | `nex-agi/nex-n2.5-mini` | 262k | $0.03 | — | $0.12 |
@@ -371,10 +373,8 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `nvidia/nemotron-3.5-lightning:free` | 1M | free | — | free |
 | `nvidia/nemotron-3.5-super-vl` | 1.04858M | $0.19 | — | $0.62 |
 | `nvidia/nemotron-3.5-super-vl:free` | 1M | free | — | free |
-| `openai/gpt-3.5-turbo` | 16k | $0.62 | — | $1.88 |
 | `openai/gpt-3.5-turbo-0613` | 4k | $1.25 | — | $2.50 |
 | `openai/gpt-3.5-turbo-16k` | 16k | $3.75 | — | $5.00 |
-| `openai/gpt-3.5-turbo-instruct` | 4k | $1.88 | — | $2.50 |
 | `openai/gpt-4` | 8k | $37.50 | — | $75.00 |
 | `openai/gpt-4-turbo` | 128k | $12.50 | — | $37.50 |
 | `openai/gpt-4.1` | 1.04758M | $2.50 | $0.62 | $10.00 |
@@ -559,7 +559,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `~anthropic/claude-sonnet-latest` | 1M | $2.50 | — | $12.50 |
 | `~google/gemini-flash-latest` | 1.04858M | $0.94 | $0.04 | $4.69 |
 | `~google/gemini-pro-latest` | 1.04858M | $2.50 | $0.16 | $12.50 |
-| `~moonshotai/kimi-latest` | 256k | $0.30 | — | $20.00 |
+| `~moonshotai/kimi-latest` | 256k | $0.24 | — | $11.17 |
 | `~openai/gpt-mini-latest` | 400k | $0.94 | — | $5.62 |
 
 ### DashScope (Alibaba)
@@ -725,6 +725,8 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `moonshot/kimi-k2.7-code` | 262k | $1.19 | $5.00 |
 | `moonshot/kimi-k2.7-code-highspeed` | 262k | $2.38 | $10.00 |
 | `moonshot/kimi-k3` | 1.04858M | $3.75 | $18.75 |
+| `moonshot/kimi-k3.1-pro` | 262k? | $3.75 | $18.75 |
+| `moonshot/kimi-k3.1-pro-highspeed` | 262k? | $3.75 | $18.75 |
 
 ### Groq
 

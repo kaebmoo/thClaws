@@ -1665,6 +1665,16 @@ fn warn_thinking_unsupported(model: &str) {
     if !set.insert(model.to_string()) {
         return;
     }
+    // AI Server's `auto` (and any gateway alias like it) picks the model
+    // behind our back, so "ask for support for this family" has no family
+    // to ask about.
+    if model == "auto" || model.ends_with("/auto") {
+        eprintln!(
+            "\x1b[33m[thinking] '{model}' is chosen by the gateway, so thClaws can't tell which \
+             reasoning control applies — the level you set is not being sent. Pin a model id to use it.\x1b[0m"
+        );
+        return;
+    }
     eprintln!(
         "\x1b[33m[thinking] '{model}' has no reasoning control thClaws knows about — \
          the level you set is not being sent. Ask for support for this family if you need it.\x1b[0m"
