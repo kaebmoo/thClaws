@@ -369,8 +369,11 @@ impl Catalogue {
     /// portion. Subtract `cached_input_tokens` so uncached input pays
     /// `input_per_mtok`, cached portion pays `cached_input_per_mtok`,
     /// and newly-written cache tokens pay `cache_creation_per_mtok` on
-    /// top. Reasoning tokens (OpenAI o1) are billed separately at
-    /// `reasoning_per_mtok` when set; otherwise folded into completion.
+    /// top. Reasoning tokens are a part of `completion_tokens` on every
+    /// provider that reports them (OpenAI, DashScope/Qwen, DeepSeek, and
+    /// Gemini once its parser folds thoughts in): that part pays
+    /// `reasoning_per_mtok` when set, the output rate otherwise — never
+    /// both. Adding them on top priced thinking twice.
     pub fn compute_cost_usd(&self, model: &str, usage: &TokenUsage) -> Option<f64> {
         let entry = self.find_entry(model)?;
         if entry.tier_billed == Some(true) {
@@ -401,9 +404,13 @@ impl Catalogue {
             entry.cached_input_per_mtok.or(entry.input_per_mtok),
         );
         let cache_write = per_m(usage.cache_creation_tokens, entry.cache_creation_per_mtok);
-        let output = per_m(usage.completion_tokens, entry.output_per_mtok);
+        let reasoning_tokens = usage.reasoning_tokens.min(usage.completion_tokens);
+        let output = per_m(
+            usage.completion_tokens - reasoning_tokens,
+            entry.output_per_mtok,
+        );
         let reasoning = per_m(
-            usage.reasoning_tokens,
+            reasoning_tokens,
             entry.reasoning_per_mtok.or(entry.output_per_mtok),
         );
         let total = uncached + cached + cache_write + output + reasoning;
@@ -899,7 +906,10 @@ pub fn load_overrides_from_settings() -> HashMap<String, ModelEntry> {
     let mut out: HashMap<String, ModelEntry> = HashMap::new();
     let mut paths: Vec<PathBuf> = Vec::new();
     if let Some(home) = crate::util::home_dir() {
-        paths.push(home.join(".config/thclaws/settings.json"));
+        paths.push(home.join(format!(
+            ".config/{}/settings.json",
+            crate::profile::app_dir_name()
+        )));
     }
     let project_root = std::env::var("THCLAWS_PROJECT_ROOT")
         .ok()
@@ -953,7 +963,10 @@ pub fn save_override(
     let path = match scope {
         OverrideScope::User => {
             let home = crate::util::home_dir().ok_or(RefreshError::NoHome)?;
-            home.join(".config/thclaws/settings.json")
+            home.join(format!(
+                ".config/{}/settings.json",
+                crate::profile::app_dir_name()
+            ))
         }
         OverrideScope::Project => {
             let root = std::env::var("THCLAWS_PROJECT_ROOT")
@@ -1110,7 +1123,10 @@ pub fn cache_path() -> Option<PathBuf> {
     } else {
         crate::util::home_dir()?.join(".config")
     };
-    Some(base.join("thclaws").join("model_catalogue.json"))
+    Some(
+        base.join(crate::profile::app_dir_name())
+            .join("model_catalogue.json"),
+    )
 }
 
 /// Age of the user cache based on its file mtime. `None` when the
@@ -2005,7 +2021,7 @@ mod tests {
     }
 
     #[test]
-    fn cost_reasoning_tokens_billed_separately() {
+    fn cost_reasoning_tokens_are_part_of_completion() {
         let c = pricing_catalogue();
         let cost = c
             .compute_cost_usd(
@@ -2019,9 +2035,10 @@ mod tests {
                 },
             )
             .expect("priced");
-        // 1000 * 3.0/1M + 500 * 12.0/1M + 200 * 12.0/1M
-        // = 0.003 + 0.006 + 0.0024 = 0.0114
-        assert!((cost - 0.0114).abs() < 1e-9, "got {cost}");
+        // 200 of the 500 completion tokens are reasoning, priced once:
+        // 1000 * 3.0/1M + 300 * 12.0/1M + 200 * 12.0/1M
+        // = 0.003 + 0.0036 + 0.0024 = 0.009
+        assert!((cost - 0.009).abs() < 1e-9, "got {cost}");
     }
 
     #[test]

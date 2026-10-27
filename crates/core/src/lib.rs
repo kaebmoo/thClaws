@@ -76,6 +76,7 @@ pub mod context;
 #[cfg(feature = "cost_bridge")]
 pub mod cost_bridge;
 pub mod deploy_client;
+pub mod desktop_update;
 pub mod doctor;
 pub mod dotenv;
 pub mod endpoints;
@@ -95,6 +96,7 @@ pub mod external_url;
 #[cfg(feature = "gui")]
 pub mod file_preview;
 pub mod filmscript;
+pub mod gateway_turn;
 pub mod goal_state;
 #[cfg(feature = "gui")]
 pub mod gui;
@@ -128,12 +130,14 @@ pub mod model_catalogue;
 pub mod multi_tenant;
 pub mod net_guard;
 pub mod oauth;
+pub mod office;
 pub mod permissions;
 /// Phone-home channel — local engine dials out to thClaws.cloud over the
 /// shared bridge transport (dev-plan/44 Tier 1).
 pub mod phone_home;
 pub mod plugins;
 pub mod policy;
+pub mod profile;
 pub mod prompts;
 pub mod providers;
 pub mod recent_dirs;

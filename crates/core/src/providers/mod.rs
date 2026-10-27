@@ -1036,6 +1036,83 @@ pub(crate) fn redact_key(text: &str, key: &str) -> String {
     text.replace(key, "<redacted-api-key>")
 }
 
+/// The gateway's quota refusal on an install in quota mode (HTTP 429,
+/// `error.type = "quota_exceeded"`). Unlike a rate-limit 429 it won't clear
+/// in seconds, so the agent loop must not retry it.
+pub fn is_quota_exceeded(raw: &str) -> bool {
+    raw.contains("\"quota_exceeded\"")
+}
+
+/// "You've used this month's SIS thClaws credits (1,000/1,000). They reset
+/// on 1 Nov. Ask your administrator for more."
+pub fn quota_exceeded_message(raw: &str) -> Option<String> {
+    quota_exceeded_message_at(raw, &crate::branding::current().name, &chrono::Local)
+}
+
+fn quota_exceeded_message_at<Tz: chrono::TimeZone>(
+    raw: &str,
+    product: &str,
+    tz: &Tz,
+) -> Option<String>
+where
+    Tz::Offset: std::fmt::Display,
+{
+    if !is_quota_exceeded(raw) {
+        return None;
+    }
+    let err = raw
+        .find('{')
+        .and_then(|i| {
+            serde_json::Deserializer::from_str(&raw[i..])
+                .into_iter::<serde_json::Value>()
+                .next()
+        })
+        .and_then(|v| v.ok())
+        .and_then(|v| v.get("error").cloned());
+    let field = |k: &str| err.as_ref().and_then(|e| e.get(k));
+    let daily = field("period").and_then(|p| p.as_str()) == Some("day");
+    let mut msg = format!(
+        "You've used {} {product} credits",
+        if daily { "today's" } else { "this month's" }
+    );
+    let used = field("used_credits").and_then(|x| x.as_f64());
+    let limit = field("limit_credits").and_then(|x| x.as_f64());
+    if let (Some(u), Some(l)) = (used, limit) {
+        msg.push_str(&format!(" ({}/{})", group_thousands(u), group_thousands(l)));
+    }
+    msg.push('.');
+    let resets = field("resets_at")
+        .and_then(|x| x.as_str())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| t.with_timezone(tz));
+    if let Some(t) = resets {
+        if daily {
+            msg.push_str(&format!(" They reset at {}.", t.format("%H:%M on %-d %b")));
+        } else {
+            msg.push_str(&format!(" They reset on {}.", t.format("%-d %b")));
+        }
+    }
+    msg.push_str(" Ask your administrator for more.");
+    Some(msg)
+}
+
+/// 1234.6 → "1,235".
+pub fn group_thousands(n: f64) -> String {
+    let n = n.round() as i64;
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if n < 0 {
+        out.insert(0, '-');
+    }
+    out
+}
+
 /// Turn a provider error string into a one-line human-readable message
 /// the chat UI can show in an error bubble. Handles the common shape
 /// providers surface as `Error::Provider("http <status> <text>: <body>")`,
@@ -1050,6 +1127,26 @@ pub(crate) fn redact_key(text: &str, key: &str) -> String {
 /// from the HTTP status. Falls back to the original text when nothing
 /// parses.
 pub fn humanize_provider_error(raw: &str) -> String {
+    if let Some(msg) = crate::policy::unreachable_gateway_message(raw) {
+        return msg;
+    }
+    if crate::cloud::browser_login::is_token_expired(raw) {
+        let cfg = crate::config::ProjectConfig::load().unwrap_or_default();
+        let url = crate::cloud::resolve_cloud_url(None, cfg.cloud.as_ref());
+        return crate::cloud::browser_login::relogin_hint(&url);
+    }
+    if let Some(msg) = quota_exceeded_message(raw) {
+        return msg;
+    }
+    if let Some(msg) = crate::desktop_update::client_update_message(raw) {
+        crate::desktop_update::note_error(raw);
+        return msg;
+    }
+    if raw.contains("\"access_revoked\"") {
+        return "Your organisation has ended this account's access to its AI gateway. \
+                Contact your administrator."
+            .into();
+    }
     let trimmed = raw
         .trim_start_matches("Error: ")
         .trim_start_matches("provider error: ")
@@ -1123,6 +1220,45 @@ mod humanize_tests {
         let raw = "provider error: connection refused";
         let out = humanize_provider_error(raw);
         assert_eq!(out, raw);
+    }
+
+    #[test]
+    fn humanize_names_a_lapsed_sign_in_and_revoked_access() {
+        let expired = r#"provider error: 401 Unauthorized: {"error":"Your sign-in has expired — sign in again.","code":"token_expired"}"#;
+        let out = humanize_provider_error(expired);
+        assert!(out.contains("has expired"), "{out}");
+        assert!(out.contains("cloud login --browser"), "{out}");
+        let revoked = r#"provider error: 403 Forbidden: {"error":"x","code":"access_revoked"}"#;
+        assert!(humanize_provider_error(revoked).contains("administrator"));
+    }
+
+    #[test]
+    fn quota_exceeded_reads_as_credits_not_a_rate_limit() {
+        use super::{group_thousands, is_quota_exceeded, quota_exceeded_message_at};
+        let tz = chrono::FixedOffset::east_opt(7 * 3600).unwrap();
+        let month = r#"provider error: http 429 Too Many Requests: {"error":{"type":"quota_exceeded","period":"month","message":"Monthly credit limit reached","used_credits":1000.4,"limit_credits":1000,"resets_at":"2026-10-31T17:00:00Z"}}"#;
+        assert!(is_quota_exceeded(month));
+        assert_eq!(
+            quota_exceeded_message_at(month, "SIS thClaws", &tz).unwrap(),
+            "You've used this month's SIS thClaws credits (1,000/1,000). They reset on 1 Nov. Ask your administrator for more."
+        );
+        let day = r#"http 429: {"error":{"type":"quota_exceeded","period":"day","used_credits":12500,"limit_credits":12000,"resets_at":"2026-10-01T17:00:00+00:00"}}"#;
+        assert_eq!(
+            quota_exceeded_message_at(day, "thClaws", &tz).unwrap(),
+            "You've used today's thClaws credits (12,500/12,000). They reset at 00:00 on 2 Oct. Ask your administrator for more."
+        );
+        let bare = r#"http 429: {"error":{"type":"quota_exceeded"}}"#;
+        assert_eq!(
+            quota_exceeded_message_at(bare, "thClaws", &tz).unwrap(),
+            "You've used this month's thClaws credits. Ask your administrator for more."
+        );
+        assert!(humanize_provider_error(month).starts_with("You've used this month's"));
+
+        let rate = r#"provider error: http 429 Too Many Requests: {"error":{"type":"rate_limited","message":"slow down"}}"#;
+        assert!(!is_quota_exceeded(rate));
+        assert_eq!(humanize_provider_error(rate), "Rate limited: slow down");
+        assert_eq!(group_thousands(1234567.0), "1,234,567");
+        assert_eq!(group_thousands(999.0), "999");
     }
 
     #[test]
@@ -1349,22 +1485,37 @@ pub struct Usage {
 }
 
 impl Usage {
-    /// The cache part of a `[tokens: …]` line, or nothing.
-    ///
-    /// It used to be printed only when a provider reported BOTH cache writes
-    /// and cache reads, which is Anthropic alone. OpenAI-compatible
-    /// providers (DeepSeek, OpenAI, Qwen) report reads only — and since
-    /// `input_tokens` is what was NOT served from cache, a long conversation
-    /// on one of them showed a falling `in` count and no sign of why.
-    pub fn cache_note(&self) -> String {
-        let w = self.cache_creation_input_tokens.unwrap_or(0);
+    /// Every prompt token the provider read: uncached + cache reads + cache
+    /// writes. `input_tokens` holds the uncached part only (Anthropic's
+    /// convention), but the gateway, the provider bill and the web Usage
+    /// page all call the whole prompt "input" — showing the uncached part
+    /// as `in` made one turn read 16k here and 32k there.
+    pub fn prompt_tokens(&self) -> u64 {
+        self.input_tokens as u64
+            + self.cache_read_input_tokens.unwrap_or(0) as u64
+            + self.cache_creation_input_tokens.unwrap_or(0) as u64
+    }
+
+    /// The `Nin/Nout` part of a `[tokens: …]` line, each side broken down
+    /// by type: `in` includes cache, `out` includes thinking.
+    pub fn tokens_note(&self) -> String {
         let r = self.cache_read_input_tokens.unwrap_or(0);
-        match (w, r) {
+        let w = self.cache_creation_input_tokens.unwrap_or(0);
+        let cache = match (r, w) {
             (0, 0) => String::new(),
-            (0, r) => format!(" · cache: {r}r"),
-            (w, 0) => format!(" · cache: +{w}w"),
-            (w, r) => format!(" · cache: +{w}w/{r}r"),
-        }
+            (r, 0) => format!(" ({r} cached)"),
+            (0, w) => format!(" ({w} cache-write)"),
+            (r, w) => format!(" ({r} cached, {w} cache-write)"),
+        };
+        let thinking = match self.reasoning_output_tokens.unwrap_or(0) {
+            0 => String::new(),
+            t => format!(" ({t} thinking)"),
+        };
+        format!(
+            "{}in{cache}/{}out{thinking}",
+            self.prompt_tokens(),
+            self.output_tokens
+        )
     }
 }
 
@@ -1515,6 +1666,11 @@ pub fn provider_has_credentials(cfg: &crate::config::AppConfig) -> bool {
 /// no-auth local provider). Same logic the GUI's auto-fallback path uses.
 pub fn kind_has_credentials(kind: Option<ProviderKind>) -> bool {
     let Some(kind) = kind else { return false };
+    // A gateway-locked install has no credentials of its own: only the
+    // gateway route (checked separately by callers) makes a provider usable.
+    if crate::shared::gateway_providers_locked() {
+        return false;
+    }
     match kind {
         ProviderKind::AgentSdk => true,
         ProviderKind::Ollama
@@ -1554,7 +1710,79 @@ pub fn kind_has_credentials(kind: Option<ProviderKind>) -> bool {
 /// own function rather than inlined in the loop so the rule can be tested: it
 /// decides what a user sees, and getting it wrong in the strict direction
 /// makes working providers vanish, which is worse than the noise it removes.
-fn kind_is_reachable(cfg: &crate::config::AppConfig, kind: ProviderKind) -> bool {
+/// The providers a gateway-locked install serves (`THCLAWS_GATEWAY_PROVIDERS`
+/// set), in display order: the ones its gateway routes for this config.
+/// `/providers` lists exactly these there instead of the Featured /
+/// Additional tiers, most of which that install cannot reach.
+pub fn locked_install_providers(cfg: &crate::config::AppConfig) -> Vec<ProviderKind> {
+    ProviderKind::display_ordered()
+        .into_iter()
+        .filter(|k| thclaws_gateway::for_kind(cfg, *k).is_some())
+        .collect()
+}
+
+/// Every provider a locked install offers — the kinds whose gateway segment
+/// the lock routes — whether or not the user has signed in yet.
+/// [`locked_install_providers`] is the usable subset (needs a credential).
+pub fn locked_offered_providers() -> Vec<ProviderKind> {
+    let routed = crate::shared::gateway_routed_providers();
+    ProviderKind::display_ordered()
+        .into_iter()
+        .filter(|k| {
+            thclaws_gateway::provider_segment(*k)
+                .is_some_and(|s| routed.iter().any(|r| r.eq_ignore_ascii_case(s)))
+        })
+        .collect()
+}
+
+/// On a locked install with no credential for its gateway, the one thing to
+/// tell the user: sign in to their organisation. `None` otherwise.
+pub fn locked_sign_in_hint() -> Option<String> {
+    if !crate::shared::gateway_providers_locked() || thclaws_gateway::has_access_key() {
+        return None;
+    }
+    Some(sign_in_hint_for(&crate::branding::current().name))
+}
+
+fn sign_in_hint_for(name: &str) -> String {
+    format!(
+        "Not signed in to {name} — Settings → Sign in with browser, or run `thclaws cloud login --browser`."
+    )
+}
+
+/// The model a locked install must switch to when `current` isn't served
+/// by any of the `routed` gateway segments; `None` when `current` is fine.
+/// Prefers `default_model`, else the first routed provider's own default.
+pub fn locked_model_override(
+    current: &str,
+    routed: &[String],
+    default_model: Option<&str>,
+) -> Option<String> {
+    let served = |seg: &str| routed.iter().any(|r| r.trim().eq_ignore_ascii_case(seg));
+    if routed.iter().all(|r| r.trim().is_empty()) {
+        return None;
+    }
+    if ProviderKind::detect(current)
+        .and_then(thclaws_gateway::provider_segment)
+        .is_some_and(served)
+    {
+        return None;
+    }
+    if let Some(d) = default_model.map(str::trim).filter(|d| !d.is_empty()) {
+        return Some(d.to_string());
+    }
+    routed.iter().find_map(|seg| {
+        ProviderKind::display_ordered()
+            .into_iter()
+            .find(|k| {
+                thclaws_gateway::provider_segment(*k)
+                    .is_some_and(|s| s.eq_ignore_ascii_case(seg.trim()))
+            })
+            .map(|k| k.default_model().to_string())
+    })
+}
+
+pub(crate) fn kind_is_reachable(cfg: &crate::config::AppConfig, kind: ProviderKind) -> bool {
     kind_has_credentials(Some(kind)) || thclaws_gateway::for_kind(cfg, kind).is_some()
 }
 
@@ -2883,6 +3111,42 @@ mod tests {
     }
 
     #[test]
+    fn a_locked_install_moves_a_foreign_model_onto_its_gateway() {
+        let sis = vec!["sis".to_string()];
+        // Open-core default → the policy's default_model.
+        assert_eq!(
+            locked_model_override("claude-sonnet-4-6", &sis, Some("sis/qwen3.7-plus")).as_deref(),
+            Some("sis/qwen3.7-plus")
+        );
+        // No default_model → the first routed provider's own default.
+        assert_eq!(
+            locked_model_override("gpt-5.5", &sis, None).as_deref(),
+            Some(ProviderKind::Sis.default_model())
+        );
+        // A choice the gateway serves is kept, whatever default_model says.
+        assert_eq!(
+            locked_model_override("sis/deepseek-v3.2", &sis, Some("sis/qwen3.8-flash")),
+            None
+        );
+        // First routed provider wins, in the policy's order.
+        let two = vec!["deepseek".to_string(), "sis".to_string()];
+        assert_eq!(
+            locked_model_override("claude-sonnet-4-6", &two, None).as_deref(),
+            Some(ProviderKind::DeepSeek.default_model())
+        );
+        // No lock → nothing to do.
+        assert_eq!(locked_model_override("claude-sonnet-4-6", &[], None), None);
+    }
+
+    #[test]
+    fn the_sign_in_hint_names_the_organisation_and_both_ways_in() {
+        let h = sign_in_hint_for("SIS thClaws");
+        assert!(h.starts_with("Not signed in to SIS thClaws"));
+        assert!(h.contains("Sign in with browser"));
+        assert!(h.contains("thclaws cloud login --browser"));
+    }
+
+    #[test]
     fn display_ordered_is_featured_then_additional() {
         let ord = ProviderKind::display_ordered();
         // Every provider exactly once — no drops, no duplicates.
@@ -3415,21 +3679,32 @@ pub(crate) fn http_client() -> reqwest::Client {
 #[cfg(test)]
 mod http_client_tests {
     #[test]
-    fn the_usage_line_shows_cache_reads_on_their_own() {
+    fn the_usage_line_counts_cache_in_input_and_breaks_it_down() {
         use super::Usage;
-        let u = |w: Option<u32>, r: Option<u32>| Usage {
+        let u = |input: u32, w: Option<u32>, r: Option<u32>, t: Option<u32>| Usage {
+            input_tokens: input,
+            output_tokens: 78,
             cache_creation_input_tokens: w,
             cache_read_input_tokens: r,
-            ..Usage::default()
+            reasoning_output_tokens: t,
         };
-        assert_eq!(u(None, None).cache_note(), "");
-        assert_eq!(u(Some(0), Some(0)).cache_note(), "");
-        // DeepSeek / OpenAI: reads only. This printed nothing.
-        assert_eq!(u(None, Some(48_000)).cache_note(), " · cache: 48000r");
-        assert_eq!(u(Some(900), None).cache_note(), " · cache: +900w");
+        assert_eq!(u(500, None, None, None).tokens_note(), "500in/78out");
         assert_eq!(
-            u(Some(900), Some(48_000)).cache_note(),
-            " · cache: +900w/48000r"
+            u(500, Some(0), Some(0), Some(0)).tokens_note(),
+            "500in/78out"
+        );
+        // DeepSeek / OpenAI / Qwen: reads only; `in` is the whole prompt.
+        assert_eq!(
+            u(16_251, None, Some(16_128), None).tokens_note(),
+            "32379in (16128 cached)/78out"
+        );
+        assert_eq!(
+            u(21, Some(900), None, None).tokens_note(),
+            "921in (900 cache-write)/78out"
+        );
+        assert_eq!(
+            u(21, Some(900), Some(48_000), Some(60)).tokens_note(),
+            "48921in (48000 cached, 900 cache-write)/78out (60 thinking)"
         );
     }
 

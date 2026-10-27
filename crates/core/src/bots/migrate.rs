@@ -580,6 +580,9 @@ pub fn stale_agents(root: &Path) -> Vec<(String, Option<String>)> {
             .iter()
             .map(|d| dir.join(".thclaws").join(d))
             .filter(|d| d.is_dir())
+            // A skill that is only prose ships nothing that could look for
+            // itself in the wrong place; its folder alone is not a signal.
+            .filter(|d| !d.ends_with("skills") || ships_non_markdown(d))
             .collect();
         if dirs.is_empty() {
             continue;
@@ -600,6 +603,16 @@ pub fn stale_agents(root: &Path) -> Vec<(String, Option<String>)> {
         if mentions {
             continue;
         }
+        // Stale means there is a bare `.thclaws/…` path for fix-paths to
+        // rewrite (or one it would have to skip). A skill that reaches its
+        // files through `{skill_dir}` has none, and flagging it put a notice
+        // on every page load that the repair could never clear.
+        let needs_repair = super::agent_paths::fix(&dir, true)
+            .map(|r| r.changed() || !r.skipped.is_empty())
+            .unwrap_or(true);
+        if !needs_repair {
+            continue;
+        }
         let id = std::fs::read_to_string(dir.join("manifest.json"))
             .ok()
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
@@ -607,6 +620,16 @@ pub fn stale_agents(root: &Path) -> Vec<(String, Option<String>)> {
         out.push((def.slug, id));
     }
     out
+}
+
+fn ships_non_markdown(dir: &Path) -> bool {
+    walkdir::WalkDir::new(dir)
+        .max_depth(6)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            e.file_type().is_file() && e.path().extension().and_then(|x| x.to_str()) != Some("md")
+        })
 }
 
 /// What this workspace needs before its agents can work, said to the PAGE.
@@ -641,10 +664,13 @@ pub fn workspace_notice_frames(root: &Path) -> Vec<String> {
         // An agent from the catalogue is replaced by getting it again, which
         // also brings whatever else it has gained since. One the user wrote
         // has nowhere to come from, so its copy is repaired in place.
-        let command = id.as_deref().map_or_else(
-            || "thclaws bots fix-paths".to_string(),
-            |i| format!("/cloud get {i}"),
-        );
+        // A hosted runner has no shell for the user to run the CLI in.
+        let hosted = std::env::var_os("THCLAWS_HOSTED").is_some();
+        let command = match id.as_deref() {
+            Some(i) => format!("/cloud get {i}"),
+            None if hosted => String::new(),
+            None => "thclaws bots fix-paths".to_string(),
+        };
         out.push(
             serde_json::json!({
                 "type": "workspace_notice",
@@ -653,7 +679,7 @@ pub fn workspace_notice_frames(root: &Path) -> Vec<String> {
                 "detail": "It was installed before agents learned to find their own folder \
                            under a workspace host, so its scripts and state look for themselves \
                            in the wrong place. It shows an empty project rather than an error.",
-                "command": command,
+                "command": (!command.is_empty()).then_some(command),
             })
             .to_string(),
         );
@@ -1071,30 +1097,7 @@ fn install_host_files(ws: &Path) -> Result<()> {
     Ok(())
 }
 
-const TOMBSTONE: &str = r#"# This workspace has been upgraded — nothing is missing
-
-This folder is now a **workspace host**. It supervises bots; it is not a
-project itself. The agent that used to live here — its files, its history,
-its settings, its git repository — moved to:
-
-    .thclaws/bots/main/
-
-## If you are a model reading this
-
-You are running a version of thClaws older than the one that upgraded this
-workspace. **This directory is not an empty project.** You cannot see or edit
-the user's work from here, and anything you create here will land outside
-their project.
-
-Do not proceed as if this were a new workspace. Tell the user, in their own
-language, that:
-
-1. Their workspace was upgraded to the multi-bot layout and nothing was lost.
-2. Their project is at `.thclaws/bots/main/`.
-3. Updating thClaws will open it normally again.
-4. To keep working without updating, they can open `.thclaws/bots/main/`
-   directly as the project folder.
-"#;
+use crate::context::V3_TOMBSTONE as TOMBSTONE;
 
 /// `agent pack` refuses a folder without `agent.{id,name,description}`, so a
 /// migrated workspace that never had an identity could not be published.
@@ -1203,6 +1206,23 @@ fn rewrite_schedules(ws: &Path) -> Result<Vec<String>> {
 /// Mint a fresh v3 workspace: a host with one empty bot. Used when
 /// `--supervisor` is pointed at a directory that has no workspace in it yet —
 /// never at one that already holds a v2 agent, which needs [`apply`].
+/// A folder that is no workspace yet — no `bots.json`, no v2 agent, not a
+/// bot's folder, not home or above — becomes a host with one empty agent
+/// the first time the app opens it. Without this the first open stamped a
+/// v2 `settings.json` and only the second open upgraded it, so a new folder
+/// showed no bots until the app was reopened. `None` = not fresh, untouched.
+pub fn mint_if_fresh(ws: &Path) -> Option<Result<PathBuf>> {
+    if ws.join(super::CONFIG_REL).exists()
+        || crate::workdir::is_multiuser()
+        || is_inside_shelf(ws)
+        || is_never_a_workspace(ws)
+        || looks_like_v2_agent(ws)
+    {
+        return None;
+    }
+    Some(mint_new_workspace(ws, MAIN_SLUG))
+}
+
 pub fn mint_new_workspace(ws: &Path, slug: &str) -> Result<PathBuf> {
     super::validate_slug(slug)?;
     let dest = bot_dir(ws, slug);
@@ -1247,7 +1267,69 @@ pub fn looks_like_v2_agent(ws: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A prose skill is not a stale agent, nor is one whose scripts never
+    /// name a bare `.thclaws/` path; one that does still is.
+    #[test]
+    fn a_prose_skill_does_not_make_an_agent_stale() {
+        let ws = tempfile::tempdir().unwrap();
+        let root = ws.path();
+        std::fs::create_dir_all(root.join(".thclaws")).unwrap();
+        let cfg = BotsConfig {
+            version: 1,
+            bots: vec![BotDef {
+                slug: MAIN_SLUG.into(),
+                name: None,
+            }],
+        };
+        std::fs::write(
+            root.join(super::super::CONFIG_REL),
+            serde_json::to_string(&cfg).unwrap(),
+        )
+        .unwrap();
+        let skill = super::super::resolve_agent_dir(root, MAIN_SLUG).join(".thclaws/skills/notes");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "---\nname: notes\n---\nSummarise.").unwrap();
+        assert!(stale_agents(root).is_empty());
+
+        // Ships a script but finds it through {skill_dir}: nothing for
+        // fix-paths to rewrite, so not stale (thai-text-image, 2026-10-22).
+        std::fs::create_dir_all(skill.join("scripts")).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: notes\n---\nRun `python3 {skill_dir}/scripts/run.py`.",
+        )
+        .unwrap();
+        std::fs::write(skill.join("scripts/run.py"), "print(__file__)").unwrap();
+        std::fs::write(skill.join("scripts/font.ttf"), [0u8; 16]).unwrap();
+        assert!(stale_agents(root).is_empty());
+
+        std::fs::write(skill.join("scripts/run.py"), "open('.thclaws/x')").unwrap();
+        assert_eq!(stale_agents(root).len(), 1);
+    }
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_fresh_folder_is_minted_a_host_but_nothing_else_is() {
+        let _g = crate::kms::test_env_lock();
+        // Empty folder: becomes a host with one agent on first open.
+        let fresh = tempfile::tempdir().unwrap();
+        let dest = mint_if_fresh(fresh.path()).expect("fresh").unwrap();
+        assert!(fresh.path().join(super::super::CONFIG_REL).exists());
+        assert!(dest.is_dir());
+        // Already a host: untouched.
+        assert!(mint_if_fresh(fresh.path()).is_none());
+        // A v2 single-agent folder is the migration's job, not this one's.
+        let v2 = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(v2.path().join(".thclaws")).unwrap();
+        std::fs::write(v2.path().join(".thclaws/settings.json"), "{}").unwrap();
+        assert!(mint_if_fresh(v2.path()).is_none());
+        assert!(!v2.path().join(super::super::CONFIG_REL).exists());
+        // A bot's own folder inside a shelf is never a workspace of its own.
+        let shelf = fresh.path().join(".thclaws/bots/other");
+        std::fs::create_dir_all(&shelf).unwrap();
+        assert!(mint_if_fresh(&shelf).is_none());
+    }
 
     /// `~/.thclaws/` exists on most desktops (the classic app ran in the
     /// Dock's cwd before the picker was answered), so `~` passes every

@@ -173,7 +173,12 @@ impl AgentDefsConfig {
 
     fn default_json_path() -> PathBuf {
         crate::util::home_dir()
-            .map(|h| h.join(".config/thclaws/agents.json"))
+            .map(|h| {
+                h.join(format!(
+                    ".config/{}/agents.json",
+                    crate::profile::app_dir_name()
+                ))
+            })
             .unwrap_or_else(|| PathBuf::from("agents.json"))
     }
 
@@ -182,8 +187,11 @@ impl AgentDefsConfig {
     fn agent_dirs() -> Vec<PathBuf> {
         let mut dirs = Vec::new();
         if let Some(home) = crate::util::home_dir() {
-            dirs.push(home.join(".claude/agents")); // user Claude Code
-            dirs.push(home.join(".config/thclaws/agents")); // user thClaws
+            if crate::profile::reads_claude_home() {
+                dirs.push(home.join(".claude/agents")); // user Claude Code
+            }
+            dirs.push(home.join(format!(".config/{}/agents", crate::profile::app_dir_name())));
+            // user thClaws
         }
         dirs.push(PathBuf::from(".claude/agents")); // project Claude Code
         dirs.push(PathBuf::from(".thclaws/agents")); // project thClaws (highest priority)
@@ -568,7 +576,7 @@ fn agents_target_root(project_scope: bool) -> crate::Result<PathBuf> {
     } else {
         crate::util::home_dir()
             .ok_or_else(|| crate::Error::Tool("cannot locate user home directory".into()))
-            .map(|h| h.join(".config/thclaws/agents"))
+            .map(|h| h.join(format!(".config/{}/agents", crate::profile::app_dir_name())))
     }
 }
 
@@ -683,6 +691,12 @@ pub async fn install_subagent_from_url(
     override_name: Option<&str>,
     project_scope: bool,
 ) -> crate::Result<Vec<String>> {
+    crate::marketplace::ensure_fresh().await;
+    if !crate::marketplace::install_url_allowed(url) {
+        return Err(crate::Error::Tool(crate::marketplace::install_refusal(
+            "agent",
+        )));
+    }
     if let crate::policy::AllowDecision::Denied { reason } = crate::policy::check_url(url) {
         return Err(crate::Error::Tool(format!(
             "subagent install blocked by org policy: {reason}"

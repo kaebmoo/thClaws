@@ -211,9 +211,13 @@ pub fn for_kind(config: &AppConfig, kind: ProviderKind) -> Option<GatewayOverlay
 }
 
 /// Metering is non-negotiable in these environments — BYOK never
-/// bypasses it (dev-plan/41/42/45).
+/// bypasses it (dev-plan/41/42/45). An org-locked desktop too: a key left
+/// in the shared env/keychain by a regular thClaws install (e.g. its own
+/// `SIS_API_KEY`) must not take the org's traffic off the gateway.
 fn gateway_forced() -> bool {
-    crate::workdir::is_multiuser() || crate::shared::is_active()
+    crate::workdir::is_multiuser()
+        || crate::shared::is_active()
+        || crate::shared::gateway_providers_locked()
 }
 
 /// A real BYOK key for `kind`: non-empty and not the hosted pods'
@@ -264,10 +268,16 @@ pub fn model_is_gateway_servable(model: &str) -> bool {
 /// [`GATEWAY_BASE_URL`]. `pub(crate)` so the media-generation tools
 /// route through the exact same base as the LLM path.
 pub(crate) fn resolve_base_url() -> String {
-    std::env::var("THCLAWS_GATEWAY_BASE_URL")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    base_url_for(
+        crate::policy::thclaws_gateway_url(),
+        std::env::var("THCLAWS_GATEWAY_BASE_URL").ok(),
+    )
+}
+
+/// A thClaws-gateway policy's URL outranks the env override.
+fn base_url_for(policy_url: Option<String>, env: Option<String>) -> String {
+    policy_url
+        .or_else(|| env.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()))
         .unwrap_or_else(|| GATEWAY_BASE_URL.to_string())
 }
 
@@ -277,6 +287,26 @@ pub(crate) fn resolve_base_url() -> String {
 /// from the SAME three sources as the LLM path (an env-only check made
 /// `TextToImage` blind to cloud-login / keychain gateway users).
 pub(crate) fn resolve_access_key() -> Option<String> {
+    // Under a thClaws-gateway policy the only credential is the user's
+    // own sign-in to the policy's cloud (per-user, revocable, subject to
+    // its domain/test-user rules). A `gateway` key left in the keychain —
+    // e.g. one minted against thclaws.cloud — belongs to another gateway
+    // and would only 401 there, or bill someone else.
+    if crate::shared::policy_gateway_mode() {
+        return crate::cloud::token();
+    }
+    // An AI Server box is sold as "data stays on the box": every gateway
+    // consumer (WebSearch, HAL, media/TTS, slide-render, Bash subprocesses)
+    // resolves its credential here, so a cloud login lying around must not
+    // quietly turn into egress (dev-plan/71 egress test). Opt back in with
+    // THCLAWS_ALLOW_CLOUD=1.
+    if crate::aiserver::cached().is_some() && !cloud_allowed_on_aiserver() {
+        return None;
+    }
+    raw_access_key()
+}
+
+fn raw_access_key() -> Option<String> {
     if let Ok(v) = std::env::var("THCLAWS_GATEWAY_API_KEY") {
         let trimmed = v.trim().to_string();
         if !trimmed.is_empty() {
@@ -295,16 +325,84 @@ pub(crate) fn resolve_access_key() -> Option<String> {
     crate::cloud::token()
 }
 
+/// Whether an AI Server box may use the thClaws cloud (gateway models,
+/// search, media, cloud rendering/ASR). Default: no.
+///
+/// - `THCLAWS_ALLOW_CLOUD=1` / `=0` in the environment wins (operator pin).
+/// - Otherwise `allowCloud` in `~/.config/thclaws/aiserver.json`, the
+///   box-level switch the AI Server hub writes. It is read on every check,
+///   so flipping it takes effect on the next tool call with no restart.
+pub(crate) fn cloud_allowed_on_aiserver() -> bool {
+    cloud_mode().0
+}
+
+/// `(allowed, source)`, source one of `env`, `file`, `default`.
+pub(crate) fn cloud_mode() -> (bool, &'static str) {
+    mode_from(
+        std::env::var("THCLAWS_ALLOW_CLOUD").ok(),
+        crate::profile::config_dir()
+            .and_then(|d| std::fs::read_to_string(d.join("aiserver.json")).ok()),
+    )
+}
+
+fn mode_from(env: Option<String>, file: Option<String>) -> (bool, &'static str) {
+    match env.as_deref().map(str::trim) {
+        Some("1") => return (true, "env"),
+        Some("0") => return (false, "env"),
+        _ => {}
+    }
+    if let Some(v) = file
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|j| j.get("allowCloud").and_then(|b| b.as_bool()))
+    {
+        return (v, "file");
+    }
+    (false, "default")
+}
+
+/// A gateway credential exists, ignoring the AI Server gate. For status
+/// display only — never returns the key.
+pub(crate) fn has_cloud_credential() -> bool {
+    raw_access_key().is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    // Tests below mutate the process-global `THCLAWS_GATEWAY_*` env
-    // vars. Cargo runs lib tests in parallel; this mutex serialises
-    // the env-touching tests so a sibling test reading the resolved
-    // value mid-mutation doesn't see ghost state.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    #[test]
+    fn the_env_pin_beats_the_hub_file_which_beats_the_default() {
+        let on = Some(r#"{"allowCloud": true}"#.to_string());
+        let off = Some(r#"{"allowCloud": false}"#.to_string());
+        assert_eq!(mode_from(None, None), (false, "default"));
+        assert_eq!(mode_from(None, on.clone()), (true, "file"));
+        assert_eq!(mode_from(None, off.clone()), (false, "file"));
+        assert_eq!(mode_from(Some("0".into()), on.clone()), (false, "env"));
+        assert_eq!(mode_from(Some("1".into()), off), (true, "env"));
+        assert_eq!(mode_from(Some("".into()), on), (true, "file"));
+        assert_eq!(mode_from(None, Some("not json".into())), (false, "default"));
+    }
+
+    #[test]
+    fn a_policy_gateway_url_outranks_the_env_override() {
+        assert_eq!(
+            base_url_for(
+                Some("https://gateway.sis.example".into()),
+                Some("https://staging.example".into())
+            ),
+            "https://gateway.sis.example"
+        );
+        assert_eq!(
+            base_url_for(None, Some(" https://staging.example ".into())),
+            "https://staging.example"
+        );
+        assert_eq!(base_url_for(None, Some("  ".into())), GATEWAY_BASE_URL);
+        assert_eq!(base_url_for(None, None), GATEWAY_BASE_URL);
+    }
+
+    // Tests below mutate the process-global `THCLAWS_GATEWAY_*` env vars;
+    // they share the crate-wide env lock with every other test that does
+    // (repl's build_provider tests set THCLAWS_GATEWAY_PROVIDERS).
 
     /// SIS asked for the same usage reporting they saw on our side, which
     /// means their Qwen server has to ride the METERED path. Three of the
@@ -317,6 +415,7 @@ mod tests {
     /// This pins the segment; the arm that consumes it is exercised live.
     #[test]
     fn sis_is_routable_through_the_gateway() {
+        let _g = crate::kms::test_env_lock();
         assert_eq!(provider_segment(ProviderKind::Sis), Some("sis"));
         // The segment name is the gateway's route path, so a rename on
         // either side silently stops metering.
@@ -344,7 +443,7 @@ mod tests {
 
     #[test]
     fn byok_beats_gateway_overlay() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = crate::kms::test_env_lock();
         std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw-test-key");
         std::env::set_var("DEEPSEEK_API_KEY", "sk-own-key");
         let c = cfg(&["deepseek"]);
@@ -362,7 +461,7 @@ mod tests {
 
     #[test]
     fn shared_agent_mode_keeps_gateway_forced() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = crate::kms::test_env_lock();
         std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw-test-key");
         std::env::set_var("ZAI_API_KEY", "sk-own-key");
         std::env::set_var("THCLAWS_SHARED_AGENT_DIR", "/tmp/shared-agent-test");
@@ -439,7 +538,7 @@ mod tests {
 
     #[test]
     fn is_active_requires_toggle_and_key() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::kms::test_env_lock();
         std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw_v1_test");
         assert!(is_active(&cfg(&["openai"])), "toggle + key → active");
         assert!(!is_active(&cfg(&[])), "no provider toggled → inactive");
@@ -453,7 +552,7 @@ mod tests {
 
     #[test]
     fn hides_unpriced_models_requires_toggle_and_key() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::kms::test_env_lock();
         std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw_v1_test");
         let cfg_on = cfg(&["dashscope", "google"]);
         assert!(hides_unpriced_models(&cfg_on, "dashscope"));
@@ -475,7 +574,7 @@ mod tests {
 
     #[test]
     fn for_kind_returns_none_when_provider_not_enabled() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::kms::test_env_lock();
         let config = cfg(&["openai"]);
         std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw_v1_test");
         let out = for_kind(&config, ProviderKind::Gemini);
@@ -485,7 +584,7 @@ mod tests {
 
     #[test]
     fn for_kind_returns_none_when_access_key_missing() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::kms::test_env_lock();
         let config = cfg(&["openai"]);
         std::env::remove_var("THCLAWS_GATEWAY_API_KEY");
         let out = for_kind(&config, ProviderKind::OpenAI);
@@ -500,7 +599,7 @@ mod tests {
 
     #[test]
     fn for_kind_uses_fixed_base_url_by_default() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::kms::test_env_lock();
         let config = cfg(&["openai", "anthropic"]);
         std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw_v1_test");
         std::env::remove_var("THCLAWS_GATEWAY_BASE_URL");
@@ -515,7 +614,7 @@ mod tests {
 
     #[test]
     fn for_kind_honors_base_url_env_override() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::kms::test_env_lock();
         let config = cfg(&["openrouter"]);
         std::env::set_var("THCLAWS_GATEWAY_API_KEY", "k");
         std::env::set_var(

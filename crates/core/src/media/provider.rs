@@ -111,6 +111,8 @@ pub struct SpeechRequest {
     pub text: String,
     pub voice: String,
     pub style: Option<String>,
+    /// Language code or name ("th", "en"…); empty = the provider decides.
+    pub language: String,
 }
 
 /// Result of a successful synthesis — a self-contained audio file's bytes
@@ -153,7 +155,7 @@ pub trait SpeechProvider: Send + Sync {
 /// A video-generation request, provider-agnostic. `init_image` empty ⇒
 /// text→video; present ⇒ image→video (the image conditions the first
 /// frame). `aspect_ratio` is the engine's portable tier; each provider
-/// maps it onto what it accepts (Veo only takes 9:16 / 16:9).
+/// maps it onto what it accepts (Omni only takes 9:16 / 16:9).
 #[derive(Debug, Clone)]
 pub struct VideoRequest {
     pub model: String,
@@ -161,13 +163,13 @@ pub struct VideoRequest {
     pub init_image: Option<InputImage>,
     pub aspect_ratio: String,
     pub duration_seconds: u32,
-    /// Output resolution tier, e.g. `720P` / `1080P`. Veo ignores it
-    /// (resolution follows its aspect); DashScope video (happyhorse)
-    /// takes it as a `resolution` parameter that changes pricing.
+    /// Output resolution tier, e.g. `720P` / `1080P`. Omni and LTX take it;
+    /// DashScope video (happyhorse) takes it as a `resolution` parameter
+    /// that changes pricing.
     pub resolution: String,
     /// Frame rate, when the caller pinned one. LTX takes 24/25/48/50 and
     /// the high end is the lever for clean speech (48/50 resolves the
-    /// P/B/M lip closures that 24/25 smears); Veo and DashScope have no
+    /// P/B/M lip closures that 24/25 smears); Omni and DashScope have no
     /// such knob and ignore it.
     pub fps: Option<u32>,
     /// Generate the soundtrack (dialogue, ambience) alongside the video.
@@ -176,9 +178,8 @@ pub struct VideoRequest {
     pub generate_audio: bool,
 }
 
-/// Opaque handle to a provider-side job (e.g. a Veo long-running
-/// operation name). Stored in the job log so a poll can resume after a
-/// restart.
+/// Opaque handle to a provider-side job (e.g. an LTX or DashScope task
+/// id). Stored in the job log so a poll can resume after a restart.
 #[derive(Debug, Clone)]
 pub struct ProviderJobRef {
     pub op: String,
@@ -206,6 +207,18 @@ pub trait VideoProvider: Send + Sync {
             }
         }
         None
+    }
+
+    /// A clip length the provider always returns, whatever was asked
+    /// (Omni: ~10 s); `None` = it honours `duration_seconds`.
+    fn fixed_duration(&self) -> Option<u32> {
+        None
+    }
+
+    /// Renders only 16:9 / 9:16 and crops any other frame to fit (Omni,
+    /// LTX); the engine pads an input image first.
+    fn fixed_aspects(&self) -> bool {
+        false
     }
 
     /// Submit a video job; returns the provider job ref to poll. Fast
@@ -248,7 +261,12 @@ pub fn resolve_endpoint(
     native_base: &str,
     gateway_segment: &str,
 ) -> Result<ResolvedEndpoint> {
-    let native = resolve_native_key(native_key_vars);
+    // A locked install reaches media only through its gateway, like its LLMs.
+    let native = if crate::shared::gateway_providers_locked() {
+        None
+    } else {
+        resolve_native_key(native_key_vars)
+    };
     if let Some(ref key) = native {
         if key != "gateway-placeholder" {
             return Ok(ResolvedEndpoint {
@@ -277,6 +295,34 @@ pub fn resolve_endpoint(
                 "no API key — set one of {native_key_vars:?}, or enable the thClaws Gateway (sign in to thClaws.cloud, add a `gateway` key, or set THCLAWS_GATEWAY_API_KEY)"
             ))
         })
+}
+
+/// Gateway segment for DashScope-native media (Qwen-Image, Wan, HappyHorse).
+/// A locked install reaches Model Studio through whichever DashScope-backed
+/// segment its gateway serves — `sis` is its own Model Studio workspace.
+/// `None` = this install has no route to it.
+pub fn dashscope_media_segment() -> Option<&'static str> {
+    dashscope_segment_for(
+        crate::shared::gateway_providers_locked(),
+        &crate::shared::gateway_routed_providers(),
+    )
+}
+
+pub(crate) fn dashscope_segment_for(locked: bool, routed: &[String]) -> Option<&'static str> {
+    if !locked {
+        return Some("dashscope");
+    }
+    ["dashscope", "sis"]
+        .into_iter()
+        .find(|s| routed.iter().any(|r| r == s))
+}
+
+/// [`resolve_endpoint`] for a DashScope-native media call.
+pub fn resolve_dashscope_endpoint(native_base: &str) -> Result<ResolvedEndpoint> {
+    let segment = dashscope_media_segment().ok_or_else(|| {
+        Error::Tool("DashScope image/video models are not available on this deployment".into())
+    })?;
+    resolve_endpoint(&["DASHSCOPE_API_KEY"], native_base, segment)
 }
 
 /// First non-empty env var among `vars`, with wrapping-quote strip —

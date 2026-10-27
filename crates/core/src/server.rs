@@ -47,7 +47,7 @@ use axum::Router;
 use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
@@ -203,13 +203,90 @@ struct MultiTenantState {
     verifier: Arc<crate::multi_tenant::IdentityVerifier>,
 }
 
+/// `allow_serve = false` forbids an HTTP surface a user opens — the web UI and
+/// the OpenAI-compatible API on a port. The desktop app runs each agent as a
+/// `--serve` child of its own window (bots/supervisor.rs): loopback only,
+/// behind a per-launch token, marked `THCLAWS_SUPERVISED`. Refusing that
+/// would refuse the app itself.
+///
+/// The env marks alone are the user's to set, so the parent must also be this
+/// same binary — the window that spawned the child. That stops the two-variable
+/// shortcut; it is not a sandbox (the user can still reach the app's own
+/// loopback agents).
+fn desktop_internal_serve(bind: &SocketAddr) -> bool {
+    desktop_internal_serve_with(
+        bind,
+        std::env::var("THCLAWS_SUPERVISED").ok().as_deref(),
+        std::env::var("THCLAWS_SERVE_TOKEN").ok().as_deref(),
+    ) && parent_is_this_binary()
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn parent_is_this_binary() -> bool {
+    let ppid = unsafe { libc::getppid() };
+    let own = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.canonicalize().ok());
+    match (exe_of(ppid), own) {
+        (Some(parent), Some(own)) => parent == own,
+        _ => false,
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn parent_is_this_binary() -> bool {
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn exe_of(pid: libc::pid_t) -> Option<std::path::PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()?
+        .canonicalize()
+        .ok()
+}
+
+#[cfg(target_os = "macos")]
+fn exe_of(pid: libc::pid_t) -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    if n <= 0 {
+        return None;
+    }
+    buf.truncate(n as usize);
+    std::path::PathBuf::from(std::ffi::OsString::from_vec(buf))
+        .canonicalize()
+        .ok()
+}
+
+fn desktop_internal_serve_with(
+    bind: &SocketAddr,
+    supervised: Option<&str>,
+    token: Option<&str>,
+) -> bool {
+    bind.ip().is_loopback()
+        && supervised == Some("1")
+        && token.is_some_and(|t| !t.trim().is_empty())
+}
+
+/// `Multipart` caps a request at axum's 2 MB default unless the route says
+/// otherwise, which refused every upload past 2 MB long before the 25 MB
+/// per-file cap `serve_upload` enforces. Room for a full batch plus the
+/// multipart framing.
+fn upload_body_limit() -> DefaultBodyLimit {
+    DefaultBodyLimit::max(
+        crate::uploads::UPLOAD_MAX_FILES * crate::uploads::UPLOAD_MAX_BYTES as usize + 1024 * 1024,
+    )
+}
+
 /// Spin up the server. Spawns the worker, builds the Axum router,
 /// blocks until the listener returns (Ctrl-C / panic / shutdown).
 pub async fn run(config: ServeConfig) -> crate::error::Result<()> {
     // Phase 8: `--serve` opens an HTTP port carrying the web UI and the
     // OpenAI-compatible API. An org that forbids it needs the refusal
     // here, before the bind, not a note in the docs.
-    if !crate::policy::serve_allowed() {
+    if !crate::policy::serve_allowed() && !desktop_internal_serve(&config.bind) {
         return Err(crate::error::Error::Tool(
             "--serve is disabled by org policy (policies.runtime.allow_serve = false)".into(),
         ));
@@ -523,6 +600,7 @@ pub async fn run_with_engine(
     if std::env::var("THCLAWS_SUPERVISED").ok().as_deref() != Some("1") {
         spawn_cloud_heartbeat(ws_connections);
     }
+    spawn_media_poller();
 
     // Loopback-only safety check for the API auth-bypass token. The
     // bypass mode (`THCLAWS_API_TOKEN=disable-auth`) makes the OpenAI
@@ -1016,7 +1094,9 @@ fn classic_router(state: ServeState) -> Router {
     let gated = Router::new()
         .route("/", get(serve_index))
         .route("/ws", get(ws_handler))
-        .route("/upload", post(serve_upload))
+        .route("/upload", post(serve_upload).layer(upload_body_limit()))
+        .route("/api/branding", get(serve_branding))
+        .route("/api/egress", get(serve_egress))
         .route("/gui-shell/{shell_id}", get(serve_gui_shell_index))
         .route("/gui-shell/{shell_id}/", get(serve_gui_shell_index))
         .route(
@@ -1066,6 +1146,14 @@ fn classic_router(state: ServeState) -> Router {
 ///
 /// Step 3 starts exactly one bot, named by a hand-edited `.thclaws/bots.json`.
 pub async fn run_supervisor(bind: SocketAddr) -> crate::error::Result<()> {
+    // A user-launched host is `--serve` whatever it binds; only the desktop
+    // window's own host (run_supervisor_on, bound by the app) may stay on
+    // loopback under allow_serve = false.
+    if !crate::policy::serve_allowed() {
+        return Err(crate::error::Error::Tool(
+            "--serve is disabled by org policy (policies.runtime.allow_serve = false)".into(),
+        ));
+    }
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .map_err(|e| crate::error::Error::Tool(format!("bind {bind}: {e}")))?;
@@ -1078,7 +1166,13 @@ pub async fn run_supervisor(bind: SocketAddr) -> crate::error::Result<()> {
 /// webview's URL before the server starts — asking the OS for a port, closing
 /// it and re-binding is the race `run_on`'s own doc comment warns about.
 pub async fn run_supervisor_on(listener: tokio::net::TcpListener) -> crate::error::Result<()> {
-    if !crate::policy::serve_allowed() {
+    // The desktop window's own host, bound by the app for its webview. Only a
+    // listener off loopback would be the surface `allow_serve` forbids.
+    let loopback = listener
+        .local_addr()
+        .map(|a| a.ip().is_loopback())
+        .unwrap_or(false);
+    if !crate::policy::serve_allowed() && !loopback {
         return Err(crate::error::Error::Tool(
             "--serve is disabled by org policy (policies.runtime.allow_serve = false)".into(),
         ));
@@ -1214,6 +1308,7 @@ fn supervisor_router(sup: Arc<crate::bots::supervisor::BotSupervisor>) -> Router
         .route("/", get(serve_index))
         .route("/ws", get(supervisor_ws))
         .route("/bots", get(supervisor_bots).post(supervisor_add_bot))
+        .route("/bots/templates", get(supervisor_bot_templates))
         .route("/bots/{slug}", axum::routing::delete(supervisor_remove_bot))
         .route("/bots/{slug}/restart", post(supervisor_restart_bot))
         .route("/file-asset/{*rel}", get(supervisor_forward))
@@ -1224,9 +1319,11 @@ fn supervisor_router(sup: Arc<crate::bots::supervisor::BotSupervisor>) -> Router
         .route("/gui-shell/{shell_id}", get(supervisor_forward))
         .route("/gui-shell/{shell_id}/", get(supervisor_forward))
         .route("/gui-shell/{shell_id}/{*rel}", get(supervisor_forward))
-        // No body-limit layer, matching the classic router's `/upload`: the
-        // host must not be a different size of pipe than serving directly.
+        // The host forwards the raw body; the agent's `/upload` enforces the cap.
         .route("/upload", post(supervisor_forward))
+        // The cloud switch is box-wide (hub file + env), so the host answers
+        // it directly — every agent it supervises reads the same file.
+        .route("/api/egress", get(serve_egress))
         // dev-plan/60 G5: /cloud push|pull teleports the whole workspace, so
         // under a host it is the host's to serve — no single agent's tree is
         // the workspace.
@@ -1467,6 +1564,13 @@ async fn supervisor_add_bot(
         )
             .into_response(),
     }
+}
+
+/// The catalogue's Agent Templates, for the host panel's picker — the panel
+/// used to ask for a template name with no way to see which exist. Same URL
+/// and token `/cloud get` would use, so what is listed is what installs.
+async fn supervisor_bot_templates() -> Response {
+    Json(crate::bots::install::templates().await).into_response()
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -1869,7 +1973,10 @@ fn build_shell_router(
             .route("/chat/", get(serve_index))
             .route("/chat", get(serve_index))
             .route("/chat/ws", get(ws_handler))
-            .route("/chat/upload", post(serve_upload));
+            .route(
+                "/chat/upload",
+                post(serve_upload).layer(upload_body_limit()),
+            );
     }
 
     let mut router = router.with_state(state);
@@ -2046,7 +2153,8 @@ fn spawn_cloud_heartbeat(connections: Arc<AtomicUsize>) {
                 _ = transition.notified() => {}
             }
             let connected = connections.load(Ordering::SeqCst) > 0;
-            let busy = crate::agent_activity::is_agent_busy();
+            let busy =
+                crate::agent_activity::is_agent_busy() || MEDIA_RENDERING.load(Ordering::SeqCst);
             // Earliest pending `/schedule` fire, reported so the cloud
             // reaper can resume this workspace in time to run it. On a
             // paused runner nothing is executing when the cron comes
@@ -2090,6 +2198,34 @@ fn spawn_cloud_heartbeat(connections: Arc<AtomicUsize>) {
                     eprintln!("[serve] heartbeat {endpoint} failed: {e}");
                 }
             }
+        }
+    });
+}
+
+/// A video submitted here is still rendering at its provider.
+static MEDIA_RENDERING: AtomicBool = AtomicBool::new(false);
+
+/// Fetch renders whose turn has ended (the user closed the tab) and report
+/// them as busy until they land, so the cloud reaper — which asks
+/// `/healthz` — does not pause the pod under a clip the provider has
+/// already billed. Jobs older than two hours are left for an explicit
+/// `MediaJobStatus`, so a dead provider job cannot keep a pod up forever.
+fn spawn_media_poller() {
+    tokio::spawn(async {
+        let mut tick = tokio::time::interval(Duration::from_secs(30));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            let max_age = chrono::Duration::hours(2);
+            let pending = crate::media::job::pending(max_age).unwrap_or_default();
+            for job in &pending {
+                if let Err(e) = crate::tools::video_gen::advance(&job.id).await {
+                    eprintln!("[serve] media job {} poll failed: {e}", job.id);
+                }
+            }
+            let left = !pending.is_empty()
+                && crate::media::job::pending(max_age).is_ok_and(|p| !p.is_empty());
+            MEDIA_RENDERING.store(left, Ordering::SeqCst);
         }
     });
 }
@@ -2305,8 +2441,30 @@ mod background_job_probe_tests {
     }
 }
 
+/// Branding for the web UI — the same frame the `branding_get` IPC answers.
+async fn serve_branding() -> impl IntoResponse {
+    axum::Json(crate::branding::payload())
+}
+
+/// Whether this thClaws may reach the thClaws cloud — for the AI Server
+/// hub's 🔒/☁️ badge (dev-plan/71). Reports state, never a credential.
+async fn serve_egress() -> impl IntoResponse {
+    let aiserver = crate::aiserver::cached().is_some();
+    let (allowed, source) = crate::providers::thclaws_gateway::cloud_mode();
+    axum::Json(serde_json::json!({
+        "aiserver": aiserver,
+        // Off an AI Server box the gate does not exist: cloud use is allowed.
+        "allow_cloud": !aiserver || allowed,
+        "source": if aiserver { source } else { "not-aiserver" },
+        "cloud_credential": crate::providers::thclaws_gateway::has_cloud_credential(),
+        "switch_file": crate::profile::config_dir().map(|d| d.join("aiserver.json")),
+    }))
+}
+
 async fn serve_health() -> impl IntoResponse {
-    let busy = crate::agent_activity::is_agent_busy() || background_jobs_alive();
+    let busy = crate::agent_activity::is_agent_busy()
+        || background_jobs_alive()
+        || MEDIA_RENDERING.load(Ordering::SeqCst);
     axum::Json(serde_json::json!({
         "ok": true,
         "busy": busy,
@@ -2796,6 +2954,10 @@ async fn handle_socket(socket: WebSocket, state: ServeState, shared: Arc<SharedS
             if let Some(hist) = build_gui_shell_history_payload(sessions_dir) {
                 let _ = initial_dispatch(hist);
             }
+            // Process cwd, same as TodoWrite and the per-turn reminder.
+            let _ = initial_dispatch(crate::tools::todo::todo_update_frame(
+                &std::env::current_dir().unwrap_or_default(),
+            ));
             // A newer release, when the last check found one. Same shape as
             // the desktop's: the cached answer is a file read, so nothing on
             // the path to a usable page waits on github.com, and the refresh
@@ -3131,6 +3293,56 @@ fn build_kms_initial_payload(config: &AppConfig) -> Vec<serde_json::Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_the_apps_own_loopback_agents_pass_a_serve_ban() {
+        use super::desktop_internal_serve_with as ok;
+        let lo: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let any: std::net::SocketAddr = "0.0.0.0:8443".parse().unwrap();
+        assert!(
+            ok(&lo, Some("1"), Some("tok")),
+            "a supervised loopback agent"
+        );
+        assert!(!ok(&any, Some("1"), Some("tok")), "never off loopback");
+        assert!(!ok(&lo, None, Some("tok")), "a user's own --serve");
+        assert!(!ok(&lo, Some("1"), None), "no per-launch token");
+        assert!(!ok(&lo, Some("1"), Some("  ")), "blank token");
+    }
+
+    /// The env marks are the user's to set; a process the app did not spawn
+    /// (here: the test binary, whose parent is cargo) must not pass.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn env_marks_alone_do_not_make_a_desktop_agent() {
+        assert!(!super::parent_is_this_binary());
+    }
+
+    /// Positive control: the same binary as parent (the test binary running
+    /// itself, as the window runs `current_exe()`) does pass.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_child_of_this_binary_passes() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "server::tests::parent_probe",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("THCLAWS_PARENT_PROBE", "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("PARENT=true"), "{stdout}");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    #[ignore]
+    fn parent_probe() {
+        if std::env::var("THCLAWS_PARENT_PROBE").is_ok() {
+            println!("PARENT={}", super::parent_is_this_binary());
+        }
+    }
 
     /// The host can name a shell's agent without asking the browser, which is
     /// the point: the Referer it used to rely on is suppressed by the shell's

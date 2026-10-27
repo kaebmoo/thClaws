@@ -432,6 +432,10 @@ pub enum SlashCommand {
     /// is missing or whose manifest fails to parse. M6.16.1 BUG L2.
     PluginGc,
     Tasks,
+    /// `/todo` shows `.thclaws/state/todos.md`; `/todo clear` deletes it.
+    Todo {
+        clear: bool,
+    },
     Context,
     /// M6.39.4: print the active system prompt as the LLM currently
     /// sees it. Output mode selectable for compactness:
@@ -492,6 +496,12 @@ pub enum SlashCommand {
     SkillInstall {
         git_url: String,
         name: Option<String>,
+        project: bool,
+    },
+    /// `/skill update [--user] <name>` — replace an installed skill with the
+    /// marketplace's current copy.
+    SkillUpdate {
+        name: String,
         project: bool,
     },
     SkillShow(String),
@@ -924,6 +934,8 @@ pub enum CloudSlash {
     List { mine: bool },
     /// `/cloud status` — show resolved URL + whether a token is stored.
     Status,
+    /// `/cloud doctor` — live check of sign-in: token storage, reach, account.
+    Doctor,
     /// `/cloud get <slug>` — install/update the given agent into cwd.
     /// Empty cwd → fresh extract. Non-empty cwd + matching agent UUID
     /// → safe overwrite. Non-empty cwd + mismatching/missing UUID →
@@ -1894,7 +1906,14 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
         "mcp" => parse_mcp_subcommand(args),
         "tools" | "tool" => SlashCommand::Tools,
         "plugin" | "plugins" => parse_plugin_subcommand(cmd, args),
-        "tasks" | "todo" => SlashCommand::Tasks,
+        "tasks" => SlashCommand::Tasks,
+        "todo" | "todos" => match args.trim() {
+            "" | "list" => SlashCommand::Todo { clear: false },
+            "clear" => SlashCommand::Todo { clear: true },
+            other => SlashCommand::Unknown(format!(
+                "unknown /todo subcommand '{other}' — use /todo or /todo clear"
+            )),
+        },
         "context" => SlashCommand::Context,
         "system" => {
             let trimmed = args.trim();
@@ -1980,6 +1999,7 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
             // Supported subcommands:
             //   /skill show <name>                                  — installed-skill detail
             //   /skill install [--user] <url-or-zip-or-name> [name] — install (URL or marketplace name)
+            //   /skill update [--user] <name>                       — replace with the marketplace's copy
             //   /skill marketplace [--refresh]                      — list marketplace
             //   /skill search <query>                               — search marketplace
             //   /skill info <name>                                  — marketplace detail
@@ -2011,6 +2031,19 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
                 } else {
                     SlashCommand::SkillInfo(after_info.to_string())
                 }
+            } else if let Some(after_update) = rest.strip_prefix("update").map(str::trim_start) {
+                let mut parts: Vec<&str> = after_update.split_whitespace().collect();
+                let project = parts.first().copied() != Some("--user");
+                if matches!(parts.first().copied(), Some("--user" | "--project")) {
+                    parts.remove(0);
+                }
+                match parts.as_slice() {
+                    [name] => SlashCommand::SkillUpdate {
+                        name: name.to_string(),
+                        project,
+                    },
+                    _ => SlashCommand::Unknown("usage: /skill update [--user] <name>".into()),
+                }
             } else if let Some(after_install) = rest.strip_prefix("install").map(str::trim_start) {
                 let mut project = true;
                 let mut parts: Vec<&str> = after_install.split_whitespace().collect();
@@ -2039,7 +2072,7 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
                 }
             } else {
                 SlashCommand::Unknown(format!(
-                    "unknown skill subcommand: '{rest}' (try: /skill install, /skill marketplace, /skill search, /skill info)"
+                    "unknown skill subcommand: '{rest}' (try: /skill install, /skill update, /skill marketplace, /skill search, /skill info)"
                 ))
             }
         }
@@ -2250,6 +2283,7 @@ fn parse_cloud_subcommand(args: &str) -> SlashCommand {
         }
         "publish" => SlashCommand::Cloud(CloudSlash::Publish),
         "unbind" => SlashCommand::Cloud(CloudSlash::Unbind),
+        "doctor" | "diag" | "diagnose" => SlashCommand::Cloud(CloudSlash::Doctor),
         // `rev` because this is a thing you check often and mid-flow.
         "revision" | "rev" => {
             let norm = normalize_dashes(rest);
@@ -2308,7 +2342,7 @@ fn parse_cloud_subcommand(args: &str) -> SlashCommand {
         }
         other => SlashCommand::Unknown(format!(
             "unknown cloud subcommand: '{other}' \
-             (try: /cloud status, /cloud list [--mine], /cloud get <slug>, \
+             (try: /cloud status, /cloud doctor, /cloud list [--mine], /cloud get <slug>, \
              /cloud publish, /cloud unbind, /cloud revision, \
              /cloud push|pull [<slug>] [--delete] [--dry-run] [--force-rebind] [--force])"
         )),
@@ -4194,7 +4228,11 @@ fn resolve_skill_install_target(
         Some(entry) => match &entry.install_url {
             Some(url) => (
                 url.clone(),
-                Some(explicit_name.map(String::from).unwrap_or_else(|| entry.name.clone())),
+                Some(
+                    explicit_name
+                        .map(String::from)
+                        .unwrap_or_else(|| entry.name.clone()),
+                ),
                 None,
             ),
             None => (
@@ -4210,7 +4248,8 @@ fn resolve_skill_install_target(
             String::new(),
             None,
             Some(format!(
-                "no skill named '{arg}' in marketplace and not a URL — try /skill search <query> or pass a git URL"
+                "no skill named '{arg}' in marketplace and not a URL — {}",
+                crate::marketplace::not_found_hint("try /skill search <query> or pass a git URL")
             )),
         ),
     }
@@ -4261,7 +4300,8 @@ pub fn resolve_plugin_install_target(arg: &str) -> (String, Option<String>) {
         None => (
             String::new(),
             Some(format!(
-                "no plugin named '{arg}' in marketplace and not a URL — try /plugin search <query> or pass a git URL"
+                "no plugin named '{arg}' in marketplace and not a URL — {}",
+                crate::marketplace::not_found_hint("try /plugin search <query> or pass a git URL")
             )),
         ),
     }
@@ -4303,7 +4343,8 @@ pub async fn install_mcp_from_marketplace(
     let entry = mp
         .find_mcp(name)
         .ok_or_else(|| format!(
-            "no MCP named '{name}' in marketplace — try /mcp search <query>, /mcp add <name> <url> (HTTP), or /mcp add <name> <command> [args...] (stdio) for a custom server"
+            "no MCP named '{name}' in marketplace — {}",
+            crate::marketplace::not_found_hint("try /mcp search <query>, /mcp add <name> <url> (HTTP), or /mcp add <name> <command> [args...] (stdio) for a custom server")
         ))?
         .clone();
 
@@ -4438,7 +4479,8 @@ pub fn built_in_commands() -> &'static [BuiltInCommand] {
         // Team
         BuiltInCommand { name: "subagent", description: "Run / manage named agent defs (<name> <prompt> · new · edit · cancel · list · install · marketplace · search · info)", category: "Team", usage: "<sub|name> [args]" },
         BuiltInCommand { name: "team",     description: "Show team agent status",                     category: "Team", usage: "" },
-        BuiltInCommand { name: "tasks",    description: "List current tasks/todos",                   category: "Team", usage: "" },
+        BuiltInCommand { name: "tasks",    description: "List the agent's Task-tool tasks",           category: "Team", usage: "" },
+        BuiltInCommand { name: "todo",     description: "Show the todo scratchpad (clear deletes it)", category: "Team", usage: "[clear]" },
 
         // Automation
         BuiltInCommand { name: "workflow", description: "Run multi-agent workflows",                  category: "Automation", usage: "run <goal> | exec <path> | list | inspect <id> | resume <id> | rm <id>" },
@@ -4653,7 +4695,8 @@ pub fn render_help() -> &'static str {
                        Toggle a plugin on/off without uninstalling it.\n  \
      /plugin show <name>\n  \
                        Show full manifest details for an installed plugin.\n  \
-     /tasks            List current tasks/todos\n  \
+     /tasks            List the agent's Task-tool tasks\n  \
+     /todo [clear]     Show the todo scratchpad; clear deletes it\n  \
      /context          Show the current system prompt\n  \
      /thinking BUDGET  Set extended-thinking token budget (0 = off)\n  \
      /cwd              Show current working directory\n  \
@@ -4674,6 +4717,8 @@ pub fn render_help() -> &'static str {
      \x20                 Install a skill (or bundle) from a git repo or\n  \
      \x20                 a .zip URL into ./.thclaws/skills/ (default) or\n  \
      \x20                 ~/.config/thclaws/skills/ (--user)\n  \
+     /skill update [--user] NAME\n  \
+     \x20                 Replace an installed skill with the marketplace's copy\n  \
      /kms              List knowledge bases (* = active for this project)\n  \
      /kms new [--user] NAME\n  \
      \x20                 Create a new KMS under ./.thclaws/kms/\n  \
@@ -4751,6 +4796,8 @@ pub fn render_help() -> &'static str {
      \x20                   (fingerprints cached in FOLDER/.thclaws-index.json).\n  \
      /cloud status        Show the configured catalog URL + whether a\n  \
      \x20                   CLI token is stored.\n  \
+     /cloud doctor        Diagnose sign-in: where the token is stored,\n  \
+     \x20                   whether the cloud answers, which account.\n  \
      /cloud list [--mine] Browse thClaws.cloud catalog (dev-plan/34).\n  \
      /cloud get <slug>    Install or update an agent into the current\n  \
      \x20                   folder. Empty folder → fresh install.\n  \
@@ -4810,6 +4857,21 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
     {
         return Err(crate::error::Error::Config(format!(
             "shared agents are gateway-only — '{}' has no gateway route",
+            config.model
+        )));
+    }
+
+    // Gateway-locked install (THCLAWS_GATEWAY_PROVIDERS set): the same rule,
+    // keyed on the providers that install's gateway actually routes — so
+    // `/model` cannot reach the Agent SDK, a local runtime or any upstream
+    // the gateway does not serve. Keyed on the per-model overlay, not just
+    // `for_kind`: an unpriced model has no overlay and would otherwise fall
+    // through to the branches below on a local key, off the gateway.
+    if crate::shared::gateway_providers_locked()
+        && crate::providers::thclaws_gateway::gateway_overlay_for_model(config, kind).is_none()
+    {
+        return Err(crate::error::Error::Config(format!(
+            "'{}' is not available on this deployment — only its gateway's models can be used",
             config.model
         )));
     }
@@ -5603,6 +5665,19 @@ pub async fn build_provider_with_fallback(
     //    user's settings.json is untouched and let the caller
     //    degrade gracefully. No silent swap to a paid provider.
     config.model = original;
+    if let Some(hint) = crate::providers::locked_sign_in_hint() {
+        let offered: Vec<&str> = crate::providers::locked_offered_providers()
+            .iter()
+            .map(|k| k.name())
+            .collect();
+        return (
+            None,
+            Some(format!(
+                "{hint} This deployment offers: {}.",
+                offered.join(", ")
+            )),
+        );
+    }
     (None, Some(
         format!(
             "no usable LLM provider for `{}` and no local fallback (Ollama / LMStudio / vLLM / llama.cpp) reachable. Set an API key via Settings → Provider API keys, run `/model <provider>/<model>` to switch, or start a local runtime (see Chapter 2).",
@@ -5629,6 +5704,63 @@ async fn ollama_is_reachable() -> bool {
 }
 
 /// Save model to project-level `.thclaws/settings.json`.
+/// Book one REPL turn's usage — the per-model tracker, the ledger, the
+/// session's cost, and the session's side calls (subagents, compaction, …)
+/// since the last footer — and return its `[tokens: …]` line. `stopped`
+/// marks a turn that ended without `Done`.
+fn book_repl_turn(
+    config: &AppConfig,
+    session: &mut Session,
+    session_cost_usd: &mut f64,
+    session_cost_for: &mut String,
+    usage: &crate::providers::Usage,
+    elapsed: std::time::Duration,
+    stopped: Option<&str>,
+) -> String {
+    let provider_name = config.detect_provider().unwrap_or("unknown");
+    let tracker = crate::usage::UsageTracker::new(crate::usage::UsageTracker::default_path());
+    tracker.record(provider_name, &config.model, usage);
+    if let Ok(cwd) = std::env::current_dir() {
+        crate::usage::append_usage_ledger(&cwd, "main", provider_name, &config.model, usage);
+    }
+    let side = crate::usage::take_side_usage(&session.id);
+    if let Some(side) = &side {
+        side.record(&tracker);
+    }
+    if *session_cost_for != session.id {
+        *session_cost_usd = session.cost_usd();
+        *session_cost_for = session.id.clone();
+    }
+    // Cost: unknown / tier-billed models price as None — no cost suffix.
+    let turn_cost = crate::model_catalogue::EffectiveCatalogue::load()
+        .compute_cost_usd(
+            &config.model,
+            &crate::model_catalogue::TokenUsage::from_usage(usage),
+        )
+        .unwrap_or(0.0)
+        + side.as_ref().map_or(0.0, |s| s.cost_usd);
+    *session_cost_usd += turn_cost;
+    let cost_str = if *session_cost_usd > 0.0 {
+        format!(" · ${:.4} session", *session_cost_usd)
+    } else {
+        String::new()
+    };
+    let line = format!(
+        "[tokens: {}{} · {}{}{}]",
+        usage.tokens_note(),
+        side.as_ref().map(|s| s.footer_note()).unwrap_or_default(),
+        format_duration(elapsed),
+        stopped.map(|s| format!(" · {s}")).unwrap_or_default(),
+        cost_str
+    );
+    session.turn_usage.push(crate::session::TurnUsage {
+        after: session.messages.len(),
+        text: line.clone(),
+        cost_usd: turn_cost,
+    });
+    line
+}
+
 /// Format a turn duration for the `[tokens: ... · 3.2s]` line.
 /// Short durations render in ms, sub-minute in seconds with one decimal,
 /// longer runs as `1m 23s`.
@@ -5745,6 +5877,7 @@ pub async fn run_print_mode_with(
     // Both binaries call THIS, not the `run_print_mode` wrapper — a hook on
     // the wrapper armed nothing and `-p` shipped PII unmasked.
     config.apply_process_globals();
+    crate::desktop_update::spawn_cli_check();
     let cwd = std::env::current_dir()?;
 
     let mut tool_registry = ToolRegistry::with_builtins();
@@ -5980,6 +6113,7 @@ pub async fn run_print_mode_with(
         .with_max_iterations(config.max_iterations)
         .with_max_tokens(config.max_tokens)
         .with_thinking_budget(config.thinking_budget)
+        .with_browser_fast_steps(config.browser_fast_steps)
         .with_permission_mode(perm_mode)
         .with_ask_tools(config.ask_tools.clone().unwrap_or_default())
         .with_hooks(hooks_arc.clone());
@@ -6031,6 +6165,7 @@ pub async fn run_print_mode_with(
     // thinking onto stdout buries the actual answer and corrupts
     // downstream parsers — so the captured output is just the final text.
     let stdout_is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    crate::gateway_turn::set_session(&session.id);
     let mut stream = Box::pin(agent.run_turn(prompt.to_string()));
     let mut last_was_thinking = false;
     while let Some(ev) = stream.next().await {
@@ -6077,12 +6212,11 @@ pub async fn run_print_mode_with(
                 // (piped / scheduler-captured), so a scheduled run log
                 // always ends with a token + duration footer.
                 if verbose || !stdout_is_tty {
-                    let cache_info = usage.cache_note();
                     let elapsed = format_duration(turn_start.elapsed());
-                    eprintln!(
-                        "[tokens: {}in/{}out{} · {}]",
-                        usage.input_tokens, usage.output_tokens, cache_info, elapsed
-                    );
+                    let side = crate::usage::take_side_usage(&session.id)
+                        .map(|s| s.footer_note())
+                        .unwrap_or_default();
+                    eprintln!("[tokens: {}{side} · {elapsed}]", usage.tokens_note());
                 }
             }
             Err(e) => {
@@ -6350,6 +6484,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     // ensures CLI users get the configurable timeout too (default
     // 120s, override via `stream_chunk_timeout_secs` in settings.json).
     config.apply_process_globals();
+    crate::desktop_update::spawn_cli_check();
 
     let cwd = std::env::current_dir()?;
     // Keep `memory_store` around for the `/memory list/show/dump/...`
@@ -6758,6 +6893,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     .with_max_iterations(config.max_iterations)
     .with_max_tokens(config.max_tokens)
     .with_thinking_budget(config.thinking_budget)
+    .with_browser_fast_steps(config.browser_fast_steps)
     .with_permission_mode(perm_mode)
     .with_ask_tools(config.ask_tools.clone().unwrap_or_default())
     .with_approver(approver.clone())
@@ -7129,6 +7265,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
 
                 // Run the agent turn.
                 repl_cancel.reset();
+                crate::gateway_turn::set_session(&session.id);
                 let mut stream = Box::pin(agent.run_turn(prompt));
                 loop {
                     let heartbeat_delay =
@@ -7227,9 +7364,8 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 &usage,
                             );
                             team_println!(
-                                "\n[tokens: {}in/{}out · {}]",
-                                usage.input_tokens,
-                                usage.output_tokens,
+                                "\n[tokens: {} · {}]",
+                                usage.tokens_note(),
                                 format_duration(turn_start.elapsed())
                             );
                         }
@@ -7435,6 +7571,9 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     // model catalogue after every AgentEvent::Done and shown alongside
     // the per-turn token counts. `/cost reset` zeroes it.
     let mut session_cost_usd: f64 = 0.0;
+    // The session `session_cost_usd` belongs to; a `/load` or `/new`
+    // restarts it from that session's recorded turn costs.
+    let mut session_cost_for = String::new();
 
     // Cardputer cost-display bridge — best-effort BLE central that
     // streams `session_cost_usd` to a `thClaws-Cost-*` peripheral and
@@ -7517,6 +7656,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 lead_log!("{COLOR_GREEN}");
                 let _ = std::io::stdout().flush();
                 repl_cancel.reset();
+                crate::gateway_turn::set_session(&session.id);
                 let mut stream = Box::pin(agent.run_turn(team_prompt));
                 let mut last_was_thinking = false;
                 let mut active_tools: std::collections::HashMap<String, crate::tool_display::ActiveToolDisplay> =
@@ -8155,6 +8295,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     .with_max_iterations(config.max_iterations)
                     .with_max_tokens(config.max_tokens)
                     .with_thinking_budget(config.thinking_budget)
+        .with_browser_fast_steps(config.browser_fast_steps)
                     .with_permission_mode(perm_mode)
                     .with_approver(approver.clone())
                     .with_hooks(std::sync::Arc::new(config.hooks.clone()));
@@ -8184,10 +8325,23 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 SlashCommand::Providers => {
                     use crate::providers::ProviderTier;
                     let current = config.detect_provider_kind().ok();
+                    let locked = crate::shared::gateway_providers_locked();
+                    let kinds = if locked {
+                        println!("{COLOR_BOLD}Available on this deployment (through its gateway):{COLOR_RESET}");
+                        match crate::providers::locked_sign_in_hint() {
+                            Some(hint) => {
+                                println!("{COLOR_YELLOW}{hint}{COLOR_RESET}");
+                                crate::providers::locked_offered_providers()
+                            }
+                            None => crate::providers::locked_install_providers(&config),
+                        }
+                    } else {
+                        ProviderKind::display_ordered()
+                    };
                     let mut last_tier: Option<ProviderTier> = None;
-                    for kind in ProviderKind::display_ordered() {
+                    for kind in kinds {
                         let tier = kind.tier();
-                        if Some(tier) != last_tier {
+                        if !locked && Some(tier) != last_tier {
                             let header = match tier {
                                 ProviderTier::Featured => "Featured (gateway-routable):",
                                 ProviderTier::Additional => "Additional (bring your own key):",
@@ -8251,6 +8405,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     .with_max_iterations(config.max_iterations)
                     .with_max_tokens(config.max_tokens)
                     .with_thinking_budget(config.thinking_budget)
+        .with_browser_fast_steps(config.browser_fast_steps)
                     .with_permission_mode(perm_mode)
                     .with_approver(approver.clone())
                     .with_hooks(std::sync::Arc::new(config.hooks.clone()));
@@ -8736,6 +8891,19 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         }
                     }
                 }
+                SlashCommand::Todo { clear } => {
+                    let root = std::env::current_dir().unwrap_or_default();
+                    if clear {
+                        crate::tools::todo::clear_todos(&root);
+                        println!("{COLOR_DIM}todos cleared{COLOR_RESET}");
+                    } else {
+                        let todos = crate::tools::todo::read_todos_from_disk(&root);
+                        println!(
+                            "{COLOR_DIM}{}{COLOR_RESET}",
+                            crate::tools::todo::render_todos(&todos)
+                        );
+                    }
+                }
                 SlashCommand::Context => {
                     let history = agent.history_snapshot();
                     let blocks: usize = history.iter().map(|m| m.content.len()).sum();
@@ -8927,6 +9095,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     // Allow `/plugin install <name>` to resolve a
                     // marketplace slug to its install_url. If `url`
                     // already looks like a URL, this is a no-op.
+                    crate::marketplace::refresh_private().await;
                     let (effective_url, abort_msg) = resolve_plugin_install_target(&url);
                     if let Some(msg) = abort_msg {
                         println!("{COLOR_YELLOW}{msg}{COLOR_RESET}");
@@ -9313,6 +9482,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 .with_max_iterations(config.max_iterations)
                                 .with_max_tokens(config.max_tokens)
                                 .with_thinking_budget(config.thinking_budget)
+        .with_browser_fast_steps(config.browser_fast_steps)
                                 .with_permission_mode(perm_mode)
                                 .with_approver(approver.clone())
                                 .with_hooks(std::sync::Arc::new(config.hooks.clone()));
@@ -9400,6 +9570,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 .with_max_iterations(config.max_iterations)
                                 .with_max_tokens(config.max_tokens)
                                 .with_thinking_budget(config.thinking_budget)
+        .with_browser_fast_steps(config.browser_fast_steps)
                                 .with_permission_mode(perm_mode)
                                 .with_approver(approver.clone())
                                 .with_hooks(std::sync::Arc::new(config.hooks.clone()));
@@ -9511,6 +9682,10 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     }
                 }
                 SlashCommand::Cost { reset } => {
+                    if session_cost_for != session.id {
+                        session_cost_usd = session.cost_usd();
+                        session_cost_for = session.id.clone();
+                    }
                     if reset {
                         session_cost_usd = 0.0;
                         #[cfg(feature = "cost_bridge")]
@@ -9885,7 +10060,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         let project_prefix = std::env::current_dir()
                             .map(|p| p.join(".thclaws/skills"))
                             .unwrap_or_default();
-                        let user_prefix = home.join(".config/thclaws/skills");
+                        let user_prefix = home.join(format!(".config/{}/skills", crate::profile::app_dir_name()));
                         let claude_prefix = home.join(".claude/skills");
 
                         let level_of = |dir: &std::path::Path| -> &str {
@@ -9932,7 +10107,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     let project_prefix = std::env::current_dir()
                         .map(|p| p.join(".thclaws/skills"))
                         .unwrap_or_default();
-                    let user_prefix = home.join(".config/thclaws/skills");
+                    let user_prefix = home.join(format!(".config/{}/skills", crate::profile::app_dir_name()));
                     let skill_level = |dir: &std::path::Path| -> &str {
                         if dir.starts_with(&project_prefix) {
                             "project"
@@ -9978,6 +10153,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     // or a `<repo>#<branch>:<subpath>` extension, install
                     // directly. Otherwise treat it as a marketplace name
                     // and look up the install_url from the catalogue.
+                    crate::marketplace::refresh_private().await;
                     let (effective_url, effective_name, abort_msg) =
                         resolve_skill_install_target(&git_url, name.as_deref());
                     if let Some(msg) = abort_msg {
@@ -10022,6 +10198,42 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             }
                             Err(e) => {
                                 println!("{COLOR_YELLOW}skill install failed: {e}{COLOR_RESET}");
+                            }
+                        }
+                    }
+                }
+                SlashCommand::SkillUpdate { name, project } => {
+                    crate::marketplace::refresh_private().await;
+                    let (url, _, abort_msg) = resolve_skill_install_target(&name, None);
+                    if let Some(msg) = abort_msg {
+                        println!("{COLOR_YELLOW}{msg}{COLOR_RESET}");
+                    } else {
+                        match crate::skills::update_from_url(&url, &name, project).await {
+                            Ok(report) => {
+                                for line in report {
+                                    println!("{COLOR_DIM}  {line}{COLOR_RESET}");
+                                }
+                                let refreshed = crate::skills::SkillStore::discover();
+                                skill_names = refreshed.skills.keys().cloned().collect();
+                                if let Some(handle) = &skill_store_handle {
+                                    if let Ok(mut store) = handle.lock() {
+                                        *store = refreshed;
+                                    }
+                                }
+                                refresh_repl_system_prompt(
+                                    &mut agent,
+                                    &mut system,
+                                    &factory_snapshot,
+                                    &tool_registry,
+                                    &config,
+                                    &cwd,
+                                    &skill_store_handle,
+                                    &mcp_clients,
+                                    &system_addendum,
+                                );
+                            }
+                            Err(e) => {
+                                println!("{COLOR_YELLOW}skill update failed: {e}{COLOR_RESET}");
                             }
                         }
                     }
@@ -10272,6 +10484,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     }
                 }
                 SlashCommand::SubagentInstall { arg, name, project } => {
+                    crate::marketplace::refresh_private().await;
                     let (effective_url, abort_msg) =
                         crate::agent_defs::resolve_subagent_install_target(&arg);
                     if let Some(msg) = abort_msg {
@@ -12310,6 +12523,12 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 println!("{line}");
                             }
                         }
+                        CloudSlash::Doctor => {
+                            let url = crate::cloud::resolve_cloud_url(None, cloud_cfg.as_ref());
+                            for line in crate::cloud::browser_login::doctor_lines(&url).await {
+                                println!("{line}");
+                            }
+                        }
                         CloudSlash::Unbind => {
                             for line in crate::cloud::cmd::unbind_lines() {
                                 println!("{line}");
@@ -12964,6 +13183,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         let _ = std::io::stdout().flush();
         let turn_start = std::time::Instant::now();
         repl_cancel.reset();
+        crate::gateway_turn::set_session(&session.id);
         let mut stream = Box::pin(agent.run_turn(line.to_string()));
         let mut _cancelled = false;
         let mut last_was_thinking = false;
@@ -12989,6 +13209,20 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     println!("{COLOR_RESET}\n{COLOR_YELLOW}[cancelled by Ctrl-C]{COLOR_RESET}");
                     repl_cancel.cancel();
                     drop(stream);
+                    // The calls finished before the stop were billed.
+                    let partial = agent.partial_turn_usage();
+                    if partial.prompt_tokens() > 0 || partial.output_tokens > 0 {
+                        let line = book_repl_turn(
+                            &config,
+                            &mut session,
+                            &mut session_cost_usd,
+                            &mut session_cost_for,
+                            &partial,
+                            turn_start.elapsed(),
+                            Some("stopped"),
+                        );
+                        println!("{COLOR_DIM}{line}{COLOR_RESET}");
+                    }
                     break;
                 }
                 Some(msgs) = inbox_rx.recv(), if team_enabled => {
@@ -13238,56 +13472,24 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             lead_log!("\n{COLOR_YELLOW}[hit max_iterations]{COLOR_RESET}\n");
                         }
                     }
-                    // Show token usage + elapsed turn duration.
-                    let cache_info = usage.cache_note();
-                    let elapsed = format_duration(turn_start.elapsed());
-                    // Cost: convert provider Usage → catalogue TokenUsage
-                    // (different field names, same numbers), then look up
-                    // the active model's pricing. Unknown / tier-billed
-                    // models return None — we just skip the cost suffix.
-                    let token_usage = crate::model_catalogue::TokenUsage::from_usage(&usage);
-                    let catalogue = crate::model_catalogue::EffectiveCatalogue::load();
-                    if let Some(c) = catalogue.compute_cost_usd(&config.model, &token_usage) {
-                        session_cost_usd += c;
-                    }
+                    // Show token usage + elapsed turn duration, and book it.
+                    let line = book_repl_turn(
+                        &config,
+                        &mut session,
+                        &mut session_cost_usd,
+                        &mut session_cost_for,
+                        &usage,
+                        turn_start.elapsed(),
+                        None,
+                    );
                     // Push the running total to the Cardputer display.
                     // Send fails silently when no device is paired —
                     // we don't want a missing buddy to disrupt the REPL.
                     #[cfg(feature = "cost_bridge")]
                     let _ = cost_bridge.tx_cost.send(session_cost_usd);
-                    let cost_str = if session_cost_usd > 0.0 {
-                        format!(" · ${:.4} session", session_cost_usd)
-                    } else {
-                        String::new()
-                    };
-                    println!(
-                        "\n{COLOR_DIM}[tokens: {}in/{}out{} · {}{}]{COLOR_RESET}",
-                        usage.input_tokens, usage.output_tokens, cache_info, elapsed, cost_str
-                    );
-                    lead_log!(
-                        "\n{COLOR_DIM}[tokens: {}in/{}out{} · {}{}]{COLOR_RESET}\n",
-                        usage.input_tokens,
-                        usage.output_tokens,
-                        cache_info,
-                        elapsed,
-                        cost_str
-                    );
+                    println!("\n{COLOR_DIM}{line}{COLOR_RESET}");
+                    lead_log!("\n{COLOR_DIM}{line}{COLOR_RESET}\n");
                     let _ = std::io::stdout().flush();
-
-                    // Record usage to .thclaws/usage/.
-                    let provider_name = config.detect_provider().unwrap_or("unknown");
-                    let usage_tracker =
-                        crate::usage::UsageTracker::new(crate::usage::UsageTracker::default_path());
-                    usage_tracker.record(provider_name, &config.model, &usage);
-                    if let Ok(cwd) = std::env::current_dir() {
-                        crate::usage::append_usage_ledger(
-                            &cwd,
-                            "main",
-                            provider_name,
-                            &config.model,
-                            &usage,
-                        );
-                    }
 
                     // Auto-save the session after each completed turn.
                     if let Some(store) = &session_store {
@@ -13300,6 +13502,20 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 Err(e) => {
                     println!("{COLOR_RESET}\n{COLOR_YELLOW}error: {e}{COLOR_RESET}");
                     lead_log!("{COLOR_RESET}\n{COLOR_YELLOW}error: {e}{COLOR_RESET}\n");
+                    drop(stream);
+                    let partial = agent.partial_turn_usage();
+                    if partial.prompt_tokens() > 0 || partial.output_tokens > 0 {
+                        let line = book_repl_turn(
+                            &config,
+                            &mut session,
+                            &mut session_cost_usd,
+                            &mut session_cost_for,
+                            &partial,
+                            turn_start.elapsed(),
+                            Some("failed"),
+                        );
+                        println!("{COLOR_DIM}{line}{COLOR_RESET}");
+                    }
                     break;
                 }
             }
@@ -14630,7 +14846,18 @@ mod tests {
     #[test]
     fn parse_slash_new_commands() {
         assert_eq!(parse_slash("/tasks"), Some(SlashCommand::Tasks));
-        assert_eq!(parse_slash("/todo"), Some(SlashCommand::Tasks));
+        assert_eq!(
+            parse_slash("/todo"),
+            Some(SlashCommand::Todo { clear: false })
+        );
+        assert_eq!(
+            parse_slash("/todo clear"),
+            Some(SlashCommand::Todo { clear: true })
+        );
+        assert!(matches!(
+            parse_slash("/todo nuke"),
+            Some(SlashCommand::Unknown(_))
+        ));
         assert_eq!(parse_slash("/context"), Some(SlashCommand::Context));
         assert_eq!(parse_slash("/version"), Some(SlashCommand::Version));
         assert_eq!(parse_slash("/v"), Some(SlashCommand::Version));
@@ -14704,6 +14931,28 @@ mod tests {
                 project: false,
             })
         );
+    }
+
+    #[test]
+    fn parse_slash_skill_update() {
+        assert_eq!(
+            parse_slash("/skill update thai-text-image"),
+            Some(SlashCommand::SkillUpdate {
+                name: "thai-text-image".into(),
+                project: true,
+            })
+        );
+        assert_eq!(
+            parse_slash("/skill update --user thai-text-image"),
+            Some(SlashCommand::SkillUpdate {
+                name: "thai-text-image".into(),
+                project: false,
+            })
+        );
+        assert!(matches!(
+            parse_slash("/skill update"),
+            Some(SlashCommand::Unknown(_))
+        ));
     }
 
     #[test]
@@ -16261,6 +16510,40 @@ mod tests {
     /// `std::env::var(name).is_ok()` returns true for empty values. Still
     /// load-bearing: `provider_has_credentials` gates that switch.
     /// Trace: https://github.com/thClaws/thClaws (screenshot in Thai)
+    #[test]
+    fn a_locked_install_refuses_an_unpriced_model_on_a_local_key() {
+        let _guard = crate::kms::test_env_lock();
+        let vars = [
+            "THCLAWS_GATEWAY_PROVIDERS",
+            "THCLAWS_GATEWAY_API_KEY",
+            "DASHSCOPE_API_KEY",
+        ];
+        let saved: Vec<_> = vars.iter().map(|v| std::env::var(v).ok()).collect();
+        std::env::set_var("THCLAWS_GATEWAY_PROVIDERS", "dashscope");
+        std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw_test");
+        std::env::set_var("DASHSCOPE_API_KEY", "sk-local");
+
+        let mut cfg = AppConfig::default();
+        cfg.gateway_use_for = vec!["dashscope".into()];
+        cfg.model = "dashscope/ccai-pro".into();
+        let unpriced = build_provider(&cfg).map(|_| ());
+        cfg.model = "dashscope/deepseek-v3.2".into();
+        let priced = build_provider(&cfg).map(|_| ());
+
+        for (v, old) in vars.iter().zip(saved) {
+            match old {
+                Some(x) => std::env::set_var(v, x),
+                None => std::env::remove_var(v),
+            }
+        }
+        let err = unpriced.expect_err("unpriced model must not build on a locked install");
+        assert!(
+            format!("{err}").contains("not available on this deployment"),
+            "{err}"
+        );
+        priced.expect("a priced model routes through the gateway");
+    }
+
     #[test]
     fn empty_env_var_treated_as_unset() {
         let _guard = crate::kms::test_env_lock();

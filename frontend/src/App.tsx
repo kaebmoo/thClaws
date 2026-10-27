@@ -19,6 +19,8 @@ import {
   Maximize2,
   Globe,
   Menu,
+  ArrowUp,
+  Home,
 } from "lucide-react";
 import { TerminalView } from "./components/TerminalView";
 import { ChatView } from "./components/ChatView";
@@ -61,6 +63,8 @@ import {
 import { ContextWarningBanner } from "./components/ContextWarningBanner";
 import { useEditingShortcuts } from "./hooks/useEditingShortcuts";
 import { send, subscribe, type IPCMessage } from "./hooks/useIPC";
+import { useBranding } from "./hooks/useBranding";
+import { DesktopUpdateBanner } from "./components/DesktopUpdateBanner";
 
 type Tab = "terminal" | "chat" | "files" | "team" | "ui" | "shell" | "browser";
 
@@ -184,6 +188,128 @@ function FullscreenExitChrome({
   );
 }
 
+type DirListing = {
+  path: string;
+  parent?: string | null;
+  home?: string | null;
+  sep?: string;
+  dirs?: string[];
+  error?: string;
+};
+
+/** --serve has no native folder dialog (the browser may be on another
+ *  machine), so the engine lists the host's folders and this page lets
+ *  the user walk them. The desktop window keeps its native dialog. */
+/** `~/…` for paths under home, so the part the user is choosing stays
+ *  visible when the bar truncates. */
+function shortPath(path: string, home?: string | null) {
+  return home && (path === home || path.startsWith(home + "/") || path.startsWith(home + "\\"))
+    ? "~" + path.slice(home.length)
+    : path;
+}
+
+function DirBrowser({
+  start,
+  onPick,
+  onClose,
+}: {
+  start: string;
+  onPick: (path: string) => void;
+  onClose: () => void;
+}) {
+  const [listing, setListing] = useState<DirListing | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const unsub = subscribe((msg) => {
+      if (msg.type === "dir_listing") {
+        setListing(msg as unknown as DirListing);
+        setLoading(false);
+      }
+    });
+    send({ type: "list_dirs", path: start });
+    return unsub;
+  }, [start]);
+
+  const go = (path: string | null | undefined) => {
+    if (!path) return;
+    setLoading(true);
+    send({ type: "list_dirs", path });
+  };
+  const join = (name: string) => {
+    const sep = listing?.sep ?? "/";
+    const base = listing?.path ?? "";
+    return base.endsWith(sep) ? base + name : base + sep + name;
+  };
+  const btn = {
+    background: "var(--bg-tertiary)",
+    color: "var(--text-secondary)",
+    border: "1px solid var(--border)",
+  };
+
+  return (
+    <div
+      className="fixed inset-0 flex items-center justify-center z-[60]"
+      style={{ background: "var(--modal-backdrop)" }}
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+    >
+      <div
+        className="rounded-lg shadow-2xl max-w-lg w-full mx-4 flex flex-col"
+        style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", maxHeight: "80vh" }}
+      >
+        <div className="flex items-center gap-1.5 p-3 border-b" style={{ borderColor: "var(--border)" }}>
+          <button className="p-1.5 rounded" style={btn} title="Up" disabled={!listing?.parent} onClick={() => go(listing?.parent)}>
+            <ArrowUp size={14} />
+          </button>
+          <button className="p-1.5 rounded" style={btn} title="Home" disabled={!listing?.home} onClick={() => go(listing?.home)}>
+            <Home size={14} />
+          </button>
+          <span className="text-xs font-mono truncate flex-1" style={{ color: "var(--text-primary)", direction: "rtl", textAlign: "left" }} title={listing?.path}>
+            <bdi>
+            {shortPath(listing?.path ?? start, listing?.home)}
+            </bdi>
+          </span>
+        </div>
+        <div className="overflow-y-auto flex-1 py-1" style={{ minHeight: 200 }}>
+          {loading && !listing ? (
+            <p className="text-xs p-3" style={{ color: "var(--text-secondary)" }}>Loading…</p>
+          ) : listing?.error ? (
+            <p className="text-xs p-3" style={{ color: "var(--danger, #e06c75)" }}>{listing.error}</p>
+          ) : (listing?.dirs ?? []).length === 0 ? (
+            <p className="text-xs p-3" style={{ color: "var(--text-secondary)" }}>No sub-folders</p>
+          ) : (
+            (listing?.dirs ?? []).map((d) => (
+              <button
+                key={d}
+                className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-xs hover:opacity-80"
+                style={{ color: "var(--text-primary)" }}
+                onClick={() => go(join(d))}
+                title={join(d)}
+              >
+                <Folder size={13} style={{ color: "var(--text-secondary)" }} />
+                <span className="truncate">{d}</span>
+              </button>
+            ))
+          )}
+        </div>
+        <div className="flex justify-end gap-2 p-3 border-t" style={{ borderColor: "var(--border)" }}>
+          <button className="px-3 py-1.5 rounded text-xs" style={btn} onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            className="px-3 py-1.5 rounded text-xs font-medium"
+            style={{ background: "var(--accent)", color: "#fff", border: "1px solid var(--accent)" }}
+            disabled={!listing?.path || !!listing?.error}
+            onClick={() => listing?.path && onPick(listing.path)}
+          >
+            Use this folder
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function StartupModal({
   onStart,
   force = false,
@@ -197,6 +323,7 @@ function StartupModal({
   force?: boolean;
 }) {
   const [cwd, setCwd] = useState("");
+  const branding = useBranding();
   // The page mounts one App while the bot list loads and one per bot after,
   // so `current_cwd` can land again after the user has started typing. Once
   // they have touched the box it is theirs.
@@ -204,6 +331,7 @@ function StartupModal({
   const [error, setError] = useState("");
   const [showModal, setShowModal] = useState<boolean | null>(null);
   const [picking, setPicking] = useState(false);
+  const [browsing, setBrowsing] = useState(false);
   const [recentDirs, setRecentDirs] = useState<string[]>([]);
   // If we never hear back from the backend, flip this to show a
   // diagnostic instead of an indefinite blank screen. Known-bad
@@ -316,7 +444,7 @@ function StartupModal({
           }}
         >
           <h2 className="text-sm font-semibold mb-3">
-            thClaws couldn't reach its backend
+            {branding.name} couldn't reach its backend
           </h2>
           <p
             className="text-xs mb-3"
@@ -368,6 +496,18 @@ function StartupModal({
       className="fixed inset-0 flex items-center justify-center z-50"
       style={{ background: "var(--modal-backdrop)" }}
     >
+      {browsing && (
+        <DirBrowser
+          start={cwd}
+          onClose={() => setBrowsing(false)}
+          onPick={(path) => {
+            setBrowsing(false);
+            edited.current = true;
+            setCwd(path);
+            setError("");
+          }}
+        />
+      )}
       <div
         className="rounded-lg shadow-2xl p-6 max-w-lg w-full mx-4"
         style={{
@@ -385,7 +525,7 @@ function StartupModal({
           </h2>
         </div>
         <p className="text-xs mb-3" style={{ color: "var(--text-secondary)" }}>
-          thClaws will operate inside this directory. All file tools are
+          {branding.name} will operate inside this directory. All file tools are
           sandboxed to it. Change it now if needed.
         </p>
         <div className="flex gap-1.5 mb-1">
@@ -416,8 +556,14 @@ function StartupModal({
               border: "1px solid var(--border)",
             }}
             onClick={() => {
-              setPicking(true);
-              send({ type: "pick_directory", start: cwd });
+              // Only the desktop window has a native dialog; --serve
+              // browses the host's folders in the page.
+              if (typeof window !== "undefined" && window.ipc) {
+                setPicking(true);
+                send({ type: "pick_directory", start: cwd });
+              } else {
+                setBrowsing(true);
+              }
             }}
             disabled={picking}
             title="Browse for directory"
@@ -485,6 +631,7 @@ function StartupModal({
 // ── Main app ─────────────────────────────────────────────────────────
 
 export default function App() {
+  const branding = useBranding();
   // Wire up Cmd+C / Cmd+X / Cmd+V / Cmd+A / Cmd+Z for every <input>
   // and <textarea> in the app. Wry doesn't forward the macOS edit-menu
   // shortcuts by default; without this the user has to right-click
@@ -1051,6 +1198,20 @@ export default function App() {
     // the shell's flex row.
     <div className="fixed right-0 top-0 left-[var(--rail-w,0px)] flex flex-col h-[100dvh] overflow-clip">
       <FrontendReadyBeacon />
+      {branding.banner && !fullscreen && (
+        <div
+          className="px-3 py-1 text-xs text-center truncate"
+          style={{
+            background: "var(--bg-tertiary, var(--bg-secondary))",
+            color: "var(--text-secondary)",
+            borderBottom: "1px solid var(--border)",
+          }}
+          title={branding.banner}
+        >
+          {branding.banner}
+        </div>
+      )}
+      <DesktopUpdateBanner />
       {fullscreen && (
         <FullscreenExitChrome
           onExit={() => setFullscreen(false)}
@@ -1234,11 +1395,10 @@ export default function App() {
             session can carry both, one, or neither. */}
         <GoalSidebar />
         {/* Todo-list sidebar. Mirrors PlanSidebar's right-edge layout
-            but displays the `TodoWrite` scratchpad — display-only, no
-            action buttons. Hidden until the first `chat_todo_update`
-            envelope lands; the worker hydrates from
-            `.thclaws/todos.md` at boot so reopening a project shows
-            the prior list immediately. */}
+            but displays the `TodoWrite` scratchpad; its one action is
+            Clear. Hidden while the list is empty; the engine re-sends
+            `.thclaws/state/todos.md` on every `frontend_ready` so
+            reopening a project shows the prior list immediately. */}
         <TodoSidebar />
         {/* Plan-mode sidebar (M1). Renders nothing when no plan is
             active — plan_state's broadcaster fires `chat_plan_update`
@@ -1387,7 +1547,7 @@ export default function App() {
           }}
         >
           <span>
-            thClaws <strong>{update.version}</strong> is available
+            {branding.name} <strong>{update.version}</strong> is available
           </span>
           <button
             type="button"

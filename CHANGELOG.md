@@ -7,6 +7,202 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.146.0] — 2026-10-25
+
+**On an AI Server box, nothing goes to the thClaws cloud unless the box allows it.** 0.145 kept documents and recordings on the box; 0.146 closes the rest and gives the box's hub an on/off switch.
+
+### Added
+
+- **A cloud switch the AI Server hub controls.** The hub turns cloud use on or off by writing `{"allowCloud": true|false}` to `~/.config/thclaws/aiserver.json`; it takes effect on the next tool call, with no restart. `GET /api/egress` reports what is being enforced (and whether a thClaws Cloud login exists, never the key), so the hub can show it. `THCLAWS_ALLOW_CLOUD=1` or `=0` still pins it.
+
+### Fixed
+
+- **Searches, media and scripts no longer leave an AI Server box through a cloud login.** WebSearch (Tavily/Brave), YouTube transcripts and web scraping, image/video/speech generation, and the gateway key handed to scripts all used the thClaws gateway whenever a cloud login was present. On a box they are now off by default; web search falls back to DuckDuckGo. Desktop, thClaws.cloud and Enterprise installs are unchanged.
+
+## [0.145.0] — 2026-10-25
+
+**thClaws on an AI Server box keeps your data on the box.** On a DGX Spark or Station running AI Server, documents and recordings are processed by the box's own services and are never sent to the cloud, and the box's RAG engine is available to the agent with no setup.
+
+### Added
+
+- **AI Server services are found automatically.** thClaws reads the box's discovery document for its document service, speech recognition, RAG engine and studios, and uses the ones that are running.
+- **The box's RAG engine is ready to use.** When AI Server's RAG engine is running, the agent can search and read the documents in your namespaces through it (`search_knowledge`, `read_document`, `list_sources`).
+- **WatchVideo accepts audio-only files.** A phone recording of a meeting (mp3, m4a, wav) returns its transcript instead of failing.
+
+### Fixed
+
+- **Documents and audio stay on an AI Server box.** File conversion, OCR, previews and WatchVideo transcription used to fall back to the thClaws cloud whenever a cloud login was present. On a box they now use its local services, and otherwise stop with an explanation (`THCLAWS_ALLOW_CLOUD_RENDER=1` / `THCLAWS_ALLOW_CLOUD_ASR=1` opt back in).
+- **KMS search in downloaded builds.** Release builds now include the BM25 search index (with Thai matching) that other builds already had; `KmsSearch` no longer falls back to a plain pattern search.
+- **AI buttons in agent-built UI tabs work.** The custom-tab event payloads are now documented and the starter templates read them correctly, so a tab's "ask AI" button shows the answer instead of nothing.
+
+### Changed
+
+- **Clearer note for gateway-routed `auto` models.** When AI Server chooses the model, the message explains why your thinking level is not sent and how to pin a model.
+
+## [0.144.0] — 2026-10-23
+
+**Craft and edit Office documents through the agent, with Thai text handled properly.** Word, Excel and PowerPoint apps now run as engine-managed tools, the agent replies in your language for the whole conversation, and Files previews render Office documents as PDFs instead of dropping tables and charts.
+
+### Added
+
+- **Office documents over MCP.** GridCraft, WordCraft and DeckCraft run as engine-managed servers so spreadsheets, documents and decks can be created and edited, with a Thai fixup applied on save.
+- **Office-apps skill.** One kind of digit per file, no made-up names or numbers, explicit column widths with right-aligned number headers, and single-page-wide printing.
+- **Stable OpenCode sessions.** The OpenCode integration sends a consistent `x-opencode-session` to stop 400 `MissingSessionID` errors ([#228](https://github.com/thClaws/thClaws/issues/228)).
+
+### Fixed
+
+- **Thai DOCX tables and line breaks.** Cell margins are added so tone marks and upper vowels clear the borders, and Thai runs are tagged `th-TH` complex script so Word for Mac breaks lines at words.
+- **PDF exports carry document fixes.** A file saved in Word or Deck is reloaded before export so the PDF includes the corrections.
+- **The Thai fixup runs only on real edits.** Tools that merely open or read a file no longer trigger the fixup.
+- **Replies stay in your language.** The system prompt keeps the model answering in the user's language for the whole conversation ([#227](https://github.com/thClaws/thClaws/issues/227)).
+
+### Changed
+
+- **Files preview renders Office documents as PDFs.** `.docx` and `.xlsx` previews are rendered like `.pptx` rather than extracted as text, so Word tables and charts are kept.
+
+## [0.143.0] — 2026-10-22
+
+**Office documents, honest usage numbers, and a tidier model catalogue.** DocConvert and PdfRead now work in hosted workspaces with OCR proofreading, usage books side calls and stopped turns against a single token definition, and models Alibaba no longer serves are hidden.
+
+### Added
+
+- **Office documents in hosted workspaces.** DocConvert and PdfRead run through the document service with automatic OCR — the model proofreads tesseract against every page image — plus xlsx/read fixes.
+
+### Fixed
+
+- **Thai DOCX documents render correctly.** Sarabun sits at the Latin size, headings use real heading styles, and bullets render instead of dropping.
+- **XlsxEdit writes formulas.** A value starting with `=` is stored as a formula rather than literal text.
+- **PPTX preview and PDF glyphs.** PPTX preview works under a workspace host, and PdfCreate substitutes symbols its fonts lack.
+- **Private marketplace listings stay current.** The private catalogue is refetched before install-by-name and listings, so the organisation's latest entries are offered.
+- **Publishing to the web reports progress.** The files tool now says publishing is running and where the link will land.
+
+### Changed
+
+- **Usage accounting unified.** Side calls, stopped turns and per-session cost are booked, and every place shares one token definition so session and totals views agree.
+- **Model catalogue and pricing refreshed.** Models Alibaba no longer serves, realtime-only rows and unpriced entries are hidden; DashScope's qwen-vl-ocr joins the catalogue; and implicit-cache hits are priced at the provider's bill rates.
+
+## [0.142.0] — 2026-10-20
+
+**`--serve` fixes and tighter Enterprise install controls.** Messages typed while the agent works are no longer stranded, pasted images work in the browser, Browse picks a working folder, and an org policy can now lock out local MCP servers.
+
+### Added
+
+- **Enterprise: private marketplace.** With `policies.marketplace` (EE desktops) or `THCLAWS_INSTALL_SOURCE=marketplace` (hosted workspaces), skills, plugins, subagents and MCP servers install only by name from the organisation's own catalogue; URL, path and `/mcp add` installs are refused, and an unreachable catalogue offers nothing. The catalogue and its downloads carry the cloud sign-in token, sent only to the marketplace's own host.
+
+### Fixed
+
+- **Messages typed during a turn are always answered.** A message sent while the agent was working stayed "QUEUED" for good when the turn ended without another tool call. It is now sent as the next message.
+- **Pasting an image works in `--serve`.** The chat used to hang; the image now goes to the agent like in the desktop app.
+- **Reconnecting clears a stale "working" state**, and pressing Stop on an idle agent no longer leaves the chat waiting.
+- **Permanent provider errors are not retried.** A 400/401/403/404 answer used to be retried three times before you saw it; 408 and 429 still retry.
+- **Qwen thinking at High no longer fails on DashScope.** The thinking budget is kept below the model's output cap.
+- **Plugin allow-list: an `@` in a URL's path or query no longer passes as the allowed host.** `https://evil.example/x@allowed.host/skill.zip` matched `allowed.host` while the download went to evil.example.
+- **Browse works in `--serve`.** The working-directory picker's Browse button sent a request only the desktop window answers, so in a browser it did nothing. `--serve` now opens a folder browser in the page: walk the host's folders, go up or home, and pick one. The desktop app keeps its native dialog, and multi-user servers refuse to list folders.
+
+### Changed
+
+- **Enterprise: `allow_external_mcp: false` now refuses local (stdio) MCP servers** wherever they come from — `/mcp add`, the marketplace, a plugin or a hand-edited `mcp.json` — and HTTP servers must match `allowed_hosts`. The check runs when a server is saved and again when it starts. Skill and plugin downloads re-check every redirect against the list.
+- **Model catalogue and Appendix A refreshed.** Provider test fixtures that leaked into a vendor's model list are no longer offered as models.
+- **Dependencies:** `quinn-proto` updated to 0.11.19 (RUSTSEC-2026-0338/0339/0340/0342); frontend `source-map-js` and `brace-expansion` bumped.
+
+## [0.141.0] — 2026-10-10
+
+**A release about consent and boundaries.** Approvals — for spawned commands, symlinked writes, shares, and served workspaces — now land where the settings say they should, and a handful of server-side stumbles got fixed.
+
+### Changed
+
+- **`--serve` policy is tightened and unified.** With `allow_serve=false` a `--serve` host is now refused even on loopback, and the desktop exemption only applies when the desktop app is the actual parent.
+
+### Fixed
+
+- **Writes through an approved symlink open exactly what was approved.** The landing is resolved once, by the sandbox check, and Write opens that path; the final open still refuses a link swapped in afterwards. Thanks @mikemikimike ([#223](https://github.com/thClaws/thClaws/pull/223)).
+- **A gateway-locked install never falls back to local keys.** An unpriced model, WebSearch, Gemini TTS and HAL are refused with a sign-in message instead of quietly using a key found on the machine.
+- **MCP spawn approvals are keyed on the whole command.** The allowlist an MCP tool needs to launch a process now matches the full command line, a bare legacy allowlist entry still covers the user's own servers, and a refused launch names the whole command it blocked.
+- **New agents inherit the workspace instructions and pick up new skills.** An agent now starts from the workspace's instructions and picks up skills that were registered after the engine loaded.
+- **Thai ID numbers are masked no matter how they're written.** IDs printed with dashes or spaces, or appearing right after a spaced number, are now caught and masked by the sensitive-data scanner.
+- **Subagents follow the live permission mode.** A subagent now obeys the current approval mode rather than the one it was started with.
+- **Tools registered after boot respect `disallowedTools`.** A tool added after the session started could still run when the session had forbidden it; the restriction now covers late-registered tools too.
+- **Enterprise workspace sharing is refused, not just hidden.** The share API now refuses on Enterprise Editions and old shares stay revocable, matching the no-sharing policy instead of silently reaching it.
+- **`/talk` no longer opens the relay socket on Enterprise Editions.** The endpoint now stays closed upfront rather than opening a socket it should never use.
+- **Renaming a session in the GUI does it for real.** The `/rename` command now sets the session's stored name, not just the copy shown on screen.
+- **A reloaded tab gets back the approval it was waiting on.** If a served workspace is reloaded while an approval is pending, the pending approval is restored instead of being lost.
+- **Uploads over 2 MB no longer fail.** Larger file uploads to a served workspace used to break; they now go through.
+- **A template never wipes a starting multi-agent workspace.** When a hosted workspace already has several agents, applying a template no longer clears them.
+
+## [0.140.0] — 2026-10-06
+
+**A release about first launches.** Two things that only went wrong the first
+time: a brand-new folder opened as a single agent until the app was reopened,
+and a sign-in made before the key-storage question was answered could not save
+its token.
+
+### Fixed
+- **A new folder holds more than one agent from the first launch.** An empty or
+  plain folder used to open as a single-agent workspace and only become a
+  multi-agent one the second time the app opened it, so a new workspace showed
+  no agents until a restart. It is set up with its first agent straight away
+  now; existing single-agent workspaces still upgrade as before.
+- **Signing in before choosing where keys are stored works.** Until the
+  first-run storage question is answered, tokens and keys are kept in the
+  profile's `.env` — which is what thClaws already did everywhere else — instead
+  of failing with "keychain disabled by user preference". This affected a
+  browser sign-in from the CLI on a fresh install, and the remote-agent token.
+
+## [0.139.0] — 2026-10-06
+
+**A release about running thClaws inside an organisation.** An install locked to
+its organisation's gateway now behaves like one end to end: the person signs in
+through the browser instead of pasting a key, every tool — chat, images, video,
+voice — goes through that gateway and offers only what it serves, the app says
+when an update is available or required, and an enterprise build keeps its
+settings and keys apart from a personal thClaws on the same machine. Nothing
+changes for an install with no organisation policy.
+
+### Added
+- **Browser sign-in for an organisation gateway.** A desktop locked to its
+  organisation's gateway shows "Sign in to …" where it used to ask for an API
+  key; the browser signs in with the organisation's identity provider and hands
+  a token back over a loopback + PKCE exchange. **Sign out** revokes the token
+  on the server, not just on this machine, and says so when the server cannot
+  be reached.
+- **Update notices.** When the organisation publishes a newer build, the app
+  shows a banner (and a line in the terminal and CLI) — "available", "required
+  by <date>", or "blocked" once the organisation enforces a minimum version. A
+  refused request explains the update instead of retrying.
+- **`/cloud doctor`.** Checks sign-in live: where the token is stored (env,
+  keychain cache vs. the keychain itself), whether the cloud answers, which
+  account it is, and whether the model is ready. Sign-in also writes a
+  `[sign-in]` line for every step to the engine log (`/logs`).
+- **Credits on the sidebar** for an organisation that caps usage, and a clear
+  message when a request is refused for being over the limit.
+- **The todo scratchpad is visible and clearable** from the UI.
+
+### Changed
+- **A gateway-locked install offers only its gateway's providers** — in the
+  model picker, `/providers`, and the image, video and voice tools — and
+  starts on the model its policy names. `THCLAWS_GATEWAY_PROVIDERS` replaces
+  the compiled gateway set when an install serves a different one.
+- **A skill runs on the model you chose**, never on one it recommends.
+- **An organisation build keeps its own profile**: its own config folder and
+  keychain service, so a personal install's keys and settings on the same
+  machine are not picked up, and it no longer reads `~/.claude` content
+  (MCP servers, skills, agents, commands) from the user's home.
+- **Model catalogue refreshed**: Claude Sonnet 5.5 and GPT-6.1 Sol among the
+  additions, retired models removed, International rates for GLM 5.x and
+  kimi-k2.7-code on DashScope, and deepseek-v3.2 on DashScope no longer priced
+  at the mainland rate.
+
+### Fixed
+- **A locked gateway can no longer be bypassed by a stray key.** A provider key
+  left in the shared environment by another install no longer takes an
+  organisation's traffic off its gateway.
+- **The desktop's own agents start when serving is disabled by policy.**
+- **Windows:** sign-in URLs no longer get cut at `&`, and the app's agent
+  processes no longer open console windows.
+- **DashScope text-to-speech audio** is downloaded over https.
+- **`/kms ingest`** resolves relative paths at the workspace root again, in the
+  GUI as well as the CLI.
+
 ## [0.138.0] — 2026-09-25
 
 **A release about an agent being able to reach its own files.** A workspace with

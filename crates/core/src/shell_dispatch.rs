@@ -206,9 +206,28 @@ pub async fn dispatch(
                 "tasks are maintained by the agent's `Task` tool during a turn; ask the agent to list them.".into(),
             );
         }
+        SlashCommand::Todo { clear } => {
+            // clear_todos broadcasts the empty list, so the sidebar empties too.
+            let root = std::env::current_dir().unwrap_or_default();
+            let text = if clear {
+                crate::tools::todo::clear_todos(&root);
+                "todos cleared".to_string()
+            } else {
+                crate::tools::todo::render_todos(&crate::tools::todo::read_todos_from_disk(&root))
+            };
+            emit(events_tx, text);
+        }
         SlashCommand::Usage => {
-            let tracker =
-                crate::usage::UsageTracker::new(crate::usage::UsageTracker::default_path());
+            // A multiuser pod books each member's turns under their own
+            // usage dir; the default path is the pod's, which they never
+            // write.
+            let tracker = crate::usage::UsageTracker::new(
+                state
+                    .session_roots
+                    .as_ref()
+                    .map(|r| r.usage_dir.clone())
+                    .unwrap_or_else(crate::usage::UsageTracker::default_path),
+            );
             emit(events_tx, tracker.summary());
         }
         SlashCommand::Doctor { fix } => {
@@ -227,6 +246,28 @@ pub async fn dispatch(
             use crate::providers::ProviderTier;
             let current = state.config.detect_provider_kind().ok();
             let mut out = String::from("Providers:\n");
+            if crate::shared::gateway_providers_locked() {
+                out.push_str("\nAvailable on this deployment (through its gateway):\n");
+                let hint = crate::providers::locked_sign_in_hint();
+                if let Some(h) = &hint {
+                    out.push_str(&format!("  {h}\n"));
+                }
+                let kinds = if hint.is_some() {
+                    crate::providers::locked_offered_providers()
+                } else {
+                    crate::providers::locked_install_providers(&state.config)
+                };
+                for kind in kinds {
+                    let marker = if Some(kind) == current { "*" } else { " " };
+                    out.push_str(&format!(
+                        "  {marker} {:<12} → {}\n",
+                        kind.name(),
+                        kind.default_model(),
+                    ));
+                }
+                emit(events_tx, out);
+                return;
+            }
             let mut last_tier: Option<ProviderTier> = None;
             for kind in crate::providers::ProviderKind::display_ordered() {
                 let tier = kind.tier();
@@ -662,16 +703,30 @@ pub async fn dispatch(
             let title = title.trim();
             if title.is_empty() {
                 emit(events_tx, "usage: /rename <title>".into());
-            } else {
-                state.session.title = Some(title.to_string());
-                if let Some(store) = &state.session_store {
-                    let history = state.agent.history_snapshot();
-                    if !history.is_empty() {
-                        state.session.sync(history);
-                    }
-                    let _ = store.save(&mut state.session);
+            } else if let Some(store) = &state.session_store {
+                // A title lives only as a `rename` line in the file, which
+                // `save` never writes — the sidebar and /sessions read it from
+                // there. Same order as the CLI: land the file, then rename.
+                let history = state.agent.history_snapshot();
+                if !history.is_empty() {
+                    state.session.sync(history);
                 }
-                emit(events_tx, format!("session renamed → {title}"));
+                match store
+                    .save(&mut state.session)
+                    .and_then(|_| store.rename(&state.session.id, title))
+                {
+                    Ok(updated) => {
+                        state.session.title = updated.title;
+                        emit(events_tx, format!("session renamed → {title}"));
+                        let _ = events_tx.send(ViewEvent::SessionListRefresh(build_session_list(
+                            &state.session_store,
+                            &state.session.id,
+                        )));
+                    }
+                    Err(e) => emit(events_tx, format!("rename failed: {e}")),
+                }
+            } else {
+                emit(events_tx, "no session store available".into());
             }
         }
 
@@ -853,6 +908,7 @@ pub async fn dispatch(
             );
         }
         SlashCommand::Cost { reset } => {
+            crate::shared_session::sync_session_cost(state);
             if reset {
                 state.session_cost_usd = 0.0;
                 #[cfg(feature = "cost_bridge")]
@@ -1658,6 +1714,7 @@ pub async fn dispatch(
             // Resolve marketplace name → install_url (or fall through
             // for a URL). See `repl::resolve_skill_install_target` for
             // the same logic in the CLI surface.
+            crate::marketplace::refresh_private().await;
             let (effective_url, effective_name, abort_msg) =
                 resolve_skill_install_target_gui(&git_url, name.as_deref());
             if let Some(msg) = abort_msg {
@@ -1691,6 +1748,31 @@ pub async fn dispatch(
                 Err(e) => emit(events_tx, format!("skill install failed: {e}")),
             }
         }
+        SlashCommand::SkillUpdate { name, project } => {
+            crate::marketplace::refresh_private().await;
+            let (url, _, abort_msg) = resolve_skill_install_target_gui(&name, None);
+            if let Some(msg) = abort_msg {
+                emit(events_tx, msg);
+                return;
+            }
+            match crate::skills::update_from_url(&url, &name, project).await {
+                Ok(report) => {
+                    let refreshed = crate::skills::SkillStore::discover();
+                    if let Ok(mut store) = state.skill_store.lock() {
+                        *store = refreshed;
+                    }
+                    state.rebuild_system_prompt();
+                    if let Err(e) = state.rebuild_agent(true) {
+                        emit(events_tx, format!("rebuild failed: {e}"));
+                        return;
+                    }
+                    let mut out = report.join("\n");
+                    out.push_str("\n(the new version is live in this session — no restart needed)");
+                    emit(events_tx, out);
+                }
+                Err(e) => emit(events_tx, format!("skill update failed: {e}")),
+            }
+        }
         SlashCommand::SkillMarketplace { refresh } => {
             if refresh {
                 match crate::marketplace::refresh_from_remote().await {
@@ -1708,6 +1790,7 @@ pub async fn dispatch(
                     ),
                 }
             }
+            crate::marketplace::refresh_private().await;
             let mp = crate::marketplace::load();
             // M6.11 (H2): include cache freshness in the header so
             // users see how old their snapshot is at a glance.
@@ -1803,6 +1886,7 @@ pub async fn dispatch(
                     emit(events_tx, format!("refresh failed: {e}"));
                 }
             }
+            crate::marketplace::refresh_private().await;
             let mp = crate::marketplace::load();
             let age_suffix = match crate::marketplace::cache_age_label() {
                 Some(label) => format!(", {label}"),
@@ -1876,6 +1960,7 @@ pub async fn dispatch(
             }
         }
         SlashCommand::SubagentInstall { arg, name, project } => {
+            crate::marketplace::refresh_private().await;
             let (effective_url, abort_msg) =
                 crate::agent_defs::resolve_subagent_install_target(&arg);
             if let Some(msg) = abort_msg {
@@ -1914,6 +1999,7 @@ pub async fn dispatch(
                     emit(events_tx, format!("refresh failed: {e}"));
                 }
             }
+            crate::marketplace::refresh_private().await;
             let mp = crate::marketplace::load();
             // Installed-name sets for the [installed ✓] badges. Skills
             // from the live SkillStore; subagents from the loaded defs
@@ -1947,6 +2033,7 @@ pub async fn dispatch(
                     emit(events_tx, format!("refresh failed: {e}"));
                 }
             }
+            crate::marketplace::refresh_private().await;
             let mp = crate::marketplace::load();
             let age_suffix = match crate::marketplace::cache_age_label() {
                 Some(label) => format!(", {label}"),
@@ -2062,6 +2149,7 @@ pub async fn dispatch(
                     emit(events_tx, format!("refresh failed: {e}"));
                 }
             }
+            crate::marketplace::refresh_private().await;
             let mp = crate::marketplace::load();
             let age_suffix = match crate::marketplace::cache_age_label() {
                 Some(label) => format!(", {label}"),
@@ -2321,7 +2409,9 @@ pub async fn dispatch(
             let source = if source.is_absolute() {
                 source
             } else {
-                state.cwd.join(&source)
+                // state.cwd is the agent's own folder under a workspace host;
+                // the user's files are at the workspace root (dev-plan/61).
+                crate::workdir::current_workdir().join(&source)
             };
             // A directory ingests every supported file under it. Seeding
             // a KMS from a notes folder or a docs tree was otherwise a
@@ -2419,7 +2509,9 @@ pub async fn dispatch(
             let source = if source.is_absolute() {
                 source
             } else {
-                state.cwd.join(&source)
+                // state.cwd is the agent's own folder under a workspace host;
+                // the user's files are at the workspace root (dev-plan/61).
+                crate::workdir::current_workdir().join(&source)
             };
             match crate::kms::ingest_pdf(&k, &source, alias.as_deref(), force, None).await {
                 Ok(r) => {
@@ -3301,6 +3393,7 @@ pub async fn dispatch(
         }
         SlashCommand::PluginInstall { url, user, force } => {
             // Resolve marketplace slug → install_url (no-op for URLs).
+            crate::marketplace::refresh_private().await;
             let (effective_url, abort_msg) = crate::repl::resolve_plugin_install_target(&url);
             if let Some(msg) = abort_msg {
                 emit(events_tx, msg);
@@ -4068,6 +4161,14 @@ pub async fn dispatch(
                             crate::cloud::cmd::publish_cwd_lines(&cwd, None, cloud_cfg.as_ref())
                                 .await;
                         emit(lines.join("\n"));
+                    }
+                    CloudSlash::Doctor => {
+                        let url = crate::cloud::resolve_cloud_url(None, cloud_cfg.as_ref());
+                        emit(
+                            crate::cloud::browser_login::doctor_lines(&url)
+                                .await
+                                .join("\n"),
+                        );
                     }
                     CloudSlash::Unbind => {
                         // Single block, same reasoning as Status above.
@@ -5105,7 +5206,8 @@ fn resolve_skill_install_target_gui(
             String::new(),
             None,
             Some(format!(
-                "no skill named '{arg}' in marketplace and not a URL — try /skill search <query> or pass a git URL"
+                "no skill named '{arg}' in marketplace and not a URL — {}",
+                crate::marketplace::not_found_hint("try /skill search <query> or pass a git URL")
             )),
         ),
     }

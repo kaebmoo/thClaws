@@ -3,6 +3,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { send, subscribe } from "../hooks/useIPC";
+import { currentBranding } from "../hooks/useBranding";
 import { promptHistory, recordPrompt } from "../hooks/promptHistory";
 import { useTheme } from "../hooks/useTheme";
 import { SlashCommandPopup } from "./SlashCommandPopup";
@@ -327,7 +328,7 @@ export function TerminalView({ active, modalOpen }: Props) {
         BANNER +
         "\x1b[0m" +
         "\r\n" +
-        "\x1b[2mthClaws — type a message, or /help for commands\x1b[0m\r\n",
+        `\x1b[2m${currentBranding().name} — type a message, or /help for commands\x1b[0m\r\n`,
     );
 
     // Wait briefly for `initial_state` to arrive before writing the
@@ -888,6 +889,10 @@ export function TerminalView({ active, modalOpen }: Props) {
         // turn (setState bailouts on equal value), so the per-event
         // hot path doesn't re-render needlessly.
         setStreaming(true);
+      } else if (msg.type === "initial_state" && msg.agent_busy === false) {
+        // Reconnect to an idle worker: the chat_done this overlay was
+        // waiting for went out while the socket was down.
+        setStreaming(false);
       } else if (msg.type === "ask_user_question") {
         // Mark the next submit as an answer rather than a new prompt.
         // The cyan-bordered question block already rendered via

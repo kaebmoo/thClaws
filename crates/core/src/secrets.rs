@@ -12,7 +12,6 @@
 use crate::error::{Error, Result};
 use crate::providers::ProviderKind;
 
-const SERVICE: &str = "thclaws";
 /// Single-item account name used by the "one bundle, one ACL" layout.
 /// All provider keys live inside one JSON blob at
 /// service="thclaws", account="api-keys" so macOS only asks once for
@@ -45,7 +44,12 @@ struct BackendFile {
 }
 
 fn backend_path() -> Option<std::path::PathBuf> {
-    crate::util::home_dir().map(|h| h.join(".config/thclaws/secrets.json"))
+    crate::util::home_dir().map(|h| {
+        h.join(format!(
+            ".config/{}/secrets.json",
+            crate::profile::app_dir_name()
+        ))
+    })
 }
 
 /// Read the user's stored backend preference. `None` means the user
@@ -81,8 +85,27 @@ pub fn set_backend(backend: Backend) -> Result<()> {
 /// `load_into_env`) until the Settings UI prompts the user to
 /// choose. This is the whole point — a fresh launch must not cause
 /// keychain access prompts.
-fn resolved_backend() -> Backend {
+///
+/// Every writer of a secret (provider keys, the cloud and remote-agent
+/// tokens) must route by this, not by `get_backend()` with its own default:
+/// a writer that assumed Keychain while `set` refused it failed every
+/// sign-in made before the storage question was answered.
+pub fn resolved_backend() -> Backend {
     get_backend().unwrap_or(Backend::Dotenv)
+}
+
+/// One bundle entry read straight from the keychain, past this process's
+/// cache — for diagnosis: another process may have written it since.
+/// `Err` is the keychain's own error (denied, locked, unreadable).
+pub fn bundle_get_uncached(provider: &str) -> std::result::Result<Option<String>, String> {
+    let entry = bundle_entry().map_err(|e| e.to_string())?;
+    match entry.get_password() {
+        Ok(json) => serde_json::from_str::<std::collections::HashMap<String, String>>(&json)
+            .map(|m| m.get(provider).cloned())
+            .map_err(|e| format!("bundle is not valid JSON: {e}")),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// Providers whose keys thClaws manages in the keychain.
@@ -154,12 +177,12 @@ pub fn service_env_var(name: &str) -> Option<&'static str> {
 }
 
 fn entry(provider: &str) -> Result<keyring::Entry> {
-    keyring::Entry::new(SERVICE, provider)
+    keyring::Entry::new(crate::profile::keychain_service(), provider)
         .map_err(|e| Error::Config(format!("keychain open failed: {e}")))
 }
 
 fn bundle_entry() -> Result<keyring::Entry> {
-    keyring::Entry::new(SERVICE, BUNDLE_ACCOUNT)
+    keyring::Entry::new(crate::profile::keychain_service(), BUNDLE_ACCOUNT)
         .map_err(|e| Error::Config(format!("keychain open failed: {e}")))
 }
 
@@ -226,7 +249,7 @@ fn write_bundle(map: &std::collections::HashMap<String, String>) -> Result<()> {
 /// account name (typically a hash, so the entry doesn't leak
 /// what's inside).
 pub fn keychain_set_raw(account: &str, value: &str) -> Result<()> {
-    keyring::Entry::new(SERVICE, account)
+    keyring::Entry::new(crate::profile::keychain_service(), account)
         .map_err(|e| Error::Config(format!("keychain open failed: {e}")))?
         .set_password(value)
         .map_err(|e| Error::Config(format!("keychain write failed: {e}")))
@@ -265,7 +288,7 @@ pub fn keychain_get_raw(account: &str) -> Option<String> {
     if keychain_disabled() {
         return None;
     }
-    keyring::Entry::new(SERVICE, account)
+    keyring::Entry::new(crate::profile::keychain_service(), account)
         .ok()
         .and_then(|e| e.get_password().ok())
 }
@@ -273,7 +296,7 @@ pub fn keychain_get_raw(account: &str) -> Option<String> {
 /// Direct keychain delete. Used by SSO logout to clear stored
 /// sessions on Dotenv-preferring installs.
 pub fn keychain_clear_raw(account: &str) -> Result<()> {
-    let entry = keyring::Entry::new(SERVICE, account)
+    let entry = keyring::Entry::new(crate::profile::keychain_service(), account)
         .map_err(|e| Error::Config(format!("keychain open failed: {e}")))?;
     // `delete_credential` errors when the entry is absent — fine,
     // treat as a no-op so logout is idempotent.

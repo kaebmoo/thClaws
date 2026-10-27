@@ -14,6 +14,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 pub mod ask;
 pub mod bash;
+pub mod doc_convert;
+pub mod doc_render;
 pub mod docx_create;
 pub mod docx_edit;
 pub mod docx_read;
@@ -59,6 +61,7 @@ pub mod xlsx_read;
 
 pub use ask::{set_gui_ask_sender, set_line_driven_turn, AskUserRequest, AskUserTool};
 pub use bash::BashTool;
+pub use doc_convert::DocConvertTool;
 pub use docx_create::DocxCreateTool;
 pub use docx_edit::DocxEditTool;
 pub use docx_read::DocxReadTool;
@@ -305,6 +308,7 @@ pub fn reset_gates() {
 pub(crate) fn gateway_active() -> bool {
     std::env::var("THCLAWS_USES_GATEWAY").ok().as_deref() == Some("1")
         || crate::workdir::is_multiuser()
+        || crate::shared::policy_gateway_mode()
         || crate::config::AppConfig::load()
             .map(|c| c.gateway_proxy)
             .unwrap_or(false)
@@ -426,6 +430,7 @@ impl ToolRegistry {
         r.register(Arc::new(EpubCreateTool));
         r.register(Arc::new(PdfCreateTool));
         r.register(Arc::new(PdfReadTool));
+        r.register(Arc::new(DocConvertTool));
         r.register(Arc::new(WebFetchTool::new()));
         r.register(Arc::new(FetchImagesTool::new()));
         r.register(Arc::new(FolderIndexTool));
@@ -700,9 +705,11 @@ mod tests {
     /// Process-wide lock to serialize env-var manipulation across the
     /// requires_env / tool_defs filter tests. Same pattern as
     /// `search::tests::env_lock`.
-    fn env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    // The crate-wide lock: a module-local one did not serialise against the
+    // HAL/gateway tests in config, web and shared_session, which flip the
+    // same variables (HAL_API_KEY, THCLAWS_USES_GATEWAY).
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::kms::test_env_lock()
     }
 
     /// RAII guard that restores an env var to its prior value on drop.
@@ -757,7 +764,7 @@ mod tests {
 
     #[test]
     fn tool_defs_are_sorted_and_complete() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         // HAL tools should be filtered from the default list when
         // HAL_API_KEY is unset. Force-clear so a local export doesn't
         // make the snapshot flaky.
@@ -770,6 +777,7 @@ mod tests {
             vec![
                 "AskUserQuestion",
                 "Bash",
+                "DocConvert",
                 "DocxCreate",
                 "DocxEdit",
                 "DocxRead",
@@ -834,7 +842,7 @@ mod tests {
 
     #[test]
     fn requires_env_default_empty_means_always_visible() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         let _hal = EnvGuard::new("HAL_API_KEY");
         let mut reg = ToolRegistry::new();
         reg.register(Arc::new(StubTool {
@@ -847,7 +855,7 @@ mod tests {
 
     #[test]
     fn requires_env_filter_excludes_when_unset() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         let _key = EnvGuard::new("FAKE_TEST_KEY_UNSET");
         let mut reg = ToolRegistry::new();
         reg.register(Arc::new(StubTool {
@@ -863,7 +871,7 @@ mod tests {
 
     #[test]
     fn requires_env_filter_includes_when_set() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         let key = EnvGuard::new("FAKE_TEST_KEY_PRESENT");
         key.set("any-non-empty-value");
         let mut reg = ToolRegistry::new();
@@ -877,7 +885,7 @@ mod tests {
 
     #[test]
     fn requires_env_gateway_served_key_visible_when_gateway_active() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         // HAL_API_KEY is gateway-served: with no local key but the gateway
         // active, a tool requiring it stays visible (the gateway injects the
         // real key). Uses the env signal — THCLAWS_USES_GATEWAY short-circuits
@@ -899,7 +907,7 @@ mod tests {
 
     #[test]
     fn requires_env_treats_empty_string_as_unset() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         let key = EnvGuard::new("FAKE_TEST_KEY_EMPTY");
         key.set(""); // explicit empty — should still hide the tool
         let mut reg = ToolRegistry::new();
@@ -934,7 +942,7 @@ mod tests {
 
     #[test]
     fn gated_tool_hidden_until_gate_opened() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         reset_gates();
         let mut reg = ToolRegistry::new();
         reg.register(Arc::new(GatedStub));
@@ -952,7 +960,7 @@ mod tests {
 
     #[tokio::test]
     async fn gated_tool_call_rejected_until_gate_opened() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         reset_gates();
         let mut reg = ToolRegistry::new();
         reg.register(Arc::new(GatedStub));
@@ -968,7 +976,7 @@ mod tests {
 
     #[tokio::test]
     async fn requires_env_call_path_rejects_when_unset() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         let _key = EnvGuard::new("FAKE_TEST_KEY_CALL");
         let mut reg = ToolRegistry::new();
         reg.register(Arc::new(StubTool {
@@ -1033,7 +1041,7 @@ mod tests {
 
     #[test]
     fn hal_tools_hidden_without_key_visible_with_key() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         let key = EnvGuard::new("HAL_API_KEY");
         key.unset();
         // HAL tools are opt-in (no longer in with_builtins — they register

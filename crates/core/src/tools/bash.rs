@@ -1405,10 +1405,7 @@ fn scrub_sensitive_env(cmd: &mut tokio::process::Command) {
     // via the same env→keychain→cloud-token chain the providers use means
     // a gateway-configured desktop just works.
     if let Some(key) = crate::providers::thclaws_gateway::resolve_access_key() {
-        let base = std::env::var("THCLAWS_GATEWAY_BASE_URL")
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .unwrap_or_else(|| crate::providers::thclaws_gateway::GATEWAY_BASE_URL.to_string());
+        let base = crate::providers::thclaws_gateway::resolve_base_url();
         cmd.env("THCLAWS_GATEWAY_API_KEY", key);
         cmd.env("THCLAWS_GATEWAY_BASE_URL", base);
     }

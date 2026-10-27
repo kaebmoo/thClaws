@@ -37,6 +37,7 @@ const WRITE_TOOL_NAMES: &[&str] = &[
     "XlsxEdit",
     "PdfCreate",
     "EpubCreate",
+    "DocConvert",
     "NotebookEdit",
 ];
 const WRITE_PATH_KEYS: &[&str] = &["path", "file_path", "notebook_path", "out", "output_path"];
@@ -588,7 +589,10 @@ impl AgentFactory for ProductionAgentFactory {
             .with_max_iterations(max_iter)
             .with_max_tokens(self.max_tokens)
             .with_approver(self.approver.clone())
-            .with_permission_mode(self.permission_mode);
+            // The live mode, not the one captured at worker start: after
+            // auto → `/permissions ask` the child would otherwise keep Auto
+            // and run Write/Bash without asking.
+            .with_permission_mode(crate::permissions::live_mode().unwrap_or(self.permission_mode));
         if let Some(c) = self.cancel.clone() {
             agent = agent.with_cancel(c);
         }
@@ -795,8 +799,9 @@ impl Tool for SubAgentTool {
                 .map(|k| k.name())
                 .unwrap_or("unknown");
             let role = agent_name.unwrap_or("subagent");
-            crate::usage::UsageTracker::new(crate::usage::UsageTracker::default_path())
-                .record(provider, eff_model, u);
+            // The per-model tracker gets it from the session's next footer
+            // (`take_side_usage`), which knows the session's own usage dir.
+            crate::usage::note_side_usage(eff_model, u);
             if let Ok(cwd) = std::env::current_dir() {
                 crate::usage::append_usage_ledger(&cwd, role, provider, eff_model, u);
             }

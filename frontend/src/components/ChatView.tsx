@@ -5,6 +5,7 @@ import rehypeHighlight from "rehype-highlight";
 import { resolveAssetSrc } from "../lib/fileAsset";
 import { Check, Copy, Paperclip } from "lucide-react";
 import { basePath, send, subscribe } from "../hooks/useIPC";
+import { useBranding } from "../hooks/useBranding";
 import { promptHistory, recordPrompt } from "../hooks/promptHistory";
 import { useTheme } from "../hooks/useTheme";
 import { useVersion } from "../hooks/useVersion";
@@ -14,6 +15,7 @@ import { WorkflowReviewBubble } from "./WorkflowReviewBubble";
 import { SlashCommandPopup } from "./SlashCommandPopup";
 import { filterCommands, type SlashCommandInfo } from "./slashCommands";
 import { McpAppIframe } from "./McpAppIframe";
+import { matchQueuedInjections } from "./injectionQueue";
 
 type ChatMessage = {
   role: "user" | "assistant" | "tool" | "system" | "error" | "workflow_review";
@@ -300,11 +302,14 @@ export function ChatView({ active, modalOpen }: Props) {
   // `file_upload_result` subscriber injects the path only for OUR uploads
   // (the Files tab uses the same IPC with its own ids).
   const droppedUploadIds = useRef<Set<string>>(new Set());
+  /// Texts of the bubbles still showing "queued", oldest first.
+  const queuedTextsRef = useRef<string[]>([]);
   const copiedTimerRef = useRef<number | null>(null);
   const errorTimerRef = useRef<number | null>(null);
   const waitingTimerRef = useRef<number | null>(null);
   const firstByteSeenRef = useRef(false);
   const { resolved: themeMode } = useTheme();
+  const branding = useBranding();
   const version = useVersion();
 
   // Show the slash popup whenever the input begins with `/` and the
@@ -554,23 +559,38 @@ export function ChatView({ active, modalOpen }: Props) {
           // text, flip it to `delivered` instead of appending a duplicate.
           // The first match wins; only the first matching queued bubble
           // is flipped.
+          // A turn that ended before the queue drained re-submits the
+          // queued texts as ONE prompt joined by blank lines, which starts
+          // a new turn — so flip every bubble it carries and show it as
+          // running again (the previous turn's chat_done cleared that).
           const incoming = msg.text as string;
-          setMessages((prev) => {
-            const queuedIdx = prev.findIndex(
-              (m) =>
-                m.role === "user" &&
-                m.injectionState === "queued" &&
-                m.content === incoming,
+          const refHit = matchQueuedInjections(queuedTextsRef.current, incoming);
+          if (refHit) {
+            queuedTextsRef.current = queuedTextsRef.current.filter(
+              (_, i) => !refHit.includes(i),
             );
-            if (queuedIdx >= 0) {
-              const next = prev.slice();
-              next[queuedIdx] = {
-                ...next[queuedIdx],
+            setStreaming(true);
+          }
+          setMessages((prev) => {
+            const queuedIdx: number[] = [];
+            prev.forEach((m, i) => {
+              if (m.role === "user" && m.injectionState === "queued") {
+                queuedIdx.push(i);
+              }
+            });
+            const hit = matchQueuedInjections(
+              queuedIdx.map((i) => prev[i].content),
+              incoming,
+            );
+            if (!hit) return [...prev, { role: "user", content: incoming }];
+            const next = prev.slice();
+            for (const h of hit) {
+              next[queuedIdx[h]] = {
+                ...next[queuedIdx[h]],
                 injectionState: "delivered",
               };
-              return next;
             }
-            return [...prev, { role: "user", content: incoming }];
+            return next;
           });
           break;
         }
@@ -840,6 +860,13 @@ export function ChatView({ active, modalOpen }: Props) {
           // chat_done, which clears it. Never force it false here: a
           // handshake mustn't cancel the visual state of a turn we started.
           if (msg.agent_busy === true) setStreaming(true);
+          // An idle worker on reconnect means any "working" state we
+          // hold is stale: the chat_done it was waiting for went out
+          // while this socket was down, and nothing will clear it.
+          else if (msg.agent_busy === false) {
+            setStreaming(false);
+            setWaitingFirstByte(false);
+          }
           break;
         case "ask_user_question": {
           const id = typeof msg.id === "number" ? msg.id : null;
@@ -852,6 +879,7 @@ export function ChatView({ active, modalOpen }: Props) {
           break;
         }
         case "new_session_ack":
+          queuedTextsRef.current = [];
           setMessages([]);
           setStreaming(false);
           setAskPrompt(null);
@@ -1110,6 +1138,7 @@ export function ChatView({ active, modalOpen }: Props) {
           injectionId,
         },
       ]);
+      queuedTextsRef.current = [...queuedTextsRef.current, text];
       send({ type: "user_input_inject", text, id: injectionId });
       return;
     }
@@ -1726,13 +1755,37 @@ export function ChatView({ active, modalOpen }: Props) {
             className="flex flex-col items-center mt-20 select-none"
             style={{ color: "var(--text-secondary)" }}
           >
-            <img
-              src={themeMode === "light" ? logoLight : logoDark}
-              alt="thClaws"
-              className="mb-2 opacity-90"
-              style={{ width: 280, height: 280 }}
-              draggable={false}
-            />
+            {branding.logo ? (
+              <div className="flex flex-col items-center mb-2">
+                <img
+                  src={(themeMode === "light" ? branding.logo : branding.logo_dark) ?? branding.logo}
+                  alt={branding.name}
+                  style={{ maxWidth: 240, maxHeight: 120 }}
+                  draggable={false}
+                />
+                <div className="text-lg font-semibold mt-3" style={{ color: "var(--text-primary)" }}>
+                  {branding.name}
+                </div>
+                <div className="flex items-center gap-1 mt-1 text-xs opacity-70">
+                  <span>powered by</span>
+                  <img
+                    src={themeMode === "light" ? logoLight : logoDark}
+                    alt="thClaws"
+                    style={{ width: 28, height: 28 }}
+                    draggable={false}
+                  />
+                  <span>thClaws</span>
+                </div>
+              </div>
+            ) : (
+              <img
+                src={themeMode === "light" ? logoLight : logoDark}
+                alt="thClaws"
+                className="mb-2 opacity-90"
+                style={{ width: 280, height: 280 }}
+                draggable={false}
+              />
+            )}
             {version && (
               <div
                 className="text-xs font-mono mb-2 opacity-70"

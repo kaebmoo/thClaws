@@ -289,12 +289,34 @@ pub struct AppConfig {
     #[serde(default = "default_browser_enabled", alias = "browserEnabled")]
     pub browser_enabled: bool,
 
+    /// Prototype: spend no thinking on a browser step.
+    ///
+    /// Choosing which element to click is a System One job — the page is on
+    /// screen and the options are enumerated — but the thinking level is a
+    /// session-wide setting, so a browse spends the same reasoning on "click
+    /// the third result" as on the plan that led there. Decision-model work
+    /// (Jev and its kin) gets most of its speed from exactly this split.
+    ///
+    /// With this on, an iteration whose previous one called only browser
+    /// tools runs with thinking off, and goes back to the configured level
+    /// the moment the step stops looking mechanical — see
+    /// `agent::BrowserStepThinking`. OFF by default: it trades reasoning for
+    /// latency, and which way that lands is what the prototype measures.
+    #[serde(default, alias = "browserFastSteps")]
+    pub browser_fast_steps: bool,
+
     /// Force headed/headless for the managed browser. `None` (default)
     /// = auto: headless on cloud runners (`THCLAWS_USES_GATEWAY=1`) and
     /// displayless Linux; headed elsewhere (the desktop "browse next to
     /// the agent" workflow).
     #[serde(default, alias = "browserHeadless")]
     pub browser_headless: Option<bool>,
+
+    /// dev-plan/70: which bundled ArtCraft office apps (`grid`, `word`,
+    /// `deck`) run as engine-managed MCP servers. `None` = every app whose
+    /// binary is installed; `[]` = none. See [`crate::office::apps`].
+    #[serde(default, alias = "officeApps")]
+    pub office_apps: Option<Vec<String>>,
 
     /// May `PdfRead` fall back to the public `pdf.thclaws.cloud` service
     /// when `pdftotext` is not installed locally (dev-plan/66)? ON by
@@ -581,33 +603,69 @@ fn default_browser_enabled() -> bool {
 }
 
 /// `PdfRead`'s cloud fallback default — ON, with `THCLAWS_PDF_CLOUD=0` as
-/// the fleet-wide off switch (see [`AppConfig::pdf_cloud_fallback`]).
+/// the fleet-wide off switch (see [`AppConfig::pdf_cloud_fallback`]). OFF on
+/// a gateway-locked install: pdf.thclaws.cloud is outside its gateway, so
+/// only an explicit `pdfCloudFallback: true` may send a file there.
 fn default_pdf_cloud_fallback() -> bool {
-    !matches!(
-        std::env::var("THCLAWS_PDF_CLOUD")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "0" | "false" | "off" | "no"
+    pdf_cloud_default(
+        std::env::var("THCLAWS_PDF_CLOUD").ok().as_deref(),
+        crate::shared::gateway_providers_locked(),
     )
+}
+
+fn pdf_cloud_default(env: Option<&str>, locked: bool) -> bool {
+    !locked
+        && !matches!(
+            env.unwrap_or_default().trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        )
 }
 
 /// Resolve a launch command on PATH (or as an absolute path). Shared
 /// by the browser-MCP injection guard and the `browser_status_get`
 /// IPC arm so both agree on whether the managed browser can start.
-/// `.cmd` is the Windows npm-shim extension.
+/// On Windows a bare name also matches each `PATHEXT` extension — poppler's
+/// `pdftotext.exe` went undetected when only `.cmd` (the npm shim) was tried.
 pub fn command_on_path(command: &str) -> bool {
     let p = std::path::Path::new(command);
     if p.is_absolute() {
         return p.is_file();
     }
+    let names = command_candidates(
+        command,
+        cfg!(windows),
+        std::env::var("PATHEXT").ok().as_deref(),
+    );
     std::env::var_os("PATH")
         .map(|paths| {
-            std::env::split_paths(&paths)
-                .any(|d| d.join(command).is_file() || d.join(format!("{command}.cmd")).is_file())
+            std::env::split_paths(&paths).any(|d| names.iter().any(|n| d.join(n).is_file()))
         })
         .unwrap_or(false)
+}
+
+fn command_candidates(command: &str, windows: bool, pathext: Option<&str>) -> Vec<String> {
+    let mut names = vec![command.to_string()];
+    if std::path::Path::new(command).extension().is_some() {
+        return names;
+    }
+    let exts: Vec<String> = if windows {
+        pathext
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(".COM;.EXE;.BAT;.CMD")
+            .split(';')
+            .map(|e| e.trim().to_ascii_lowercase())
+            .filter(|e| e.starts_with('.') && e.len() > 1)
+            .collect()
+    } else {
+        vec![".cmd".to_string()]
+    };
+    for ext in exts {
+        let n = format!("{command}{ext}");
+        if !names.contains(&n) {
+            names.push(n);
+        }
+    }
+    names
 }
 
 fn default_auto_learn_reconcile_hours() -> u32 {
@@ -660,7 +718,9 @@ impl Default for AppConfig {
             hal_enabled: false,
             sensitive_enabled: false,
             browser_enabled: default_browser_enabled(),
+            browser_fast_steps: false,
             browser_headless: None,
+            office_apps: None,
             pdf_cloud_fallback: default_pdf_cloud_fallback(),
             gateway_use_for: Vec::new(),
             gateway_proxy: false,
@@ -884,10 +944,16 @@ pub struct ProjectConfig {
     /// [`AppConfig::browser_enabled`].
     #[serde(rename = "browserEnabled")]
     pub browser_enabled: Option<bool>,
+    /// Prototype — see [`AppConfig::browser_fast_steps`].
+    #[serde(rename = "browserFastSteps")]
+    pub browser_fast_steps: Option<bool>,
     /// Headed/headless override for the managed browser. See
     /// [`AppConfig::browser_headless`].
     #[serde(rename = "browserHeadless")]
     pub browser_headless: Option<bool>,
+    /// See [`AppConfig::office_apps`].
+    #[serde(rename = "officeApps")]
+    pub office_apps: Option<Vec<String>>,
     /// Opt out of `PdfRead`'s public-service fallback. See
     /// [`AppConfig::pdf_cloud_fallback`].
     #[serde(rename = "pdfCloudFallback")]
@@ -1052,7 +1118,9 @@ impl Default for ProjectConfig {
             hal_enabled: Some(false),
             sensitive: None,
             browser_enabled: None,
+            browser_fast_steps: None,
             browser_headless: None,
+            office_apps: None,
             pdf_cloud_fallback: None,
             sso_sign_in_enabled: None,
             show_raw_response: None,
@@ -1295,6 +1363,8 @@ impl ProjectConfig {
   "shellTabEnabled": false,
   "imageToolsEnabled": false,
   "browserEnabled": false,
+  "_doc_browserFastSteps": "PROTOTYPE, off by default. Run a browser step with thinking off. Choosing which element to click is a one-pass decision — the snapshot is already in the transcript and the elements are enumerated — but the thinking level is session-wide, so a browse spends the same reasoning on \"click the third result\" as on the plan that led there. With this on, an iteration whose previous one called only browser tools runs with thinking off, and the configured level comes straight back when the same tool aims at the same target twice (the page did not answer as expected) or anything other than a browser tool joins the turn. It buys latency with reasoning; turn it on to measure which way that lands.",
+  "browserFastSteps": false,
   "halEnabled": false,
   "showRawResponse": false,
   "allowedTools": null,
@@ -1819,8 +1889,14 @@ impl ProjectConfig {
         if let Some(b) = self.browser_enabled {
             config.browser_enabled = b;
         }
+        if let Some(b) = self.browser_fast_steps {
+            config.browser_fast_steps = b;
+        }
         if let Some(b) = self.browser_headless {
             config.browser_headless = Some(b);
+        }
+        if let Some(apps) = &self.office_apps {
+            config.office_apps = Some(apps.clone());
         }
         if let Some(b) = self.pdf_cloud_fallback {
             config.pdf_cloud_fallback = b;
@@ -2069,32 +2145,16 @@ impl ProjectConfig {
                 })
             })
             .collect();
-        // Org-policy gate (Phase 2): when policies.plugins.enabled with
-        // allow_external_mcp: false, reject HTTP MCP servers whose URL
-        // host isn't in `allowed_hosts`. Stdio entries pass through —
-        // gating arbitrary stdio commands is a separate sub-policy
-        // (admin's mcp.json content = admin's responsibility).
-        let filtered: Vec<crate::mcp::McpServerConfig> = if crate::policy::external_mcp_disallowed()
-        {
-            parsed
-                .into_iter()
-                .filter(|s| {
-                    if s.transport != "http" {
-                        return true;
-                    }
-                    match crate::policy::check_url(&s.url) {
-                        crate::policy::AllowDecision::Allowed
-                        | crate::policy::AllowDecision::NoPolicy => true,
-                        crate::policy::AllowDecision::Denied { reason } => {
-                            eprintln!("\x1b[33m[mcp] '{}' skipped: {}\x1b[0m", s.name, reason);
-                            false
-                        }
-                    }
-                })
-                .collect()
-        } else {
-            parsed
-        };
+        let filtered: Vec<crate::mcp::McpServerConfig> = parsed
+            .into_iter()
+            .filter(|s| match crate::policy::mcp_server_refusal(s) {
+                Some(reason) => {
+                    eprintln!("\x1b[33m[mcp] skipped: {reason}\x1b[0m");
+                    false
+                }
+                None => true,
+            })
+            .collect();
         Some(filtered)
     }
 }
@@ -2103,6 +2163,9 @@ impl ProjectConfig {
 /// `user=true` writes to `~/.config/thclaws/mcp.json`, otherwise
 /// `.thclaws/mcp.json` (project-local). Returns the path written to.
 pub fn save_mcp_server(server: &crate::mcp::McpServerConfig, user: bool) -> Result<PathBuf> {
+    if let Some(reason) = crate::policy::mcp_server_refusal(server) {
+        return Err(Error::Config(reason));
+    }
     let path = mcp_config_path(user)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -2189,7 +2252,10 @@ fn mcp_config_path(user: bool) -> Result<PathBuf> {
     if user {
         let home = crate::util::home_dir()
             .ok_or_else(|| Error::Config("cannot locate user home directory".into()))?;
-        Ok(home.join(".config/thclaws/mcp.json"))
+        Ok(home.join(format!(
+            ".config/{}/mcp.json",
+            crate::profile::app_dir_name()
+        )))
     } else {
         let cwd = std::env::current_dir()?;
         Ok(cwd.join(".thclaws").join("mcp.json"))
@@ -2205,6 +2271,26 @@ impl AppConfig {
     /// flag could climb over would not be a policy. Idempotent, so
     /// calling it twice is the intended usage.
     pub fn apply_runtime_policy(&mut self) {
+        // A policy that locks the install to its own gateway also decides
+        // the starting model when settings/CLI name one it doesn't serve
+        // (the open-core default, a model from another provider). Hosted
+        // runners get this from the api's seeded settings; a desktop only
+        // has the policy.
+        if let Some(g) = crate::policy::thclaws_gateway() {
+            if let Some(m) = crate::providers::locked_model_override(
+                &self.model,
+                &g.providers,
+                g.default_model.as_deref(),
+            ) {
+                if self.model != Self::default().model {
+                    eprintln!(
+                        "[policy] '{}' isn't served by this organisation's gateway — using '{m}'",
+                        self.model
+                    );
+                }
+                self.model = m;
+            }
+        }
         if let Some(mode) = crate::policy::forced_permission_mode() {
             if self.permissions != mode {
                 eprintln!("[policy] permission mode forced to '{mode}' by org policy");
@@ -2331,6 +2417,29 @@ impl AppConfig {
             }
         }
 
+        // dev-plan/70: the office apps, engine-managed — bundled binaries, not
+        // an install, so an EE "no external MCP" policy doesn't apply. Not in
+        // a multiuser worker: its MCP servers are spawned once and shared by
+        // every member, so they can't be confined to one member's folder.
+        if !cfg!(test) && !crate::workdir::is_multiuser() {
+            for server in crate::office::apps::mcp_configs(config.office_apps.as_deref()) {
+                if !config.mcp_servers.iter().any(|s| s.name == server.name) {
+                    config.mcp_servers.push(server);
+                }
+            }
+        }
+
+        // dev-plan/71: on an AI Server box the Suite's RAG Engine is the
+        // knowledge store; engine-managed like the office apps, never in a
+        // shared multiuser worker, and a same-named user server wins.
+        if !cfg!(test) && !crate::workdir::is_multiuser() {
+            if let Some(server) = crate::aiserver::rag_mcp_config() {
+                if !config.mcp_servers.iter().any(|s| s.name == server.name) {
+                    config.mcp_servers.push(server);
+                }
+            }
+        }
+
         // CLI `--model` / `--set-model` override (set by app.rs once at
         // startup). Applied last so it wins over user, project, and the
         // Claude Code fallback — matches the precedence the module docs
@@ -2385,12 +2494,10 @@ impl AppConfig {
         // newly-shipped routable providers are covered automatically. Per-model
         // eligibility (Featured + priced) is enforced at routing time, so a
         // non-featured model still falls back to BYOK even when the proxy is on.
-        let gateway_on = in_gateway_pod || config.gateway_proxy;
+        let gateway_on =
+            in_gateway_pod || config.gateway_proxy || crate::shared::policy_gateway_mode();
         config.gateway_use_for = if gateway_on {
-            crate::shared::GATEWAY_ALL_PROVIDERS
-                .iter()
-                .map(|s| s.to_string())
-                .collect()
+            crate::shared::gateway_routed_providers()
         } else {
             Vec::new()
         };
@@ -2405,6 +2512,11 @@ impl AppConfig {
         // HAL calls cost money there.
         if gateway_on {
             config.hal_enabled = true;
+        }
+        // The organisation pays for media calls on EE, so the tools are on
+        // without each workspace opting in.
+        if crate::shared::org_billed() {
+            config.image_tools_enabled = true;
         }
 
         if config.model != Self::default().model {
@@ -2482,10 +2594,7 @@ impl AppConfig {
         // gateway, ignoring any BYOK/native provider config in any layer.
         // The gateway access key + base URL come from the pod's
         // THCLAWS_GATEWAY_* env (injected by provisioning).
-        config.gateway_use_for = crate::shared::GATEWAY_ALL_PROVIDERS
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        config.gateway_use_for = crate::shared::gateway_routed_providers();
 
         // Engine-managed browser MCP — same conditions as the normal path.
         // dev-plan/65 P5: one Chromium, one cookie jar, every member — the
@@ -2648,19 +2757,25 @@ impl AppConfig {
         let Some(home) = crate::util::home_dir() else {
             return vec![];
         };
-        vec![home.join(".config/thclaws/settings.json")]
+        vec![home.join(format!(
+            ".config/{}/settings.json",
+            crate::profile::app_dir_name()
+        ))]
     }
 
     /// Load MCP servers from user-level paths:
     /// `~/.config/thclaws/mcp.json`, then `~/.claude/mcp.json` as fallback.
-    fn load_user_mcp_servers() -> Vec<crate::mcp::McpServerConfig> {
+    pub(crate) fn load_user_mcp_servers() -> Vec<crate::mcp::McpServerConfig> {
         let Some(home) = crate::util::home_dir() else {
             return vec![];
         };
-        let paths = [
-            home.join(".config/thclaws/mcp.json"),
-            home.join(".claude/mcp.json"),
-        ];
+        let mut paths = vec![home.join(format!(
+            ".config/{}/mcp.json",
+            crate::profile::app_dir_name()
+        ))];
+        if crate::profile::reads_claude_home() {
+            paths.push(home.join(".claude/mcp.json"));
+        }
         for path in &paths {
             if let Some(servers) = ProjectConfig::parse_mcp_json(path) {
                 if !servers.is_empty() {
@@ -2813,6 +2928,21 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn command_candidates_cover_windows_executables() {
+        let win = command_candidates("pdftotext", true, Some(".COM;.EXE;.BAT;.CMD"));
+        assert!(win.contains(&"pdftotext.exe".to_string()), "{win:?}");
+        assert!(win.contains(&"pdftotext.cmd".to_string()), "{win:?}");
+        let default = command_candidates("pdftoppm", true, None);
+        assert!(default.contains(&"pdftoppm.exe".to_string()), "{default:?}");
+        assert_eq!(
+            command_candidates("pdftotext.exe", true, None),
+            ["pdftotext.exe"]
+        );
+        let unix = command_candidates("npx", false, Some(".EXE"));
+        assert_eq!(unix, ["npx", "npx.cmd"]);
+    }
+
     /// dev-plan/65 P5. Multiuser isolates each user's FILES into their own
     /// folder — but the managed browser is one Chromium with one cookie jar
     /// for the whole pod, so a login by any member is a login for every
@@ -3035,6 +3165,19 @@ mod tests {
             cfg.unwrap().hal_enabled,
             "gateway-active config must force HAL tools on"
         );
+    }
+
+    #[test]
+    fn org_billed_runner_forces_media_tools_on() {
+        let _guard = crate::kms::test_env_lock();
+        std::env::set_var("THCLAWS_USES_GATEWAY", "1");
+        let stock = crate::shared::org_billed();
+        std::env::set_var("THCLAWS_BRAND_NAME", "SiS");
+        let cfg = AppConfig::load();
+        std::env::remove_var("THCLAWS_BRAND_NAME");
+        std::env::remove_var("THCLAWS_USES_GATEWAY");
+        assert!(!stock, "stock thclaws.cloud runners stay opt-in");
+        assert!(cfg.unwrap().image_tools_enabled);
     }
 
     #[test]
@@ -3927,5 +4070,13 @@ mod tests {
         assert!(!parse(r#"{"sensitive":{"enabled":false}}"#));
         assert!(!parse(r#"{"sensitive":{}}"#), "empty block must not enable");
         assert!(!parse("{}"), "absent block must not enable");
+    }
+
+    #[test]
+    fn pdf_cloud_fallback_off_when_locked() {
+        assert!(pdf_cloud_default(None, false));
+        assert!(!pdf_cloud_default(Some("0"), false));
+        assert!(!pdf_cloud_default(None, true));
+        assert!(!pdf_cloud_default(Some("1"), true));
     }
 }

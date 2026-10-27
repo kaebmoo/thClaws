@@ -56,7 +56,11 @@ fn user_path(name: &str) -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("thclaws").join(DIR).join(format!("{name}.md")))
+    Some(
+        base.join(crate::profile::app_dir_name())
+            .join(DIR)
+            .join(format!("{name}.md")),
+    )
 }
 
 /// Load a prompt template by name. Returns the override content (project →
@@ -411,7 +415,8 @@ pub(crate) fn services_prompt_section(browser_active: bool) -> String {
 
     // In hosted gateway mode the search keys live on the gateway, not
     // in the runner's env — Tavily is reachable even with no local key.
-    let gateway_mode = std::env::var("THCLAWS_USES_GATEWAY").ok().as_deref() == Some("1");
+    let gateway_mode = std::env::var("THCLAWS_USES_GATEWAY").ok().as_deref() == Some("1")
+        || crate::shared::policy_gateway_mode();
     let tavily_ok = gateway_mode
         || std::env::var("TAVILY_API_KEY")
             .ok()
@@ -570,7 +575,12 @@ pub(crate) fn documents_prompt_section() -> String {
          outline: `# Heading` starts a new slide, bullets become body. \
          Read extracts slide text.\n\
          - **PdfCreate** / **PdfRead** — PDF. Markdown in, supports \
-         tables, inline images, embedded fonts. A4 / Letter / Legal.\n\
+         tables, inline images, embedded fonts. A4 / Letter / Legal. \
+         PdfRead OCRs scanned pages (`ocr`: auto / vision / tesseract).\n\
+         - **DocConvert** — convert between formats on the document \
+         service: Word/Excel/PowerPoint → PDF, old .doc/.xls/.ppt/.odt → \
+         docx/xlsx/pptx (then read with the matching `*Read`), .html → \
+         typeset PDF.\n\
          - **EpubCreate** — reflowable EPUB 3 e-book. Markdown in, splits \
          into chapters at headings, embeds images + Noto fonts, builds \
          navigation. Use for e-books / long-form reading on e-readers \

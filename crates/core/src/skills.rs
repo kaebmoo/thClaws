@@ -155,14 +155,9 @@ pub struct SkillDef {
     pub description: String,
     #[serde(default)]
     pub when_to_use: String,
-    /// Optional default-model recommendation. When set and the user
-    /// has an API key for the relevant provider, the agent's
-    /// `model_override` is populated for the duration of the turn the
-    /// skill is invoked in. Falls back silently to the user's current
-    /// model with a warning chat line when no candidate has a key.
-    /// Issue: knowledge-worker skills (vision, long-context) need a
-    /// known-good default so non-experts don't have to know which
-    /// model supports what.
+    /// The `model:` frontmatter, parsed so older skills still load but
+    /// never acted on: a skill runs on the model the user picked, never
+    /// one it recommends (a locked install has no other model to offer).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<SkillModelSpec>,
     /// Optional tool gate this skill opens when invoked. Parsed from the
@@ -487,13 +482,26 @@ impl SkillStore {
                 self.skills.insert(skill.name.clone(), skill);
             }
         }
+        // dev-plan/70: only where the office apps are installed, so the model
+        // is never told about tools it doesn't have.
+        if !crate::office::apps::enabled(None).is_empty() {
+            if let Some(skill) = parse_builtin_skill(
+                "office-apps",
+                include_str!("default_prompts/skills/office-apps.md"),
+            ) {
+                self.skills.insert(skill.name.clone(), skill);
+            }
+        }
     }
 
     fn user_skill_dirs() -> Vec<PathBuf> {
         let mut dirs = Vec::new();
         if let Some(home) = crate::util::home_dir() {
-            dirs.push(home.join(".claude/skills")); // user Claude Code
-            dirs.push(home.join(".config/thclaws/skills")); // user thClaws
+            if crate::profile::reads_claude_home() {
+                dirs.push(home.join(".claude/skills")); // user Claude Code
+            }
+            dirs.push(home.join(format!(".config/{}/skills", crate::profile::app_dir_name())));
+            // user thClaws
         }
         dirs
     }
@@ -670,6 +678,10 @@ pub async fn install_from_url(
     // URL must match allowed_hosts. Single guard covers both .zip and
     // git dispatch paths below. Open-core builds without a policy fall
     // through unchanged (AllowDecision::NoPolicy).
+    crate::marketplace::ensure_fresh().await;
+    if !crate::marketplace::install_url_allowed(url) {
+        return Err(Error::Tool(crate::marketplace::install_refusal("skill")));
+    }
     if let crate::policy::AllowDecision::Denied { reason } = crate::policy::check_url(url) {
         return Err(Error::Tool(format!(
             "skill install blocked by org policy: {reason}"
@@ -680,6 +692,60 @@ pub async fn install_from_url(
     } else {
         install_from_git(url, override_name, project_scope)
     }
+}
+
+/// `/skill update <name>`: install the current copy beside the old one, then
+/// swap, so a failed download or a bad archive leaves the installed skill as
+/// it was. Replaces one skill only — a bundle archive is refused.
+pub async fn update_from_url(url: &str, name: &str, project_scope: bool) -> Result<Vec<String>> {
+    if name.is_empty() || name.starts_with('.') || name.contains(['/', '\\']) {
+        return Err(Error::Tool(format!(
+            "'{name}' is not a skill name — /skill update takes the name of an installed marketplace skill"
+        )));
+    }
+    let root = target_root(project_scope)?;
+    let final_dir = root.join(name);
+    if !final_dir.join("SKILL.md").is_file() {
+        return Err(Error::Tool(format!(
+            "'{name}' is not installed at {} — use /skill install {name}",
+            root.display()
+        )));
+    }
+    let tag = uuid::Uuid::new_v4().simple().to_string();
+    let fresh_name = format!(".thclaws-update-{tag}");
+    let fresh = root.join(&fresh_name);
+    let report = install_from_url(url, Some(&fresh_name), project_scope).await?;
+    if !fresh.join("SKILL.md").is_file() {
+        let _ = std::fs::remove_dir_all(&fresh);
+        return Err(Error::Tool(format!(
+            "{url} is not a single skill (no SKILL.md at its root) — update replaces one skill"
+        )));
+    }
+    swap_in(
+        &fresh,
+        &final_dir,
+        &root.join(format!(".thclaws-old-{tag}")),
+    )?;
+    let mut out: Vec<String> = report
+        .into_iter()
+        .filter(|l| !l.contains(&fresh_name))
+        .collect();
+    out.push(format!("updated skill '{name}'"));
+    Ok(out)
+}
+
+/// Put `fresh` where `installed` is, keeping `installed` intact if any step
+/// fails. `aside` is a free name on the same volume.
+fn swap_in(fresh: &Path, installed: &Path, aside: &Path) -> Result<()> {
+    std::fs::rename(installed, aside)
+        .map_err(|e| Error::Tool(format!("move {} aside: {e}", installed.display())))?;
+    if let Err(e) = std::fs::rename(fresh, installed) {
+        let _ = std::fs::rename(aside, installed);
+        let _ = std::fs::remove_dir_all(fresh);
+        return Err(Error::Tool(format!("move new copy into place: {e}")));
+    }
+    let _ = std::fs::remove_dir_all(aside);
+    Ok(())
 }
 
 /// Reject skills carrying executable scripts when the active org policy
@@ -856,7 +922,7 @@ fn target_root(project_scope: bool) -> Result<PathBuf> {
     } else {
         let home = crate::util::home_dir()
             .ok_or_else(|| Error::Tool("cannot locate user home directory".into()))?;
-        Ok(home.join(".config/thclaws/skills"))
+        Ok(home.join(format!(".config/{}/skills", crate::profile::app_dir_name())))
     }
 }
 
@@ -870,12 +936,15 @@ pub(crate) async fn download_zip(url: &str) -> Result<Vec<u8>> {
     // marketplace fetch uses a similar 10s cap; zip installs may pull
     // larger payloads so we allow a touch more headroom.
     let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .redirect(crate::policy::allowlist::install_redirect_policy())
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| Error::Tool(format!("http client: {e}")))?;
-    let resp = client
-        .get(url)
+    let mut req = client.get(url);
+    if let Some(token) = crate::marketplace::auth_token_for(url) {
+        req = req.bearer_auth(token);
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| Error::Tool(format!("download: {e}")))?;
@@ -987,7 +1056,7 @@ pub fn install_from_git(
     } else {
         crate::util::home_dir()
             .ok_or_else(|| Error::Tool("cannot locate user home directory".into()))?
-            .join(".config/thclaws/skills")
+            .join(format!(".config/{}/skills", crate::profile::app_dir_name()))
     };
     std::fs::create_dir_all(&target_root)
         .map_err(|e| Error::Tool(format!("mkdir {}: {e}", target_root.display())))?;
@@ -1442,7 +1511,6 @@ impl SkillTool {
         &self,
         name: &str,
         description: &str,
-        model_spec: Option<&SkillModelSpec>,
         body: &str,
         input: &Value,
     ) -> Option<Result<String>> {
@@ -1453,15 +1521,10 @@ impl SkillTool {
         // Upgrade the Weak factory; absent (tests, HTTP surface) ⇒ inline.
         let factory = self.factory.get()?.upgrade()?;
 
-        // Pin the skill's recommended model only if the frontmatter names
-        // one — the factory's `subagent_model` further guards against a
-        // cross-provider pin misrouting.
-        let model = model_spec.and_then(|m| m.candidates().first().cloned());
         let agent_def = crate::agent_defs::AgentDef {
             name: format!("skill:{name}"),
             description: description.to_string(),
             instructions: format!("{body}{ISOLATED_SKILL_RETURN_CONTRACT}"),
-            model,
             ..Default::default()
         };
 
@@ -1575,7 +1638,7 @@ impl Tool for SkillTool {
         // Extract everything we need from the store, then drop the lock:
         // a std Mutex guard is not `Send` and can't be held across the
         // `.await` of an isolated skill's sub-agent run below.
-        let (isolated, body, dir, model_spec, tool_gate, description) = {
+        let (isolated, body, dir, tool_gate, description) = {
             let store = self.store.lock().unwrap();
             let skill = store.get(name).ok_or_else(|| {
                 let available = store.names().join(", ");
@@ -1596,7 +1659,6 @@ impl Tool for SkillTool {
                 skill.isolated,
                 skill.content().into_owned(),
                 skill.dir.clone(),
-                skill.model.clone(),
                 skill.tool_gate.clone(),
                 skill.description.clone(),
             )
@@ -1609,7 +1671,7 @@ impl Tool for SkillTool {
         // on this surface, or the recursion cap).
         if isolated {
             if let Some(res) = self
-                .try_run_isolated(name, &description, model_spec.as_ref(), &body, &input)
+                .try_run_isolated(name, &description, &body, &input)
                 .await
             {
                 return res;
@@ -1635,36 +1697,6 @@ impl Tool for SkillTool {
             result.push_str(&format!(
                 "\n\n_(The `{gate}` tools are now available for this session.)_\n"
             ));
-        }
-
-        // Resolve the effective model recommendation. settings.json
-        // may carry a per-skill override (e.g.
-        // `extract_save_skill_models: "claude-sonnet-4-6"`) that takes
-        // precedence over the embedded SKILL.md frontmatter `model:`
-        // field — lets users tune the recommended model without
-        // forking the whole skill body. Falls through to the
-        // frontmatter spec when no override is set.
-        let effective_spec =
-            crate::skills_state::skill_override(name).or_else(|| model_spec.clone());
-
-        // If a recommendation exists (from override OR frontmatter),
-        // ask the worker's resolver to apply it. The resolver writes
-        // into the agent's `model_override` slot so the very next
-        // provider.stream call uses the recommended model. Append a
-        // one-line note to the body so the model knows what
-        // happened (and can mention it to the user if relevant).
-        if let Some(spec) = effective_spec.as_ref() {
-            let outcome = crate::skills_state::request_model(spec);
-            let note = match outcome {
-                crate::skills_state::SkillModelOutcome::Switched(picked) => format!(
-                    "\n\n_(Note: this skill recommends `{picked}`; the active model has been switched for this turn — your previous model returns when the turn ends.)_\n"
-                ),
-                crate::skills_state::SkillModelOutcome::KeptCurrent { recommended } => format!(
-                    "\n\n_(Note: this skill works best with `{recommended}` (vision / long-context). You don't have an API key for that provider — proceeding with your current model. Add the relevant key in Settings if results look poor.)_\n"
-                ),
-                crate::skills_state::SkillModelOutcome::NoResolver => String::new(),
-            };
-            result.push_str(&note);
         }
 
         Ok(result)
@@ -1938,6 +1970,42 @@ impl Tool for SkillSearchTool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn swap_in_replaces_and_keeps_the_old_copy_on_failure() {
+        let t = tempfile::tempdir().unwrap();
+        let installed = t.path().join("s");
+        let fresh = t.path().join(".fresh");
+        let aside = t.path().join(".old");
+        std::fs::create_dir_all(&installed).unwrap();
+        std::fs::write(installed.join("SKILL.md"), "v1").unwrap();
+        std::fs::create_dir_all(&fresh).unwrap();
+        std::fs::write(fresh.join("SKILL.md"), "v2").unwrap();
+        swap_in(&fresh, &installed, &aside).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(installed.join("SKILL.md")).unwrap(),
+            "v2"
+        );
+        assert!(!fresh.exists() && !aside.exists());
+
+        // The new copy is missing: the installed one must survive untouched.
+        assert!(swap_in(&fresh, &installed, &aside).is_err());
+        assert_eq!(
+            std::fs::read_to_string(installed.join("SKILL.md")).unwrap(),
+            "v2"
+        );
+        assert!(!aside.exists());
+    }
+
+    #[tokio::test]
+    async fn update_refuses_a_path_or_url_as_the_name() {
+        for bad in ["https://x/y.zip", "../etc", ".hidden", ""] {
+            let e = update_from_url("https://x/y.zip", bad, true)
+                .await
+                .unwrap_err();
+            assert!(e.to_string().contains("not a skill name"), "{bad}: {e}");
+        }
+    }
+
     use super::*;
     use tempfile::tempdir;
 
@@ -2203,11 +2271,10 @@ mod tests {
             .expect("extract-and-save should be seeded as a built-in");
         assert_eq!(skill.name, "extract-and-save");
         assert!(!skill.description.is_empty());
-        // Carries the model recommendation set in the frontmatter.
-        assert!(matches!(
-            skill.model,
-            Some(SkillModelSpec::Single(_)) | Some(SkillModelSpec::Priority(_))
-        ));
+        assert!(
+            skill.model.is_none(),
+            "built-in skills run on the user's model"
+        );
         // Body is materialized eagerly (no on-disk file to lazy-load).
         assert!(matches!(skill.content, SkillContent::Eager(_)));
         // Body content is non-empty and recognizable.
